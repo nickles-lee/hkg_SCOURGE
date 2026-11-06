@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=Battery preconditioning daemon (Ioniq 5 Gen5W)
+# Dbuslaunch.service writes the session-bus address the Home/Star monitor
+# needs, so start after it when both are in the boot transaction.
+After=multi-user.target Dbuslaunch.service
+ConditionPathExists=/rw_data/battery/battery_daemon
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c 'exec /rw_data/battery/battery_daemon --iface can0 --port 8088 --status-file /rw_data/battery/status.json >> /rw_data/battery/daemon.log 2>&1'
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

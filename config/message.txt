@@ -1,0 +1,4 @@
+Good news everyone! We're rooted!
+run_stuff.sh will auto-execute from the USB drive.
+Signature checks in the updater are disabled for easy custom firmware installation.
+No warranties provided. Have fun

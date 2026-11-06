@@ -1,0 +1,26 @@
+# wifi.txt — place this at the ROOT of the USB stick, then press
+# "Import USB" in the WiFi app.
+#
+# Client (station) network:
+ssid=MyHomeWiFi
+psk=MyHomePassword
+
+# Wireless CarPlay access point.  If omitted, the app generates/uses
+# IONIQ5-CarPlay and a random key.
+carplay_ssid=IONIQ5-CarPlay
+carplay_psk=ChangeMe-CarPlay
+carplay_band=5
+carplay_channel=36
+carplay_hidden=0
+carplay_max_sta=2
+
+# SSH is enabled by the installer.  Set ssh=0 to keep it off.
+ssh=1
+ssh_port=2222
+
+# Optional overrides:
+# carplay_manufacturer=Hyundai
+# carplay_model=Ioniq 5
+# carplay_name=Ioniq 5
+# carplay_id=IONIQ5-260128
+# carplay_btaddr=00:00:00:00:00:00

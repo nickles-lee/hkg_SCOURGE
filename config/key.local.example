@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# config/key.local — the TE2 content key (AES-128) used by the firmware
+# container tools. GITIGNORED: never commit this file.
+#
+# How to get the key:
+#   1. Recommended: scripts/00_fetch_third_party.sh extracts it from the
+#      public upstream tooling (galaxy4public/hkmcavn-tools -> xcrypt/xcrypt.py,
+#      the KEY constant) and writes it here automatically.
+#   2. Manually: copy the 32-char hex string onto the first line of this file.
+#   3. Or: export TE2_CONTENT_KEY=<32 hex chars> instead of using this file.
+#
+# This is the OEM firmware content-encryption key. It is NOT distributed with
+# this repository; the device owner recovers it from the public community
+# tooling that documents the container format.
+
+00000000000000000000000000000000

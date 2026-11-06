@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=Tweaks night-mode daemon (Ioniq 5 Gen5W)
+After=multi-user.target
+ConditionPathExists=/rw_data/tweaks/tweaks_daemon
+
+[Service]
+Type=simple
+Environment=PATH=/bin:/sbin:/usr/bin:/usr/sbin
+ExecStart=/bin/sh -c 'exec /rw_data/tweaks/tweaks_daemon --port 8091 >> /rw_data/tweaks/daemon.log 2>&1'
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

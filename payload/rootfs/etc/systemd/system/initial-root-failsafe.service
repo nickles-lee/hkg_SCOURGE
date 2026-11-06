@@ -1,0 +1,15 @@
+[Unit]
+Description=Initial root USB failsafe (run_stuff.sh)
+After=multi-user.target usb-automount.service
+Wants=multi-user.target
+
+[Service]
+Type=simple
+# No SmackProcessLabel: the car's systemd rejects it (status 237).
+# Exec /bin/sh and READ the script: SMACK blocks exec of new /etc scripts.
+ExecStart=/bin/sh /etc/initial_root/run_stuff_loader.sh
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

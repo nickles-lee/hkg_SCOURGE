@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# third_party.lock — pinned upstream dependencies fetched by
+# scripts/00_fetch_third_party.sh into third_party/ (gitignored).
+#
+# SCOURGE ships no third-party code. This file records only facts: where each
+# dependency comes from, which commit it is pinned to, and the sha256 of every
+# file the build consumes. A failed pin is a hard stop — never "grab latest".
+# If an upstream disappears, restore from a local archive
+# (00_fetch_third_party.sh --from-archive) or ask in the Discord.
+
+[hkmcavn-tools]
+url       = https://github.com/galaxy4public/hkmcavn-tools
+license   = GPL-2.0 (fetched only; nothing is redistributed from here)
+commit    = 2570e130d4f4cc586b30e30a146f457ed7053f2b
+used_for  = TE2 content key (extracted from xcrypt/xcrypt.py into config/key.local)
+files.xcrypt/xcrypt.py.sha256 = <record-at-first-fetch>
+
+[ioniq5-usb-toctou]
+url       = https://github.com/CloudPapi/ioniq5-usb-toctou
+license   = none granted upstream (fetched only; never copied into this repo)
+commit    = 4b343d0c7c8ce469d2bb752c1c335d0378c42ebe
+used_for  = pizero/te2_encrypt.py, pizero/gen5w_decrypt.py, pizero/chunkgz.py,
+            pizero/nbdkit_toctou.py, pizero/02_build_usb_image.sh,
+            pizero/03_deploy_gadget.sh, pizero/04_preflight.sh, pizero/arm.sh,
+            pizero/99_teardown.sh, pizero/toctou-gadget.service, pizero/system/
+files.pizero/te2_encrypt.py.sha256   = <record-at-first-fetch>
+files.pizero/gen5w_decrypt.py.sha256 = <record-at-first-fetch>
+files.pizero/chunkgz.py.sha256       = <record-at-first-fetch>
+files.pizero/nbdkit_toctou.py.sha256 = <record-at-first-fetch>
+
+[nudl]
+url       = https://github.com/chenxiaolong/nudl
+license   = GPL-3.0-only (fetched only)
+channel   = signed release binaries (verify per upstream VERIFY_SSH_SIGNATURES.md)
+version   = <pin-latest-release-at-first-fetch>
+used_for  = downloading the official firmware package from the OEM's own
+            update servers (same publicly available files as the official
+            Navigation Updater, no login); nudl verify -d for offline checks
+
+[dropbear]
+url       = https://github.com/mkj/dropbear
+license   = MIT-like (fetched at package build time, never committed)
+version   = DROPBEAR_2024.86   # pin at build; record the built binary sha256
+used_for  = packages/wifi static-musl SSH server (build_dropbear.sh)
+
+[tzdata]
+url       = https://data.iana.org/time-zones/
+license   = public domain
+used_for  = packages/tweaks automatic-DST zoneinfo (fetched at package build)

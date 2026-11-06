@@ -1,0 +1,32 @@
+# --- secrets & local configuration -------------------------------------------
+config/key.local
+config/paths.local.env
+*.key
+*.local
+
+# --- fetched third-party dependencies (pinned, never committed) --------------
+third_party/
+
+# --- firmware inputs & build outputs ------------------------------------------
+# The official firmware package, decrypted plaintexts, and all built artifacts
+# are OEM-derived. They are generated locally and never committed.
+input/
+work/
+out/
+binroot/
+usb.img
+*.te2
+*.tar.gz
+!docs/**/*.tar.gz
+
+# --- python --------------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# --- editors / OS --------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+.DS_Store
