@@ -14,10 +14,11 @@ packages under active development, not finished products.**
 | Tweaks | Cluster + infotainment amber/night-mode fixes (follow the vehicle's blue-light setting, Hyundai's own gamma table) | WIP — almost working |
 | Tweaks | Automatic DST (IANA zone → `APP_SETTING_CLOCK_DAYLIGHTSAVETIME`) | WIP — almost working |
 | Tweaks | Hyundai OTA block (vendor `setOFFlineMode`, keeps USB updates) | WIP — off by default |
-| Battery | Tile + full-screen overlay (temp, SoC, heater state/power) | WIP — almost working; installer retries a failed copy after unlinking the destination (fixes the observed reinstall copy failure) |
-| Battery | Preheat engage (micom `0x0C7`), blocked above 21 °C min-cell-temp | WIP — safety-interlocked |
-| Battery | Dash preheat indicator (synthetic `0x4ED`) | WIP |
-| Battery | Charge door open/close (micom `0x0A2`; Park + no cable gates) | WIP |
+| Battery | Tile + full-screen overlay (temp, SoC, heater state/power) | WIP — almost working; installer retries a failed copy after unlinking the destination and verifies the running daemon matches the payload (`daemon_fresh`; force-restarts a stale one) |
+| Battery | Preheat engage — full WiCAN sequence mimicry: `0x0C7` burst at 40 ms pacing + `0x4E8`/`0x4CC` cluster countdown; blocked at ≥ 21 °C min-cell temp; a no-status start assumes active after the 70 s timeout; exhausted retries end with a cleanup stop burst | WIP — safety-interlocked |
+| Battery | Cluster preheat countdown (WiCAN `0x4E8`+`0x4CC` layout) + standalone "Cluster display test" toggle | WIP — replaces the earlier synthetic `0x4ED` |
+| Battery | Charge door open/close (micom `0x4A2`; Park gate; observed-cable veto, unknown cable advisory) | WIP |
+| Battery | Steering-wheel Home/Star closes the overlay (session-bus monitor → `home_seq`); micom send health + daemon version in the footer | dbus 1.8.20-validated in the VM; pending on-car |
 | WiFi | WLAN client + AP modes on the onboard Broadcom radio; USB detection scans real mount points (no fstype whitelist — the car's exFAT reports as `texfat`, docs/02) | WIP — built on verified firmware components |
 | WiFi | SSH server (static dropbear, `car`/`electric`, port 2222) + `wifi.txt`/`authorized_keys` import from the stick | WIP — prior on-car tests |
 | WiFi | Wireless CarPlay AP (ConnMan tether + CarPlay IE + iAP2/mdns) | Needs on-car iPhone validation |
@@ -30,7 +31,7 @@ Per-package detail: `packages/<pkg>/README.md` + `SPEC.md` + `docs/`.
 | | Battery | WiFi | Tweaks |
 |---|---|---|---|
 | QML | `BatteryTile` + `BatteryPage` overlay (z 2000, y 90/h 630) | `WifiTile` + `WifiPage` (4 tabs) | `TweaksTile` + `TweaksPage`; AppStandbyClock disclaimer patches |
-| Daemon | `battery_daemon` (static; I-CAN `0x2FC`/`0x326`, micom D-Bus commands; HTTP :8088 + `status.json` mirror; `home_seq` watcher for steering-wheel Home/Star) | `wifi_daemon` (static; WLAN/AP state machine; HTTP :8090) | `tweaks_daemon` (static; gamma/projection/DST/OTA; HTTP :8091) + `tweaks_persist` (vendor-dynamic) + `wrandr` wrapper |
+| Daemon | `battery_daemon` (static; I-CAN `0x2FC`/`0x326`, micom D-Bus commands incl. the WiCAN preheat sequence; HTTP :8088 + `status.json` mirror; `home_seq` watcher for steering-wheel Home/Star; version + send-health in `/status`) | `wifi_daemon` (static; WLAN/AP state machine; HTTP :8090) | `tweaks_daemon` (static; gamma/projection/DST/OTA; HTTP :8091) + `tweaks_persist` (vendor-dynamic) + `wrandr` wrapper |
 | Service | `battery-daemon.service` | `wifi-daemon.service` | `tweaks-daemon.service` |
 | Extras | icons (generated) | static `dropbearmulti`, `car` user (UID 0), firewall rule, `wifi.txt`/`authorized_keys` import | IANA tzdata (fetched at build), `zoneinfo` tree |
 

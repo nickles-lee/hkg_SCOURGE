@@ -64,7 +64,7 @@ test ! -f "$SVC"
 echo "restore OK"
 
 echo "== hello coexistence =="
-cp "$HERE/../sideload_app_poc/artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.qml" \
+cp "$HERE/backup/hello/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.qml" \
    "$QML/HomeScreen/QHMI_HomeScreenMain_Advanced.qml"
 run "$USB/run_stuff.sh"
 cat "$USB/run_stuff_result.txt"
@@ -85,7 +85,11 @@ fi
 echo "hello restore OK"
 
 echo "== wifi coexistence =="
-cp "$HERE/../wifi_app/artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.hello_wifi.qml" \
+WIFI_QML="$HERE/../wifi_app/artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.hello_wifi.qml"
+if [ ! -f "$WIFI_QML" ]; then
+    echo "wifi fixture not present (wifi_app QML artifacts not shipped); skipping"
+else
+cp "$WIFI_QML" \
    "$QML/HomeScreen/QHMI_HomeScreenMain_Advanced.qml"
 run "$USB/run_stuff.sh"
 cat "$USB/run_stuff_result.txt"
@@ -108,5 +112,6 @@ if grep -q 'BATTERY_PAYLOAD_260128' "$QML/HomeScreen/QHMI_HomeScreenMain_Advance
     exit 1
 fi
 echo "wifi restore OK"
+fi
 
 echo "ALL INSTALLER TESTS PASSED"

@@ -130,4 +130,4 @@ For the 1180 px content column used by the Battery page:
 > key is a session-bus event (`NotifyRequestHomeScreen` / `custom_key_value`),
 > not a QML key event — tail `dbus-monitor` outside QML; (4) full-screen
 > overlays need a `preventStealing` all-buttons MouseArea shield. See
-> `docs/ui/UI_CONTEXT.md` and `APP_OVERLAY_CHECKLIST.md`.**
+> `/home/nick/ioniq/UI_CONTEXT.md` and `APP_OVERLAY_CHECKLIST.md`.**

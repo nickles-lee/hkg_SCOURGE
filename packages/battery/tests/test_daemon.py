@@ -171,7 +171,14 @@ def main():
         new = [l for l in log[len(before):].splitlines() if "0x00,0xc7,0x08" in l]
         assert len([l for l in new if "0x40,0x03" in l]) >= 3, new
         st = http("/status")
-        assert st["state"] == "idle" and st["message"] == "started", st
+        # WiCAN: without status frames nothing confirms the start, so the
+        # daemon keeps "starting" until the started timeout assumes success.
+        assert st["state"] == "starting", st
+        assert st["ver"], st
+        log = read_log(dbus_log)
+        new = [l for l in log[len(before):].splitlines() if "0x04,0xe8,0x08" in l]
+        assert new, "no cluster display frames during start"
+        print("no-0x2AD start burst + cluster display ok")
         before = read_log(dbus_log)
         r = http("/stop", "POST")
         assert r["ok"] is True, r
@@ -207,7 +214,10 @@ def main():
         assert st["temp_source"] == "0x2FC", st
         print("0x152 fallback priority ok")
 
-        # Min temperature above 21 C blocks preheat.
+        # Min temperature at/above 21 C blocks preheat (WiCAN cutoff).
+        send(s, 0x2FC, [0x0A, 0, 21, 0, 0, 0, 0x90, 0x9D])
+        time.sleep(0.1)
+        expect_409("/start", "temp_high")
         send(s, 0x2FC, [0x0A, 0, 25, 0, 0, 0, 0x90, 0x9D])
         time.sleep(0.1)
         expect_409("/start", "temp_high")
@@ -237,15 +247,21 @@ def main():
         wait_state("active")
         print("state machine ok: preparing -> active")
 
-        # ---- dash via micom 0x4ED ------------------------------------
+        # ---- cluster display via micom 0x4E8 + 0x4CC -----------------
+        # Manual toggle while ACTIVE: unit YD, flag BLUE_1, countdown 70 s.
         before = read_log(dbus_log)
         r = http("/dash/on", "POST")
         assert r["ok"] is True, r
         time.sleep(0.6)
         log = read_log(dbus_log)
-        new = [l for l in log[len(before):].splitlines() if "0x04,0xed,0x08" in l]
-        assert new and "0x10,0xa0" in new[0], new
-        print("dash micom frame ok:", new[0])
+        new = [l for l in log[len(before):].splitlines() if "0x04,0xe8,0x08" in l]
+        # A start-display frame may still be in flight from the PREPARING
+        # phase just before the toggle; the manual line (countdown 70 s,
+        # unit YD, flag BLUE_1) must appear somewhere in the window.
+        assert any("0x04,0x00,0x00,0x00,0x46,0x00,0x01,0x00" in l for l in new), new
+        new = [l for l in log[len(before):].splitlines() if "0x04,0xcc,0x08" in l]
+        assert any("0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00" in l for l in new), new
+        print("cluster display ok:", read_log(dbus_log).splitlines()[-2:])
         http("/dash/off", "POST")
 
         # ---- stop via micom 0x0C7 ------------------------------------
@@ -284,10 +300,14 @@ def main():
         assert r["ok"] is True and r["dash"] is True, r
         time.sleep(1.2)
         log = read_log(dbus_log)
-        new = [l for l in log[len(before):].splitlines() if "0x04,0xed,0x08" in l]
+        new = [l for l in log[len(before):].splitlines() if "0x04,0xe8,0x08" in l]
         assert len(new) >= 2, new
         http("/dash/off", "POST")
-        print("spoofed nav frame sends without preheat ok")
+        time.sleep(0.3)
+        n2 = len([l for l in read_log(dbus_log)[len(log):].splitlines()
+                  if "0x04,0xe8,0x08" in l])
+        assert n2 == 0, "display frames kept flowing after dash/off"
+        print("cluster display sends without preheat ok")
 
         # ---- advisory checks must not block --------------------------
         send(s, 0x2FC, [0x0A, 0, 7, 8, 0, 0, 0x90, 0x18])  # 12%
@@ -457,6 +477,106 @@ def main():
         st = wait_home_field("home_seq", 2)
         assert st["home_source"] == "home", st
         print("home NotifyRequestHomeScreen ok: seq 2")
+
+        # ---- WiCAN sequence on a fast-timing daemon --------------------
+        # Second instance with short retry/timeout pacing.  It opens its own
+        # socket, so it only sees frames sent from now on.
+        PORT2 = 18189
+        def http2(path, method="GET"):
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{PORT2}{path}", method=method)
+            with urllib.request.urlopen(req, timeout=2) as r:
+                return json.loads(r.read().decode())
+
+        def wait_state2(want, timeout=6.0):
+            end = time.time() + timeout
+            st = None
+            while time.time() < end:
+                st = http2("/status")
+                if st["state"] == want:
+                    return st
+                time.sleep(0.05)
+            raise AssertionError(f"daemon2 state {want!r} not reached; last={st}")
+
+        proc2 = subprocess.Popen(
+            [DAEMON, "--iface", IFACE, "--port", str(PORT2),
+             "--status-file", "/tmp/battery_status2.json",
+             "--dbus-send", stub, "--no-session-monitor",
+             "--retry-ms", "300", "--started-timeout-ms", "1500"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        try:
+            for _ in range(40):
+                try:
+                    http2("/health"); break
+                except Exception:
+                    time.sleep(0.05)
+            else:
+                raise AssertionError("fast daemon did not start")
+
+            # No status frames: one burst, then assume ACTIVE after the
+            # started timeout (WiCAN wait_starting_tick).
+            before = read_log(dbus_log)
+            r = http2("/start", "POST")
+            assert r["ok"] is True, r
+            # The burst is paced by the 50 ms poll loop (6 frames) and each
+            # frame's stub child needs time to fork/exec/append: wait for the
+            # burst lines instead of reading the log at a fixed offset.
+            deadline = time.time() + 4.0
+            burst_lines = []
+            while time.time() < deadline:
+                burst_lines = [l for l in read_log(dbus_log)[len(before):].splitlines()
+                               if "0x00,0xc7,0x08" in l]
+                if (len([l for l in burst_lines if "0x40,0x03" in l]) >= 3
+                        and len([l for l in burst_lines if "0xe0,0x07" in l]) >= 3):
+                    break
+                time.sleep(0.1)
+            assert len([l for l in burst_lines if "0x40,0x03" in l]) == 3, burst_lines
+            assert len([l for l in burst_lines if "0xe0,0x07" in l]) == 3, burst_lines
+            # start display: no status -> unit M, flag BLUE_4, countdown 1 s
+            deadline = time.time() + 3.0
+            disp = []
+            while time.time() < deadline:
+                disp = [l for l in read_log(dbus_log)[len(before):].splitlines()
+                        if "0x04,0xe8,0x08" in l]
+                if disp:
+                    break
+                time.sleep(0.1)
+            assert disp and "0x00,0x00,0x00,0x00,0x01,0x00,0x04,0x00" in disp[0], disp
+            st = wait_state2("active", timeout=4.0)
+            assert st["message"] == "active", st
+            print("no-status start assumes active after timeout ok")
+
+            # Status appears (BMS off): start retries 4x, then the WiCAN
+            # cleanup stop burst (one shot, no stop retries) -> "stopped".
+            send(s, 0x2AD, [0, 0x00, 0, 0x40, 0xFF, 0xFF, 0xFF, 0x0F])
+            time.sleep(0.1)
+            http2("/stop", "POST")
+            wait_state2("idle", timeout=4.0)
+            before = read_log(dbus_log)
+            r = http2("/start", "POST")
+            assert r["ok"] is True, r
+            st = wait_state2("idle", timeout=8.0)
+            assert st["message"] == "stopped", st
+            deadline = time.time() + 4.0
+            new = []
+            while time.time() < deadline:
+                new = [l for l in read_log(dbus_log)[len(before):].splitlines()
+                       if "0x00,0xc7,0x08" in l]
+                # 5 start bursts (initial + 4 retries) then one cleanup stop burst
+                if (len([l for l in new if "0x40,0x03" in l]) >= 15
+                        and len([l for l in new
+                                 if "0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00" in l]) >= 3):
+                    break
+                time.sleep(0.1)
+            assert len([l for l in new if "0x40,0x03" in l]) == 15, new
+            assert len([l for l in new if "0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00" in l]) == 3, new
+            print("start retries exhausted -> cleanup stop burst ok")
+        finally:
+            proc2.terminate()
+            try:
+                proc2.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc2.kill()
 
         # ---- bus sniffer --------------------------------------------
         proc = subprocess.Popen(

@@ -24,10 +24,9 @@ through `com.lge.car.micom` `/Can` `SetCANMicomRecv`.
 2. Show battery temperature, exterior temperature, SoC, heater state, and the
    factory conditioning-mode status.
 3. Provide a manual preconditioning start/stop toggle.
-4. Provide an independent "Include spoofed nav frame" toggle that emits a
-   synthetic `0x4ED` nav-precondition frame, usable whether or not preheat
-   is running (experimental: tests whether the BMS needs a navigation
-   source to accept a preheat start).
+4. Fully mimic the WiCAN start/stop sequences: the `0x0C7` burst at 40 ms
+   pacing plus the `0x4E8`/`0x4CC` cluster countdown display, with a manual
+   "Cluster display test" toggle usable whether or not preheat is running.
 5. Show advisory conditions (not READY, utility mode, SoC < 20 %) without
    falsely blocking the BMS, and block preheat when the minimum battery
    temperature is above 21 °C.
@@ -67,7 +66,8 @@ START 0x0C7:  00 C7 08 00 00 00 40 03 00 00 00   x3
 STOP  0x0C7:  00 C7 08 00 00 00 00 00 00 00 00   x3
               00 C7 08 00 00 00 E0 07 00 00 00   x3
 
-DASH  0x4ED:  04 ED 08 00 00 00 00 00 10 A0 00   (5 Hz)
+CLUSTER 0x4E8: 04 E8 08 <tenths|unit> 00 00 00 <dist lo> <dist hi> <flag> 00  (100 ms)
+       0x4CC: 04 CC 08 02 00 00 00 00 00 00 00                        (with every 0x4E8)
 
 DOOR  0x4A2:  04 A2 08 FF FF FF DF FF FF FF FF   (open)
               04 A2 08 FF FF FF EF FF FF FF FF   (close)
@@ -136,16 +136,30 @@ While the QML keeps a preheat request active and the heater has not engaged, it
 re-posts `/start` every 10 s (up to 4 times) to re-nudge the BMS. This mirrors
 the WiCAN firmware's retry behavior.
 
-### 5.3 Spoofed nav frame / dash overlay
+### 5.3 Cluster display (full WiCAN mimicry)
 
-`0x4ED` is sent at 5 Hz while the "Include spoofed nav frame" toggle is on.
-The toggle is **independent of preheat state** (experimental): it can be
-enabled before a preheat start so the nav-precondition status is already
-present when the `0x0C7` burst arrives, and it can be tested alone to see
-whether the cluster shows the precondition icon. The daemon keeps a
-`dash_override` so the frames are not cancelled when its local `0x2AD`
-state is idle, and backs off for 3 s whenever the factory navigation sends
-its own `0x4ED`.
+The start/stop sequences replicate the WiCAN `i-precondition` firmware
+exactly:
+
+- `0x0C7` burst: 3x start (`00 00 00 40 03 00 00 00`) then 3x commit
+  (`00 00 00 E0 07 00 00 00`), one frame every **40 ms** (the WiCAN sm tick).
+- While a start is in flight (`starting`/`preparing`), the daemon injects a
+  `0x4E8` countdown (seconds remaining of the 70 s started timeout, retry
+  count in the tenths digit, unit YD/KM/M, flag DESTINATION/BLUE_1/BLUE_4)
+  plus `0x4CC` (`data[0]=0x02`) every 100 ms. The display stops once the
+  BMS reports started (`0x15`), exactly like the WiCAN.
+- While a stop is in flight and the BMS state is visible, it injects the
+  stop countdown (seconds to the next retry, unit FT/MI, flag NONE), hidden
+  at max retries.
+- Without any `0x2AD` status on the bus, one burst is sent and after the
+  started timeout the daemon **assumes active** (WiCAN `wait_starting_tick`).
+- Start retries exhausted -> one cleanup stop burst without stop retries,
+  then idle (WiCAN "retries exhausted in once mode").
+- The manual "Cluster display test" toggle sends the same `0x4E8`+`0x4CC`
+  frames standalone (independent of preheat), so the display can be tested
+  without a preheat attempt.
+- The factory streaming its own `0x4E8` (detected on can0) backs ours off
+  for 3 s.
 
 ### 5.4 Charge door
 
@@ -209,11 +223,33 @@ POST /chargedoor/toggle[?park=1]
 `eta_s`, `message`, `park`, `park_known`, `gear`, `cable`, `cable_known`,
 `charging`, `door_state`, `door_state_name`, `door_known`, `door_source`,
 `door_warn`, `door_opt`, `door_busy`, `door_allowed`, `door_block_reason`,
-`door_message`, `home_seq`, `home_source`, `last_app_key`, `home_monitor`.
+`door_message`, `home_seq`, `home_source`, `last_app_key`, `home_monitor`,
+`ver`, `send_ok`, `send_fail`, `last_send`.
 
 The daemon also mirrors the JSON to `/rw_data/battery/status.json` every second.
 
-### 5.6 Session-bus Home/Star monitor
+### 5.6 Send-health semantics (VM-validated on the firmware's dbus 1.8.20)
+
+`send_ok`/`send_fail` count the exit status of each `dbus-send` child. The
+firmware's dbus-send 1.8 **without `--print-reply` exits 0 as soon as the
+message is queued**, even when the destination service is absent — so
+`send_ok` means "accepted by the bus", not "handled by micom". This matches
+the factory's fire-and-forget pattern (TmsRemoteApp also sends without
+waiting); if the micom service itself is down the head unit is broken well
+beyond this app. The daemon never uses `--address` with dbus-send (only
+`--system`, which every version supports); `--address` is only used for
+`dbus-monitor`, which dbus 1.8 supports.
+
+The exact two-rule monitor invocation was validated in the 260128 VM against
+the firmware's own dbus-daemon/dbus-monitor/dbus-send 1.8.20: the Star
+signal (`member=custom_key_value` + `   int32 7`) and a routed Home method
+call (`member=NotifyRequestHomeScreen`) both appear in the monitor output in
+the format the daemon parses. Note dbus 1.8 eavesdropping only sees messages
+the bus actually routes, so the Home request is visible exactly when
+AppHomeScreen (the destination) is running — which is also the only time the
+overlay exists to close.
+
+### 5.7 Session-bus Home/Star monitor
 
 The steering-wheel Home/Star key never reaches QML as a key event. The app
 manager delivers it over the session bus whose address `Dbuslaunch.sh` writes
@@ -232,7 +268,7 @@ members and bumps `home_seq` (`home_source` = `home` or `star`, plus
 stripped so the monitor reconnects after a bus restart. Options:
 `--session-bus-file PATH`, `--dbus-monitor PATH`, `--no-session-monitor`.
 
-### 5.7 Bus sniffer
+### 5.8 Bus sniffer
 
 `battery_daemon --sniff [seconds]` opens `can0` without a filter and prints the
 IDs seen, frame counts, and last payloads. Use it to confirm which bus the head
@@ -244,7 +280,7 @@ unit exposes.
 
 The top **90 px** are the system status bar. The Battery overlay starts at
 `y: ConstantModel.MENU_BAR_Y` and is `DEVICE_HEIGHT - ConstantModel.MENU_BAR_Y`
-(630 px) high. See `docs/ui/UI_CONTEXT.md` (in the SCOURGE repo).
+(630 px) high. See `/home/nick/ioniq/UI_CONTEXT.md`.
 
 ### 6.2 Tile + overlay
 
@@ -331,7 +367,7 @@ Environment overrides used by the offline test:
 
 | Test | Result |
 |---|---|
-| `tests/test_daemon.py` on `vcan0` | pass (0x2FC temp, micom 0x0C7/0x4ED/0x4A2, door gates, optimistic feedback, door send-fail not masked by dash frames, BMS 0x00 stop exit, spoofed nav frame without preheat, unknown-cable door, session-bus Home/Star monitor, sniff) |
+| `tests/test_daemon.py` on `vcan0` | pass (0x2FC temp, micom 0x0C7 at 40 ms, 0x4E8/0x4CC cluster display, assume-active, cleanup stop burst, door gates, optimistic feedback, door send-fail not masked by dash frames, BMS 0x00 stop exit, cluster display without preheat, unknown-cable door, session-bus Home/Star monitor, sniff) |
 | `tests/test_installer.sh` | pass (install, reinstall, restore, Hello, restore-after-Hello) |
 | `qmllint` (vendor Qt 5.4, 260128 VM) | pass for all five QML files |
 | daemon `--help` on vendor 4.1.27 kernel | pass |

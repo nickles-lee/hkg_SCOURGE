@@ -9,18 +9,21 @@
  * actually see and sends M-CAN commands through the micom D-Bus service.
  *
  * I-CAN (can0):
- *   0x2FC  RX  SoC byte7/2, battery min/max C in bytes 2/3 (signed)
+ *   0x2FC  RX  SoC byte7/2, battery min temp in byte 2 (signed)
  *   0x326  RX  charge connector, (byte3 >> 2) & 3 != 0 or (byte4 & 3) != 0
  *
- * M-CAN (via com.lge.car.micom /Can SetCANMicomRecv):
- *   0x0C7  TX  BMU control (start/stop)
- *   0x4ED  TX  navigation precondition status (distance + flag)
+ * M-CAN (via com.lge.car.micom /Can SetCANMicomRecv), sequence fully mimics
+ * the WiCAN "i-precondition" firmware (L1Z3/wicant-i-precondition):
+ *   0x0C7  TX  BMU control start/stop burst (3+3 frames, 40 ms apart)
+ *   0x4E8  TX  cluster distance/flag countdown display (WiCAN layout)
+ *   0x4CC  TX  cluster icon request, data[0] = 0x02
  *   0x4A2  TX  charge door open/close
  *
  * M-CAN receive frames (0x036 gear, 0x038 READY, 0x152 temperature, 0x2AD
- * precondition state, 0x2AE utility, 0x3AA charge door) are not visible on
- * can0.  The QML page reads those from AppPHEVModel / AppNModeModel instead.
- * The daemon still decodes them if they appear (bench tests, other variants).
+ * precondition state, 0x2AE utility, 0x3AA charge door) are not always
+ * visible on can0.  The QML page reads those from AppPHEVModel /
+ * AppNModeModel instead.  The daemon still decodes them if they appear
+ * (bench tests, other variants).
  *
  * This is research tooling for a rooted head unit.  It does not flash
  * firmware and does not touch the updater or bootloader.
@@ -48,12 +51,15 @@
 #include <time.h>
 #include <unistd.h>
 
+#define BATTERY_DAEMON_VERSION "2026-11-07.1"
+
 #define IFACE_DEFAULT "can0"
 #define HTTP_PORT 8088
 #define STATUS_PATH "/rw_data/battery/status.json"
 
 #define ID_BMU 0x0C7
-#define ID_NAV 0x4ED
+#define ID_CLUSTER 0x4E8        /* cluster distance/flag display */
+#define ID_CLUSTER_ICON 0x4CC   /* cluster icon request, data[0] = 0x02 */
 #define ID_BATT_TEMP 0x152
 #define ID_SOC 0x2FC
 #define ID_PRECOND 0x2AD
@@ -62,6 +68,22 @@
 #define ID_GEAR 0x036
 #define ID_CHARGE 0x326
 #define ID_CHARGEDOOR 0x3AA
+
+/* WiCAN cluster display encoding for 0x4E8:
+ *   data[0] = (distance_tenths & 0xF) << 4 | (unit & 0xF)
+ *   data[4] = distance_int & 0xFF
+ *   data[5] = (distance_int >> 8) & 0xFF
+ *   data[6] = flag & 0xF
+ * units: 0 m, 1 km, 2 mi, 3 ft, 4 yd; flags: 0 destination, 1..4 blue, F none */
+#define DIST_UNIT_M 0x0
+#define DIST_UNIT_KM 0x1
+#define DIST_UNIT_MI 0x2
+#define DIST_UNIT_FT 0x3
+#define DIST_UNIT_YD 0x4
+#define FLAG_DESTINATION 0x0
+#define FLAG_BLUE_1 0x1
+#define FLAG_BLUE_4 0x4
+#define FLAG_NONE 0xF
 
 #define DOOR_CMD_OPEN 0xDF
 #define DOOR_CMD_CLOSE 0xEF
@@ -81,13 +103,12 @@
 #define STOP_PHASE1 3
 #define STOP_PHASE2 3
 #define BURST_TICKS (START_PHASE1 + START_PHASE2)
-#define BURST_INTERVAL_MS 100
+#define BURST_INTERVAL_MS 40          /* WiCAN: one frame per 40 ms tick */
 #define START_RETRY_MS 10000
-#define STARTED_TIMEOUT_MS 70000
+#define STARTED_TIMEOUT_MS 70000      /* WiCAN started timeout (Ioniq 5) */
 #define STOP_RETRY_MS 10000
 #define MAX_RETRIES 4
-#define DASH_INTERVAL_MS 500
-#define DASH_DISTANCE_M 40976u /* 0xA010, same value the WiCAN firmware uses */
+#define DISPLAY_INTERVAL_MS 100       /* cluster display injection period */
 #define VEHICLE_IDLE_DEBOUNCE_MS 2000
 #define TEMP_STALE_MS 15000
 #define SOC_STALE_MS 15000
@@ -132,9 +153,28 @@ static bool g_utility = false;
 static bool g_factory_nav = false;
 static int64_t g_factory_nav_ms = 0;
 
-static bool g_dash_requested = false;
+/* Manual "cluster display test" toggle (independent of preheat). */
 static bool g_dash_override = false;
-static int64_t g_dash_next_ms = 0;
+static int64_t g_display_next_ms = 0;
+
+/* Cleanup stop: start retries exhausted -> one stop burst, no stop retries
+ * (the WiCAN "retries exhausted in once mode" path). */
+static bool g_stop_cleanup = false;
+
+/* Cluster display state (WiCAN mimicry). */
+static uint8_t g_display_last[8];   /* our last 0x4E8 payload */
+
+/* Test seams for the retry/timeout pacing (bench tests only). */
+static int64_t g_started_timeout_ms = STARTED_TIMEOUT_MS;
+static int64_t g_start_retry_ms = START_RETRY_MS;
+static int64_t g_stop_retry_ms = STOP_RETRY_MS;
+
+/* micom send health: every dbus-send child is reaped; non-zero exits are
+ * logged and counted so the UI can tell a failed send from a sent frame. */
+static volatile int g_send_oks = 0;
+static volatile int g_send_fails = 0;
+static char g_last_send_cmd[20] = "";
+static volatile int g_last_send_status = -1;
 
 /* Charge door state (0x036 park, 0x326 cable, 0x3AA door). */
 static int g_gear = -1;
@@ -254,7 +294,7 @@ static int can_open(const char *iface, bool filtered)
     filter[2].can_id = ID_PRECOND;   filter[2].can_mask = CAN_SFF_MASK;
     filter[3].can_id = ID_POWER;     filter[3].can_mask = CAN_SFF_MASK;
     filter[4].can_id = ID_UTIL;      filter[4].can_mask = CAN_SFF_MASK;
-    filter[5].can_id = ID_NAV;       filter[5].can_mask = CAN_SFF_MASK;
+    filter[5].can_id = ID_CLUSTER;  filter[5].can_mask = CAN_SFF_MASK;
     filter[6].can_id = ID_GEAR;      filter[6].can_mask = CAN_SFF_MASK;
     filter[7].can_id = ID_CHARGE;    filter[7].can_mask = CAN_SFF_MASK;
     filter[8].can_id = ID_CHARGEDOOR;filter[8].can_mask = CAN_SFF_MASK;
@@ -290,7 +330,9 @@ static int send_micom_frame(uint16_t can_id, const uint8_t data[8])
              "%03X %02X %02X %02X %02X %02X %02X %02X %02X",
              can_id, data[0], data[1], data[2], data[3],
              data[4], data[5], data[6], data[7]);
-    if (can_id != ID_NAV) {
+    snprintf(g_last_send_cmd, sizeof(g_last_send_cmd), "%03X",
+             can_id);
+    if (can_id != ID_CLUSTER && can_id != ID_CLUSTER_ICON) {
         fprintf(stderr, "battery_daemon: tx %s\n", g_last_tx);
         fflush(stderr);
     }
@@ -315,13 +357,21 @@ static void send_bmu(uint8_t b3, uint8_t b4)
     }
 }
 
-static void send_dash(uint16_t distance_m)
+/* WiCAN cluster countdown display: one 0x4E8 (distance/flag) plus one
+ * 0x4CC (icon request, data[0] = 0x02). */
+static void send_cluster_display(uint16_t distance_int, uint8_t tenths,
+                                 uint8_t unit, uint8_t flag)
 {
-    uint8_t d[8] = {0, 0, 0, 0, 0,
-                    (uint8_t)(distance_m & 0xFF),
-                    (uint8_t)(distance_m >> 8),
-                    0x00};
-    send_micom_frame(ID_NAV, d);
+    uint8_t d[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    d[0] = (uint8_t)(((tenths & 0x0F) << 4) | (unit & 0x0F));
+    d[4] = (uint8_t)(distance_int & 0xFF);
+    d[5] = (uint8_t)((distance_int >> 8) & 0xFF);
+    d[6] = (uint8_t)(flag & 0x0F);
+    memcpy(g_display_last, d, 8);
+    send_micom_frame(ID_CLUSTER, d);
+
+    uint8_t c[8] = {0x02, 0, 0, 0, 0, 0, 0, 0};
+    send_micom_frame(ID_CLUSTER_ICON, c);
 }
 
 /* ---------------- charge door ---------------- */
@@ -396,8 +446,23 @@ static void reap_children(void)
         if (p == g_door_send_pid) {
             g_door_dbus_status = st;
             g_door_send_pid = -1;
+            if (st == 0) g_send_oks++;
+            else g_send_fails++;
+            g_last_send_status = st;
+            continue;
         }
-        /* Other children (burst/dash sends) are fire-and-forget. */
+        /* Other children (burst/cluster-display sends): fire-and-forget,
+         * but count failures so the UI can tell a failed dbus-send from a
+         * frame that actually went out. */
+        g_last_send_status = st;
+        if (st == 0) {
+            g_send_oks++;
+        } else {
+            g_send_fails++;
+            fprintf(stderr, "battery_daemon: send failed (%s): exit %d\n",
+                    g_last_send_cmd, st);
+            fflush(stderr);
+        }
     }
 }
 
@@ -643,12 +708,12 @@ static bool precond_active(void)
 static const char *blocked_reason(void)
 {
     /* The BMS / factory setting is the authority for READY, SoC and utility.
-     * The one local rule we keep is the user-requested temperature cutoff:
-     * do not start preheating when the minimum battery temperature is above
+     * The one local rule we keep is the WiCAN temperature cutoff: do not
+     * start preheating when the minimum battery temperature is at or above
      * 21 C. */
     if (g_state == ST_STOPPING) return "stopping";
     if (g_batt_valid && now_ms() - g_batt_ms <= TEMP_STALE_MS &&
-        g_batt_min_c > TEMP_CUTOFF_C)
+        g_batt_min_c >= TEMP_CUTOFF_C)
         return "temp_high";
     return "";
 }
@@ -658,7 +723,6 @@ static void enter_idle(const char *msg)
     g_state = ST_IDLE;
     g_burst = BURST_NONE;
     g_retries = 0;
-    if (!g_dash_override) g_dash_requested = false;
     set_message(msg);
 }
 
@@ -678,7 +742,6 @@ static void stop_burst(void)
     g_burst_next_ms = now_ms();
     g_attempt_ms = now_ms();
     g_state = ST_STOPPING;
-    if (!g_dash_override) g_dash_requested = false;
 }
 
 static int request_start(void)
@@ -711,6 +774,7 @@ static int request_stop(void)
     /* Always send the stop burst.  The local 0x2AD state is M-CAN and may be
      * invisible on this bus; the BMS ignores a stop if it is already idle. */
     g_retries = 0;
+    g_stop_cleanup = false;
     stop_burst();
     set_message("stopping");
     fprintf(stderr, "battery_daemon: stop request\n");
@@ -759,42 +823,54 @@ static void tick_state(int64_t now)
     }
 
     if (g_state == ST_STARTING) {
-        if (!g_precond_known && g_burst == BURST_NONE) {
-            /* No BMS state on this bus: the burst was sent; let the QML's
-             * optimistic request state carry the UI. */
-            enter_idle("started");
+        if (!g_precond_known) {
+            /* WiCAN: without status frames there is nothing to confirm or
+             * retry; after the started timeout, assume it worked. */
+            if (g_burst == BURST_NONE &&
+                now - g_attempt_ms > g_started_timeout_ms) {
+                g_state = ST_ACTIVE;
+                set_message("active");
+            }
         } else if (g_precond_raw == 0x05) {
             g_state = ST_PREPARING;
             set_message("preparing");
         } else if (g_precond_raw == 0x15) {
             g_state = ST_ACTIVE;
             set_message("active");
-        } else if (g_burst == BURST_NONE && now - g_attempt_ms > START_RETRY_MS) {
+        } else if (g_burst == BURST_NONE &&
+                   now - g_attempt_ms > g_start_retry_ms) {
             if (g_retries < MAX_RETRIES) {
                 g_retries++;
                 start_burst();
                 set_message("retrying");
             } else {
-                g_state = ST_TIMEOUT;
-                if (!g_dash_override) g_dash_requested = false;
-                set_message("timeout");
+                /* WiCAN: retries exhausted in once mode -> send one stop
+                 * request without retrying it, then go idle. */
+                g_retries = MAX_RETRIES;
+                g_stop_cleanup = true;
+                stop_burst();
+                set_message("stopping");
             }
         }
     } else if (g_state == ST_PREPARING) {
         if (g_precond_raw == 0x15) {
             g_state = ST_ACTIVE;
             set_message("active");
-        } else if (now - g_attempt_ms > STARTED_TIMEOUT_MS) {
-            /* Keep waiting: the BMS can take ~70 s. Only report a timeout
-             * once the state has been preparing for well past that. */
-            if (now - g_attempt_ms > STARTED_TIMEOUT_MS + 30000) {
-                g_state = ST_TIMEOUT;
-                if (!g_dash_override) g_dash_requested = false;
-                set_message("timeout");
+        } else if (now - g_attempt_ms > g_started_timeout_ms) {
+            if (g_retries < MAX_RETRIES) {
+                g_retries++;
+                start_burst();
+                set_message("retrying");
+            } else {
+                g_retries = MAX_RETRIES;
+                g_stop_cleanup = true;
+                stop_burst();
+                set_message("stopping");
             }
         }
     } else if (g_state == ST_ACTIVE) {
-        if (g_precond_raw == 0x01) {
+        if (g_precond_known &&
+            (g_precond_raw == 0x00 || g_precond_raw == 0x01)) {
             if (g_last_idle_ms == 0) g_last_idle_ms = now;
             if (now - g_last_idle_ms > VEHICLE_IDLE_DEBOUNCE_MS) {
                 enter_idle("stopped_by_vehicle");
@@ -805,11 +881,15 @@ static void tick_state(int64_t now)
     } else if (g_state == ST_STOPPING) {
         /* 0x01 is the documented idle status; 0x00 is this car's "off".
          * Either way the stop has taken effect.  Without any BMS state on
-         * this bus the completed burst itself is the confirmation. */
+         * this bus the completed burst itself is the confirmation.  A
+         * cleanup stop (start retries exhausted) never retries. */
         if (g_burst == BURST_NONE &&
-            (!g_precond_known || g_precond_raw == 0x00 || g_precond_raw == 0x01)) {
-            enter_idle(g_precond_known ? "idle" : "stopped");
-        } else if (g_burst == BURST_NONE && now - g_attempt_ms > STOP_RETRY_MS) {
+            (g_stop_cleanup || !g_precond_known ||
+             g_precond_raw == 0x00 || g_precond_raw == 0x01)) {
+            bool cleanup = g_stop_cleanup;
+            g_stop_cleanup = false;
+            enter_idle((g_precond_known && !cleanup) ? "idle" : "stopped");
+        } else if (g_burst == BURST_NONE && now - g_attempt_ms > g_stop_retry_ms) {
             if (g_retries < MAX_RETRIES) {
                 g_retries++;
                 stop_burst();
@@ -820,22 +900,52 @@ static void tick_state(int64_t now)
         }
     }
 
-    if (!precond_active() && g_state != ST_STARTING && !g_dash_override) {
-        g_dash_requested = false;
-    }
+    /* The cluster display follows the state machine; nothing else to do. */
 }
 
-static void tick_dash(int64_t now)
+static void tick_display(int64_t now)
 {
-    if (!g_dash_requested) return;
-    if (!g_dash_override && !precond_active()) {
-        g_dash_requested = false;
-        return;
-    }
+    if (now < g_display_next_ms) return;
+    g_display_next_ms = now + DISPLAY_INTERVAL_MS;
+
+    /* If the head unit streams its own 0x4E8 (route display), back off. */
     if (g_factory_nav && now - g_factory_nav_ms < 3000) return;
-    if (now < g_dash_next_ms) return;
-    send_dash(DASH_DISTANCE_M);
-    g_dash_next_ms = now + DASH_INTERVAL_MS;
+
+    if (g_state == ST_STARTING || g_state == ST_PREPARING) {
+        /* Start-phase countdown: seconds remaining of the started timeout,
+         * retry count in the tenths digit (WiCAN starting_display_fwd). */
+        int64_t elapsed = now - g_attempt_ms;
+        uint32_t remain = elapsed >= g_started_timeout_ms
+                          ? 0
+                          : (uint32_t)((g_started_timeout_ms - elapsed) / 1000);
+        uint8_t unit, flag;
+        if (g_precond_known) {
+            unit = (g_retries == 0) ? DIST_UNIT_YD : DIST_UNIT_KM;
+            flag = (g_precond_raw == 0x05) ? FLAG_DESTINATION : FLAG_BLUE_1;
+        } else {
+            unit = DIST_UNIT_M;
+            flag = FLAG_BLUE_4;
+        }
+        send_cluster_display((uint16_t)remain, (uint8_t)(g_retries % 10),
+                             unit, flag);
+    } else if (g_state == ST_STOPPING && g_precond_known &&
+               g_retries < MAX_RETRIES) {
+        /* Stop-phase retry countdown (WiCAN stopping_display_fwd). */
+        int64_t elapsed = now - g_attempt_ms;
+        uint32_t remain = elapsed >= g_stop_retry_ms
+                          ? 0
+                          : (uint32_t)((g_stop_retry_ms - elapsed) / 1000);
+        send_cluster_display((uint16_t)remain, (uint8_t)(g_retries % 10),
+                             (g_retries == 0) ? DIST_UNIT_FT : DIST_UNIT_MI,
+                             FLAG_NONE);
+    } else if (g_dash_override) {
+        /* Manual toggle: standalone start-style display, independent of
+         * preheat state. */
+        uint8_t unit = g_precond_known ? DIST_UNIT_YD : DIST_UNIT_M;
+        uint8_t flag = g_precond_known ? FLAG_BLUE_1 : FLAG_BLUE_4;
+        send_cluster_display((uint16_t)(g_started_timeout_ms / 1000), 0,
+                             unit, flag);
+    }
 }
 
 /* ---------------- RX ---------------- */
@@ -909,10 +1019,10 @@ static void handle_frame(const struct can_frame *f)
         g_door_ms = now;
         g_door_assumed = false;
         break;
-    case ID_NAV: {
-        uint16_t dist = (uint16_t)f->data[5] | ((uint16_t)f->data[6] << 8);
-        bool ours = (dist == DASH_DISTANCE_M && f->data[7] == 0x00);
-        if (!ours && dist != 0xFFFF) {
+    case ID_CLUSTER: {
+        /* A factory 0x4E8 that differs from our last display payload means
+         * the head unit is streaming its own cluster data; back off. */
+        if (memcmp(f->data, g_display_last, 8) != 0) {
             g_factory_nav = true;
             g_factory_nav_ms = now;
         }
@@ -985,7 +1095,9 @@ static size_t build_status(char *buf, size_t sz)
         "\"temp_source\":\"%s\","
         "\"soc_pct\":%.1f,\"soc_valid\":%s,"
         "\"ready\":%s,\"utility\":%s,\"blocked\":%s,\"blocked_reason\":\"%s\","
-        "\"dash\":%s,\"dash_allowed\":%s,\"factory_nav\":%s,"
+        "\"dash\":%s,\"factory_nav\":%s,"
+        "\"ver\":\"%s\",\"send_ok\":%d,\"send_fail\":%d,"
+        "\"last_send\":\"%s:%d\","
         "\"retries\":%d,\"eta_s\":%d,\"message\":\"%s\","
         "\"park\":%s,\"park_known\":%s,\"gear\":%d,"
         "\"cable\":%s,\"cable_known\":%s,\"charging\":%s,"
@@ -1003,9 +1115,10 @@ static size_t build_status(char *buf, size_t sz)
         g_soc_raw / 2.0, g_soc_valid ? "true" : "false",
         g_ready ? "true" : "false", g_utility ? "true" : "false",
         blocked ? "true" : "false", blocked_reason(),
-        g_dash_requested ? "true" : "false",
-        (precond_active() || g_dash_override) ? "true" : "false",
+        g_dash_override ? "true" : "false",
         g_factory_nav ? "true" : "false",
+        BATTERY_DAEMON_VERSION, g_send_oks, g_send_fails,
+        g_last_send_cmd, g_last_send_status,
         g_retries, eta, msg,
         (park_fresh && g_park) ? "true" : "false",
         park_fresh ? "true" : "false",
@@ -1092,12 +1205,10 @@ static void http_handle(int fd)
         snprintf(body, sizeof(body), "{\"ok\":true,\"state\":\"%s\"}\n", state_name());
     } else if (!strcmp(method, "POST") && !strcmp(path, "/dash/on")) {
         g_dash_override = true;
-        g_dash_requested = true;
-        g_dash_next_ms = 0;
+        g_display_next_ms = 0;
         snprintf(body, sizeof(body), "{\"ok\":true,\"dash\":true}\n");
     } else if (!strcmp(method, "POST") && !strcmp(path, "/dash/off")) {
         g_dash_override = false;
-        g_dash_requested = false;
         snprintf(body, sizeof(body), "{\"ok\":true,\"dash\":false}\n");
     } else if (!strcmp(method, "POST") &&
                (!strcmp(path, "/chargedoor/open") ||
@@ -1195,9 +1306,11 @@ static void usage(const char *argv0)
             " [--dbus-send PATH]\n"
             "       %s [--session-bus-file PATH] [--dbus-monitor PATH]"
             " [--no-session-monitor]\n"
+            "       %s [--retry-ms N] [--started-timeout-ms N]"
+            " [--version]\n"
             "       %s --start|--stop|--dash-on|--dash-off|"
             "--door-open|--door-close|--door-toggle|--status|--sniff [seconds]\n",
-            argv0, argv0, argv0);
+            argv0, argv0, argv0, argv0);
 }
 
 int main(int argc, char **argv)
@@ -1216,6 +1329,15 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--session-bus-file") && i + 1 < argc) g_session_bus_file = argv[++i];
         else if (!strcmp(argv[i], "--dbus-monitor") && i + 1 < argc) g_dbus_monitor = argv[++i];
         else if (!strcmp(argv[i], "--no-session-monitor")) g_session_bus_file = "";
+        else if (!strcmp(argv[i], "--retry-ms") && i + 1 < argc) {
+            g_start_retry_ms = atoll(argv[++i]);
+            g_stop_retry_ms = g_start_retry_ms;
+        }
+        else if (!strcmp(argv[i], "--started-timeout-ms") && i + 1 < argc) g_started_timeout_ms = atoll(argv[++i]);
+        else if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-v")) {
+            printf("battery_daemon %s\n", BATTERY_DAEMON_VERSION);
+            return 0;
+        }
         else if (!strcmp(argv[i], "--start")) { op = OS_START; one_shot = true; }
         else if (!strcmp(argv[i], "--stop")) { op = OS_STOP; one_shot = true; }
         else if (!strcmp(argv[i], "--dash-on")) { op = OS_DASH_ON; one_shot = true; }
@@ -1267,8 +1389,8 @@ int main(int argc, char **argv)
         switch (op) {
         case OS_START: request_start(); break;
         case OS_STOP: request_stop(); break;
-        case OS_DASH_ON: if (precond_active()) g_dash_requested = true; break;
-        case OS_DASH_OFF: g_dash_requested = false; break;
+        case OS_DASH_ON: g_dash_override = true; g_display_next_ms = 0; break;
+        case OS_DASH_OFF: g_dash_override = false; break;
         case OS_DOOR_OPEN: request_chargedoor(DOOR_STATE_OPEN, false); break;
         case OS_DOOR_CLOSE: request_chargedoor(DOOR_STATE_CLOSED, false); break;
         case OS_DOOR_TOGGLE:
@@ -1323,7 +1445,9 @@ int main(int argc, char **argv)
     mkdir("/rw_data", 0755);
     mkdir("/rw_data/battery", 0755);
 
-    fprintf(stderr, "battery_daemon: %s, http 127.0.0.1:%d\n", g_iface, port);
+    fprintf(stderr, "battery_daemon: v%s, %s, http 127.0.0.1:%d\n",
+            BATTERY_DAEMON_VERSION, g_iface, port);
+    fflush(stderr);
 
     int64_t last_status_write = 0;
     while (!g_stop) {
@@ -1357,7 +1481,7 @@ int main(int argc, char **argv)
         monitor_tick();
         tick_burst(now);
         tick_state(now);
-        tick_dash(now);
+        tick_display(now);
         tick_chargedoor(now);
 
         if (now - last_status_write > 1000) {

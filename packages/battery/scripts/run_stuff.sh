@@ -266,7 +266,53 @@ if [ "$daemon_status" != "systemd-ok" ]; then
         fi
     fi
 fi
-log "daemon=$daemon_status"
+
+# Freshness check: a failed systemctl restart used to leave the OLD daemon
+# running (new UI, old logic).  Verify the RUNNING binary matches the payload
+# and force a restart if it does not.
+payload_daemon_md5=$(md5sum "$PAYLOAD/bin/battery_daemon" 2>/dev/null | cut -d' ' -f1)
+daemon_fresh=unknown
+daemon_check_fresh() {
+    _found=no-daemon
+    for p in /proc/[0-9]*; do
+        [ -r "$p/comm" ] || continue
+        if [ "$(cat "$p/comm" 2>/dev/null)" = "battery_daemon" ]; then
+            _run_md5=$(md5sum "$p/exe" 2>/dev/null | cut -d' ' -f1)
+            if [ "$_run_md5" != "$payload_daemon_md5" ]; then
+                _found=stale
+            else
+                _found=yes
+            fi
+        fi
+    done
+    echo "$_found"
+}
+if [ -n "$payload_daemon_md5" ] && command -v md5sum >/dev/null 2>&1; then
+    daemon_fresh=$(daemon_check_fresh)
+    if [ "$daemon_fresh" = "stale" ]; then
+        log "running daemon is stale; forcing restart"
+        for p in /proc/[0-9]*; do
+            [ -r "$p/comm" ] || continue
+            if [ "$(cat "$p/comm" 2>/dev/null)" = "battery_daemon" ]; then
+                kill -TERM "${p#/proc/}" 2>/dev/null || true
+            fi
+        done
+        sleep 1
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl restart battery-daemon.service >> "$LOG" 2>&1 || true
+        fi
+        if ! pidof battery_daemon >/dev/null 2>&1 && [ -x "$RW_DIR/battery_daemon" ]; then
+            ( "$RW_DIR/battery_daemon" --iface can0 --port 8088 \
+                --status-file "$RW_DIR/status.json" >> "$RW_DIR/daemon.log" 2>&1 & ) 2>/dev/null || true
+            sleep 1
+        fi
+        daemon_fresh=$(daemon_check_fresh)
+        if [ "$daemon_fresh" = "stale" ]; then
+            daemon_status="$daemon_status STALE-DAEMON-RUNNING"
+        fi
+    fi
+fi
+log "daemon=$daemon_status fresh=$daemon_fresh"
 
 if [ "$was_ro" = 1 ]; then
     mount -o remount,ro / 2>/dev/null || true
@@ -326,6 +372,7 @@ sync
 result "status=OK" "already_patched=$already" "variant=$variant" \
        "hello_mismatch=$hello_mismatch" \
        "backup=$BACKUP_HU" "installed=$installed" "daemon=$daemon_status" \
+       "daemon_fresh=$daemon_fresh" \
        "restart=$restart" "log=$LOG"
 log "=== battery payload done ==="
 exit 0

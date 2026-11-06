@@ -67,7 +67,8 @@ The Battery app is **not** a swipe page. `patch_advanced.py` adds:
    1 is full; it is not hard-coded to page 2.
 2. `BatteryPage` as a full-screen overlay at `z: 2000`, opened with
    `open()`/`close()` and gated on `AppHomeModel.isAtOtherApp` so it never
-   shows while another app owns the foreground.
+   shows while another app owns the foreground. Input is disabled while a
+   system popup is showing (`sysPopupShowing`).
 
 The overlay starts at `y: 90` and is 630 px high, so it does not draw under
 the clock/status bar. Tile coordinates stay relative to `menuPageN`, which is
@@ -151,12 +152,18 @@ dbus-send --system --type=method_call --dest=com.lge.car.micom /Can \
 - Charge door: `0x4A2` `FF FF FF DF FF FF FF FF` open, `EF` close; an
   unknown cable state (no `0x326` on the bus) is advisory and no longer
   blocks the door.
-- Spoofed nav frame: an independent "Include spoofed nav frame" toggle sends
-  `0x4ED` at 5 Hz whether or not preheat is running (experimental).
+- Full WiCAN sequence mimicry: the `0x0C7` burst at 40 ms pacing plus the
+  `0x4E8`/`0x4CC` cluster countdown during start and stop; without BMS
+  status the start assumes active after the 70 s timeout; exhausted start
+  retries end with a cleanup stop burst.
 - A refused `/start`/`/stop` is shown in the UI ("Blocked: <reason>") instead
   of failing silently.
 - `0x2AD` `0x00` counts as "off": a stop completes in under a second instead
   of grinding through ~50 s of retries.
+- The daemon reports its build version (`ver` in `/status`, shown in the
+  footer) and micom send health (`send_ok`/`send_fail`); the installer
+  verifies the *running* daemon matches the payload binary and force-restarts
+  a stale one (`daemon_fresh` in the result).
 
 ## Safety
 
@@ -177,7 +184,8 @@ dbus-send --system --type=method_call --dest=com.lge.car.micom /Can \
 - `python3 tests/test_daemon.py` on `vcan0`: `0x2FC` temperature, micom
   `0x0C7`/`0x4ED`/`0x4A2` arrays, the charge-door gates, the park override,
   optimistic feedback, the send-failed path, the session-bus Home/Star
-  monitor, and the bus sniffer all pass.
+  monitor, the WiCAN sequence tests (assume-active, cleanup stop, cluster
+  display), and the bus sniffer all pass.
 - `sh tests/test_installer.sh /tmp/battery_usb`: first install, reinstall,
   restore, Hello coexistence, and restore-after-Hello all pass.
 - QML files pass the vendor Qt 5.4 `qmllint` inside the 260128 VM.
@@ -197,6 +205,11 @@ dbus-send --system --type=method_call --dest=com.lge.car.micom /Can \
 - `0x2FC` byte 3 is not used; the factory CANService only decodes byte 2 as the
   minimum. The page shows the minimum alone.
 - The page is a QML overlay inside `AppHomeScreen`, not a separate process/app
+- UI standards (`docs/ui/styleguide.md`): themed background image and text
+  colors (`HomeThemeHelper`, `ConstantModel`), `ConstantModel.FONT_SIZE_*`
+  fonts, beep-on-release and slide-off-cancel on every control. Documented
+  deviations: English-only strings (no 26-language ts infrastructure) and
+  the custom switch graphic.
 - The steering-wheel Home/Star key is a session-bus event, not a QML key
   event: the daemon tails `dbus-monitor` on `/tmp/session_appmgr` for
   `NotifyRequestHomeScreen` / `custom_key_value` and bumps `home_seq`, which
