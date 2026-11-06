@@ -154,7 +154,12 @@ records `mode: vendor|compat` and a fidelity note.
 
 ### 3.2 SCOURGE sync (periodic, curated)
 
-- **Cadence:** after each milestone (not per-run): "VM lab update" commits.
+- **Cadence — standing rule for any agent executing this plan:** when a
+  milestone in §6 has its acceptance criteria met, run `sync-to-scourge.sh`
+  and land a "VM lab update" commit in SCOURGE **before starting the next
+  milestone**. Not per-run, not mid-milestone, never hand-copied (§7 risk
+  5). The script is built in P0-1; if it slipped, a milestone-end sync may
+  be assembled manually but must still pass every §5 check.
 - **Target sections:**
   - `docs/14-vm-lab.md` — public runbook: what the lab is, Mode V vs Mode C,
     what each can/cannot prove, build-from-your-own-firmware instructions
@@ -177,19 +182,20 @@ records `mode: vendor|compat` and a fidelity note.
 - **This PLAN/TODO** goes in as `docs/14` appendix or `tools/vm/PLAN.md`
   (policy-compliant markdown).
 
-### 3.3 Initial cross-commit (first implementation step)
+### 3.3 Initial cross-commit (completed 2026-11-07)
 
-Requested 2026-11-07, before new VM work starts:
+Done before new VM work started — SCOURGE commit `da6b72d` ("VM lab:
+docs/14 runbook seed + master plan (WIP)", pushed to
+`github.com/nickles-lee/hkg_SCOURGE`):
 
-1. Copy this plan into the local ioniq workspace for posterity
+1. Plan copied into the local ioniq workspace for posterity
    (`~/ioniq/vm/PLAN.md`, untracked until P0-1 gitignores it).
-2. In SCOURGE: add `docs/14-vm-lab.md` (seed: purpose, two modes, capability
-   matrix, what the lab can/cannot prove, pointers to the VM repo plan,
-   status-honest labels) + `tools/vm/PLAN.md` (this file, SPDX-exempt as docs).
-3. Commit as "VM lab: initial plan and docs/14 runbook seed" and push to the
-   configured remote (`github.com/nickles-lee/hkg_SCOURGE`).
-4. No source import yet — `tools/vm/` source sync happens at P1-13 once SPDX
-   headers exist in the VM repo.
+2. SCOURGE gained `docs/14-vm-lab.md` (runbook seed) and
+   `docs/14-vm-lab-plan.md` (this plan, sanitized: local paths and host
+   details genericized, mirror note attached), plus an AGENTS.md routing
+   row and a README bullet.
+3. No source import yet — `tools/vm/` source sync happens at P1-13 once
+   SPDX headers exist in the VM repo.
 
 ---
 
@@ -201,7 +207,7 @@ Effort: **S** ≤ 0.5 d · **M** 1–2 d · **L** 3–5 d · **XL** 1–2 wk
 
 | # | Task | Effort | Acceptance |
 |---|---|---|---|
-| P0-1 | **VM repo setup**: `git init`, `.gitignore`, SPDX headers, `PLAN.md`, `NOTES.md`, README, initial commit | S | Clean clone reproduces a managed scenario; `git status` clean; no OEM bytes in history |
+| P0-1 | **VM repo setup**: `git init`, `.gitignore`, SPDX headers, `PLAN.md`, `NOTES.md`, README, `sync-to-scourge.sh` (enforces the §5 checks), initial commit | S | Clean clone reproduces a managed scenario; `git status` clean; no OEM bytes in history; sync script self-test refuses an OEM/secret-bearing file |
 | P0-2 | **Tools manifest + staleness gate**: `toolsroot/manifest.json` (file→sha256), embed build ID in image, `launch.py` refuses/`doctor` warns on mismatch; `run-phase4.sh` refuses stale tools | S | Stale `tools.dev.img` is detected and reported; rebuild path documented |
 | P0-3 | **Rebuild tools from source**: extend `build_research_tools.sh` to compile all helpers (automount, credman, micom, usb-signal, CAN sim), byte-compare vs image | S–M | All helpers rebuilt from `guest/*.c`; one tools image passes all scenarios |
 | P0-4 | **Screenshot infra — Mode V**: `weston-screenshooter` probe (headless Weston socket), PNG extracted via tools/payload dump; `vm extract` copies artifacts out of a retained overlay | S–M | phase4/AppUpgrade runs produce `wayland-screenshot.png` in the run dir |
@@ -229,7 +235,7 @@ Effort: **S** ≤ 0.5 d · **M** 1–2 d · **L** 3–5 d · **XL** 1–2 wk
 | P1-10 | **WiFi-app UI scenario**: install payload → real AppHomeScreen → patched QML page screenshot + QML-error capture (feeds the wifi validation plan, Phase 4) | M | `WifiPage` visible in PNG or its QML errors captured; findings appended to app docs |
 | P1-11 | **Provenance extension**: hash `probes/`, `toolsroot/`, `guest/` sources into `harness_sources` | S | Any probe/script change is visible in `result.json` |
 | P1-12 | **Docs consolidation + two-mode runbook** (VM repo): one quickstart per mode, capability matrix, graphics runbook, troubleshooting; supersede stale claims in `VM-HARNESS.md`/`README.local.md` | M | A new dev reaches a screenshot in each mode following only the runbook |
-| P1-13 | **First full SCOURGE sync**: `tools/vm/` source import with SPDX headers + updated `docs/14`; sync script with policy checks | M | SCOURGE lint clean; SPDX everywhere; no OEM bytes; status labels present |
+| P1-13 | **First full SCOURGE sync**: `tools/vm/` source import with SPDX headers + updated `docs/14`, run through the P0-1 sync script | M | SCOURGE lint clean; SPDX everywhere; no OEM bytes; status labels present |
 
 ### P2 — Comfort, coverage, fidelity
 
@@ -246,7 +252,7 @@ Effort: **S** ≤ 0.5 d · **M** 1–2 d · **L** 3–5 d · **XL** 1–2 wk
 | P2-9 | CAN/micom expansion: broader vehicle-state simulation | L | Deterministic vehicle-state tests beyond current stubs |
 | P2-10 | Parallel-run governor: lock/queue heavy boots, cap concurrency | M | Repeated parallel suites don't hit EHCI timeouts |
 | P2-11 | Performance: qcow2 cache modes, CPU pinning, boot benchmarks | M | Repeatable numbers; defaults tuned for 16-thread host |
-| P2-12 | Ongoing SCOURGE syncs per milestone; findings into `docs/ui`, `docs/07`, `docs/11` | S each | Cross-commits pass policy checks each time |
+| P2-12 | Milestone-checkpoint SCOURGE syncs (§3.2 standing rule); findings into `docs/ui`, `docs/07`, `docs/11` | S each | Cross-commits pass policy checks each time |
 
 ### P3 — Risky / blocked (deliberately deprioritized)
 
@@ -284,12 +290,17 @@ Effort: **S** ≤ 0.5 d · **M** 1–2 d · **L** 3–5 d · **XL** 1–2 wk
 
 - **M1 (week 1):** P0-1..P0-5, P0-7..P0-11 — repo live, tools trustworthy,
   screenshots working in both modes, failure bundles, doctor 2.0.
+  - **SCOURGE sync checkpoint:** refresh `docs/14` status + carry M1
+    findings across (§3.2 standing rule).
 - **M2 (week 2):** P0-6 + P1-1..P1-3 — compat spike → `--kernel compat` +
   pinned kernel + `ui-smoke` PASS with screenshot.
+  - **SCOURGE sync checkpoint:** compat-mode + `ui-smoke` evidence into
+    `docs/14`.
 - **M3 (week 3):** P1-4..P1-12 — 9p share, interactivity (window + input),
-  state reuse, run mgmt, WiFi-app UI scenario, docs; first full SCOURGE sync
-  (P1-13).
+  state reuse, run mgmt, WiFi-app UI scenario, docs; **ends with the first
+  full SCOURGE sync (P1-13)**.
 - **M4 (weeks 4+):** P2 items in order; P3 only as capacity allows.
+  - **SCOURGE sync checkpoint:** after each completed P2 batch (P2-12).
 
 **Rough totals:** screenshots-everywhere ~1 wk; two-mode harness + pinned
 compat ~1.5–2 wk; daily workflow + interactivity + sync ~1–1.5 wk; comfort

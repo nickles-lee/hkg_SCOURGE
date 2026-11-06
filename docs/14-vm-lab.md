@@ -90,6 +90,8 @@ PNG per run, agent-friendly — then interactive GTK/VNC windows for humans
 ## Roadmap and status labels
 
 The full prioritized plan, with effort estimates and acceptance criteria,
-is [`docs/14-vm-lab-plan.md`](14-vm-lab-plan.md). Everything in this repo
-keeps its honesty labels: `car-validated` · `VM-validated (vendor kernel)` ·
-`VM-validated (compat kernel)` · `offline-validated` · `WIP`.
+is [`docs/14-vm-lab-plan.md`](14-vm-lab-plan.md); it is mirrored back here
+at every milestone checkpoint, so this page stays current as the modes and
+screenshot support land. Everything in this repo keeps its honesty labels:
+`car-validated` · `VM-validated (vendor kernel)` · `VM-validated (compat
+kernel)` · `offline-validated` · `WIP`.
