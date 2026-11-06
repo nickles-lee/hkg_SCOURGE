@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 [Unit]
 Description=WiFi manager daemon (Ioniq 5 Gen5W)
-After=multi-user.target connman.service
+After=multi-user.target Dbuslaunch.service connman.service
 Wants=connman.service
 ConditionPathExists=/rw_data/wifi/wifi_daemon
 

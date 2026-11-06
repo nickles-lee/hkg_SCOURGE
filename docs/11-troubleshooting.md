@@ -52,6 +52,11 @@ Ioniq 5 Gen5W_L, 260128 (EU) unless noted.
 | Steering-wheel Home does not close an overlay | Expected without the daemon `home_seq` watcher — QML cannot see the session bus. See the overlay checklist. |
 | `tweaks_persist` fails to start | It links against vendor glibc 2.25 + PCL 7.1.1 — rebuild against the correct extracted rootfs (`SCOURGE_ROOTFS`), and check `pers_admin_svc` is running. |
 | SSH connects but auth fails | Default is `car`/`electric` port 2222; if the port was busy the daemon moved to 2223+ (the UI shows the actual port). |
+| WiFi tether logs `unknown option [?][no]` / `[?][5180]` | Positional tether args. This vendor `connmanctl` takes options: `--hidden/--frequency/--maxsta/--appinfo 1` (`packages/wifi/SPEC.md`). |
+| WiFi client: `Error '--wifi': Invalid argument`, then connmand `Not registered` | This build has no `connmanctl config --wifi`. The passphrase must go through the ConnMan agent flow (`agent on` → `connect <service>` → passphrase on stdin); no agent means `Not registered`. |
+| WiFi tether: `Permission denied`; wpa control socket dead | SMACK label mismatch. Keep the daemon and everything it execs on the floor label `_` (`chsmack -e _`); `Privileged` has no ConnMan/wpa rule. Also **mask** `supplicantmanager.path`/`.service` so the OEM manager cannot respawn and reclaim `/var/run/wpa_supplicant/wlan0`. |
+| WiFi daemon exits at start: `bind(http): Cannot assign requested address` | Loopback was not up yet. Current builds bring `lo` up and retry the bind for 30 s; verify with `ip link set lo up` and check `/proc/net/dev`. |
+| Client failure reported as `SSH deferred: no WLAN IP` | Older build: `ssh_start()` overwrote the real association/DHCP error. Current builds save the error first — read the `client mode failed:` line. |
 
 ## Verification
 
@@ -60,3 +65,5 @@ Ioniq 5 Gen5W_L, 260128 (EU) unless noted.
 | `PREFLIGHT: OK` but a hash differs from docs/03 | The known-good table covers the validated message/config; a deliberately changed `config/message.txt` changes the rootfs hashes by design — re-record them. |
 | `PACKAGE VERIFY: FAIL` on extra files | Only `BUILD.txt` and `MANIFEST.sha256` may be extras in a package tree. |
 | Manifest verifies locally, fails on the stick | Truncated copy — re-copy and re-verify on the stick. |
+| QML loads on the host but not on the car | Host Qt vs vendor Qt mismatch. Run the firmware's own `/usr/bin/qt5/qmllint` over every shipped QML file before deploying (docs/07, "Validating without the car"). |
+| A command works with `--help` but fails on the car | The help text and the parser disagree on this vendor build. Execute the car binary with its own loader or in the VM and compare parser output (docs/07). |

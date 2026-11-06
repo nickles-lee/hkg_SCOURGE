@@ -19,9 +19,9 @@ packages under active development, not finished products.**
 | Battery | Cluster preheat countdown (WiCAN `0x4E8`+`0x4CC` layout) + standalone "Cluster display test" toggle | WIP — replaces the earlier synthetic `0x4ED` |
 | Battery | Charge door open/close (micom `0x4A2`; Park gate; observed-cable veto, unknown cable advisory) | WIP |
 | Battery | Steering-wheel Home/Star closes the overlay (session-bus monitor → `home_seq`); micom send health + daemon version in the footer | dbus 1.8.20-validated in the VM; pending on-car |
-| WiFi | WLAN client + AP modes on the onboard Broadcom radio; USB detection scans real mount points (no fstype whitelist — the car's exFAT reports as `texfat`, docs/02) | WIP — built on verified firmware components |
-| WiFi | SSH server (static dropbear, `car`/`electric`, port 2222) + `wifi.txt`/`authorized_keys` import from the stick | WIP — prior on-car tests |
-| WiFi | Wireless CarPlay AP (ConnMan tether + CarPlay IE + iAP2/mdns) | Needs on-car iPhone validation |
+| WiFi | WLAN client + AP modes on the onboard Broadcom radio; USB detection scans real mount points (no fstype whitelist — the car's exFAT reports as `texfat`, docs/02); ConnMan agent-flow client connect; command forms verified against the shipped binaries | WIP — VM-validated on the vendor kernel/Qt; on-car retest pending |
+| WiFi | SSH server (static dropbear, `car`/`electric`, port 2222) + `wifi.txt`/`authorized_keys` import; daemon/dropbear carry the SMACK floor label | WIP — VM-validated; on-car retest pending |
+| WiFi | Wireless CarPlay AP (ConnMan tether with `--appinfo 1` + CarPlay IE + iAP2/mdns); Home/Star closes the overlay via the session-bus `home_seq` watcher | VM-validated up to the radio; needs on-car iPhone validation |
 | All | Install/restore/diag through the failsafe, base detection, coexistence | Proven pattern (combo v4 flow: install order battery → wifi → tweaks, reverse restore) |
 
 Per-package detail: `packages/<pkg>/README.md` + `SPEC.md` + `docs/`.
@@ -54,6 +54,29 @@ Copy the contents to the root of a FAT/exFAT stick, plug it in, read
 `run_stuff_result.txt`. Restore: `MODE=restore` (combo) or rename
 `run_stuff_restore.sh` over `run_stuff.sh` (single package).
 
+## Validating without the car
+
+Three cheap gates catch most package regressions before a stick reaches the
+vehicle:
+
+1. **Vendor QML parser.** The head unit ships its own Qt `/usr/bin/qt5/qmllint`;
+   run it over every generated QML file (the page, tiles, and each patched
+   host variant). A modern host Qt `qmlscene` accepts constructs the car's
+   Qt 5.4 does not.
+2. **Vendor kernel/binary checks.** The daemons are static and run on the
+   vendor kernel in any firmware VM/rootfs for one-shot and HTTP smoke tests
+   and failure-path soaks. For CLI forms (`connmanctl`, `wpa_cli`,
+   `wpa_supplicant`), run the car's own binaries with their loader
+   (`ld-2.25.so` + firmware libraries) or in the VM and check the parser
+   output, not just `--help`. This is how the tether option form, the
+   no-`config --wifi` agent flow, and the `int32` Home/Star parsing were
+   verified without a car.
+3. **Install/restore round-trip in the VM.** Run `run_stuff.sh` against the
+   real `/app/share/AppHomeScreen` tree: base detection, SMACK label
+   preservation, the passwd/shadow templates, unit masking, and the
+   no-systemd manual-start fallback all get exercised. Then
+   `run_stuff_restore.sh` must return the stock hashes exactly.
+
 ## Binary toolchain policy
 
 The head unit runs kernel 4.1.27 with **glibc 2.25** — a dynamically linked
@@ -73,8 +96,22 @@ binary built on a modern host dies on-car. Policy:
 - `wifi.txt` at the stick root: `ssid=`, `psk=`, `carplay_ssid=`,
   `carplay_psk=`, `carplay_band/channel`, `ssh=`, `ssh_port=`. Sample:
   `packages/wifi/wifi.txt.sample`. The PSK is never logged; config is 0600.
-- The installer stops the OEM `supplicantmanager` path and removes
-  `/tmp/no_unece`; a watchdog holds `wlan0`.
+- The installer stops and **masks** the OEM `supplicantmanager.path`/`.service`
+  (it is `Restart=always` and otherwise reclaims the wpa_supplicant control
+  socket), removes `/tmp/no_unece`, and the watchdog holds `wlan0`. Restore
+  unmasks and restarts the path unit.
+- `wifi_daemon` and `dropbearmulti` carry the SMACK floor label `_`
+  (`chsmack -e _`) — the label the Battery daemon proved for D-Bus/socket
+  access. `Privileged` has no ConnMan/wpa_supplicant rule and produces
+  "Permission denied" on tethering and a dead control socket.
+- Tethering uses the option form
+  `connmanctl tether wifi on <ssid> <psk> --hidden no --frequency <MHz>
+  --maxsta <n> --appinfo 1`. The positional form is rejected with
+  `unknown option` on this vendor build.
+- Client connect uses the ConnMan **agent** flow (`agent on` → `connect
+  <service>` → passphrase on stdin) — this `connmanctl` has no
+  `config --wifi`. Every `wpa_cli` call passes `-p /var/run/wpa_supplicant`
+  explicitly.
 
 ## Deployment models (where a package's UI can live)
 

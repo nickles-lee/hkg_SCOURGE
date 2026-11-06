@@ -74,12 +74,17 @@ fail() {
 mount -o remount,rw "$USB_DIR" 2>/dev/null || true
 log "=== wifi payload start usb=$USB_DIR ==="
 
+# The firmware ships md5sum only as a busybox applet; the coreutils binary
+# is /usr/bin/md5sum.coreutils.  Resolve once, before any use.
+MD5SUM_BIN=md5sum
+command -v md5sum >/dev/null 2>&1 || MD5SUM_BIN=md5sum.coreutils
+
 [ -d "$PAYLOAD" ] || fail "payload directory missing: $PAYLOAD"
 [ -d "$BACKUP" ] || fail "backup directory missing: $BACKUP"
 [ -f "$USB_DIR/manifest.md5" ] || fail "manifest.md5 missing"
 [ -d "$QML_DIR" ] || fail "expected QML directory missing: $QML_DIR"
 
-if ! ( cd "$USB_DIR" && md5sum -c manifest.md5 ) > "$RW_DIR/manifest-check.log" 2>&1; then
+if ! ( cd "$USB_DIR" && "$MD5SUM_BIN" -c manifest.md5 ) > "$RW_DIR/manifest-check.log" 2>&1; then
     log "manifest check failed"
     fail "manifest check failed (see /rw_data/wifi/manifest-check.log)"
 fi
@@ -98,7 +103,7 @@ cur_theme="$QML_DIR/$THEME"
 [ -f "$cur_setup" ] || fail "target missing: $cur_setup"
 [ -f "$cur_custom" ] || fail "target missing: $cur_custom"
 
-md5() { md5sum "$1" 2>/dev/null | cut -d' ' -f1; }
+md5() { "$MD5SUM_BIN" "$1" 2>/dev/null | cut -d' ' -f1; }
 
 ref_md5() {
     cat "$PAYLOAD/ref/$1.md5" 2>/dev/null | cut -d' ' -f1
@@ -303,12 +308,22 @@ done
 cp -f "$PAYLOAD/bin/wifi_daemon" "$RW_DIR/wifi_daemon" || fail "daemon copy failed"
 chmod 755 "$RW_DIR/wifi_daemon" 2>/dev/null || true
 chown 0:0 "$RW_DIR/wifi_daemon" 2>/dev/null || true
-command -v chsmack >/dev/null 2>&1 && chsmack -e Privileged "$RW_DIR/wifi_daemon" 2>/dev/null || true
+# /rw_data is the SMACK floor label; the daemon and everything it execs
+# (wpa_supplicant, wpa_cli, connmanctl, dropbear) inherit it.  The floor
+# label is the proven label for D-Bus/socket access on this car.  The old
+# Privileged exec label had no ConnMan/wpa_supplicant rule and produced
+# "Permission denied" on tethering and a dead control socket.
+if command -v chsmack >/dev/null 2>&1; then
+    chsmack -e _ "$RW_DIR/wifi_daemon" 2>/dev/null || true
+fi
 
 if [ -f "$PAYLOAD/bin/dropbearmulti" ]; then
     cp -f "$PAYLOAD/bin/dropbearmulti" "$RW_DIR/bin/dropbearmulti" || fail "dropbear copy failed"
     chmod 755 "$RW_DIR/bin/dropbearmulti" 2>/dev/null || true
     chown 0:0 "$RW_DIR/bin/dropbearmulti" 2>/dev/null || true
+    if command -v chsmack >/dev/null 2>&1; then
+        chsmack -e _ "$RW_DIR/bin/dropbearmulti" 2>/dev/null || true
+    fi
     ln -sf dropbearmulti "$RW_DIR/bin/dropbear" 2>/dev/null || true
     ln -sf dropbearmulti "$RW_DIR/bin/dropbearkey" 2>/dev/null || true
 fi
@@ -319,7 +334,7 @@ chown 0:0 "$SERVICE" 2>/dev/null || true
 
 # ---- default config / import ------------------------------------------
 if [ ! -f "$RW_DIR/config.conf" ]; then
-    RAND=$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | md5sum | cut -c1-16)
+    RAND=$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | "$MD5SUM_BIN" | cut -c1-16)
     cat > "$RW_DIR/config.conf" <<EOF
 config_version=2
 mode=off
@@ -399,9 +414,17 @@ sync
 sync
 
 # ---- stop OEM WiFi race / start daemon --------------------------------
+oem_mask=not-attempted
 if command -v systemctl >/dev/null 2>&1; then
     systemctl stop supplicantmanager.path 2>/dev/null || true
     systemctl stop supplicantmanager.service 2>/dev/null || true
+    # supplicantmanager is Restart=always behind a path watcher; stopping it
+    # only makes it respawn and steal /var/run/wpa_supplicant/wlan0.  Mask
+    # both units persistently.  run_stuff_restore.sh unmasks them again.
+    oem_mask=ok
+    for unit in supplicantmanager.path supplicantmanager.service; do
+        systemctl mask "$unit" >> "$LOG" 2>&1 || oem_mask=partial
+    done
     rm -f /tmp/no_unece 2>/dev/null || true
     systemctl daemon-reload >> "$LOG" 2>&1 || true
 fi
@@ -489,6 +512,7 @@ log "restart=$restart"
 sync
 
 result "status=OK" "variant=$adv_variant/$wide_variant/$all_variant/$setup_variant/$custom_variant" \
-       "backup=$BACKUP_HU" "daemon=$daemon_status" "restart=$restart" "log=$LOG"
+       "backup=$BACKUP_HU" "daemon=$daemon_status" "oem_mask=$oem_mask" \
+       "restart=$restart" "log=$LOG"
 log "=== wifi payload done ==="
 exit 0

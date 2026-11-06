@@ -21,6 +21,11 @@ raw() { echo "\$ $*" >> "$OUT"; sh -c "$*" >> "$OUT" 2>&1 || true; }
     echo "uname: $(uname -a 2>/dev/null)"
 } >> "$OUT"
 
+sec "tool availability"
+raw 'ls -l /sbin/chsmack /usr/bin/qt5/qmllint 2>&1'
+raw 'command -v md5sum md5sum.coreutils busybox dbus-monitor dbus-send chsmack 2>&1'
+raw 'busybox 2>&1 | grep -E "wget|md5sum" || echo "busybox applet list unavailable"'
+
 sec "micom / variant"
 raw 'for p in pcb_version optUNECE country hw_version; do echo -n "$p="; cat /sys/module/micom/parameters/$p 2>/dev/null; done'
 raw 'ls -l /tmp/no_unece 2>&1'
@@ -40,6 +45,7 @@ raw 'iwconfig 2>/dev/null'
 
 sec "services"
 raw 'systemctl status supplicantmanager.path supplicantmanager.service connman.service 2>&1 | head -120'
+raw 'systemctl is-enabled supplicantmanager.path supplicantmanager.service 2>&1'
 raw 'systemctl status carplay_iAP2.service carplay_mdnsd.service 2>&1 | head -120'
 raw 'systemctl status wifi-daemon.service 2>&1 | head -160'
 raw 'systemctl cat wifi-daemon.service 2>&1'
@@ -48,14 +54,16 @@ raw 'ps w 2>/dev/null | grep -E "connmand|wpa_supplicant|supplicantmanager|iAP2|
 
 sec "WiFi supplicant"
 raw 'ps w 2>/dev/null | grep -E "wpa_supplicant|supplicantmanager|connmand" | grep -v grep'
-raw 'wpa_cli -i wlan0 ping 2>&1'
-raw 'wpa_cli -i wlan0 status 2>&1'
-raw 'wpa_cli -i wlan0 list_networks 2>&1'
-raw 'wpa_cli -i wlan0 scan_results 2>&1 | head -40'
+raw 'wpa_cli -p /var/run/wpa_supplicant -i wlan0 ping 2>&1'
+raw 'wpa_cli -p /var/run/wpa_supplicant -i wlan0 status 2>&1'
+raw 'wpa_cli -p /var/run/wpa_supplicant -i wlan0 list_networks 2>&1'
+raw 'wpa_cli -p /var/run/wpa_supplicant -i wlan0 scan_results 2>&1 | head -40'
+raw 'cat /rw_data/wifi/wpa_supplicant.conf 2>&1'
 raw 'cat /etc/wpa_supplicant.conf 2>&1'
 raw 'cat /rw_data/wifi/wpa_supplicant.log 2>/dev/null | tail -n 120'
-raw 'getfattr -n security.SMACK64 /usr/sbin/wpa_supplicant /rw_data/wifi/wifi_daemon 2>&1'
-raw 'ls -l /var/run/wpa_supplicant 2>&1'
+raw 'getfattr -n security.SMACK64 /usr/sbin/wpa_supplicant /usr/sbin/wpa_cli /usr/sbin/connmanctl /rw_data/wifi/wifi_daemon /rw_data/wifi/bin/dropbearmulti 2>&1'
+raw 'getfattr -n security.SMACK64EXEC /usr/sbin/wpa_supplicant /usr/sbin/wpa_cli /usr/sbin/connmanctl /rw_data/wifi/wifi_daemon /rw_data/wifi/bin/dropbearmulti 2>&1'
+raw 'ls -la /var/run/wpa_supplicant 2>&1'
 raw 'iw dev wlan0 info 2>&1'
 raw 'iw list 2>/dev/null | grep -A8 -i "Supported interface modes"'
 

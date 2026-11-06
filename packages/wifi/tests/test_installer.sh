@@ -99,6 +99,7 @@ sed -e "s#/etc/passwd#$TMP/etc/passwd#g" \
     -e 's#dbus-send#false#g' \
     -e 's#sleep 2#sleep 0#g' \
     -e 's#sleep 1#sleep 0#g' \
+    -e 's#^sync$#true#g' \
     "$ROOT/scripts/run_stuff.sh" > "$TMP/install.sh"
 sed -e "s#/etc/passwd#$TMP/etc/passwd#g" \
     -e "s#/etc/shadow#$TMP/etc/shadow#g" \
@@ -112,6 +113,7 @@ sed -e "s#/etc/passwd#$TMP/etc/passwd#g" \
     -e 's#dbus-send#false#g' \
     -e 's#sleep 2#sleep 0#g' \
     -e 's#sleep 1#sleep 0#g' \
+    -e 's#^sync$#true#g' \
     "$ROOT/scripts/run_stuff_restore.sh" > "$TMP/restore.sh"
 
 WIFI_QML_ROOT="$TMP/root/app/share/AppHomeScreen" \
@@ -122,6 +124,11 @@ sh "$TMP/install.sh"
 
 grep -q "variant=$EXPECT" "$TMP/usb/run_stuff_result.txt" || {
     echo "unexpected variant:" >&2
+    cat "$TMP/usb/run_stuff_result.txt" >&2
+    exit 1
+}
+grep -q 'oem_mask=ok' "$TMP/usb/run_stuff_result.txt" || {
+    echo "OEM supplicant units were not masked" >&2
     cat "$TMP/usb/run_stuff_result.txt" >&2
     exit 1
 }

@@ -82,12 +82,12 @@ See `docs/UI-TILES.md`.
   fallback; ConnMan handles DHCP;
 - AP start retries full/simple tether syntax and logs `connmanctl
   technologies` on failure;
-- `Start CarPlay pairing` sets `vbtd` powered/discoverable/pairable on the
+- `Start CarPlay AP` sets `vbtd` powered/discoverable/pairable on the
   session bus, reads the BT address for the CarPlay IE, then starts AP,
   iAP2/mDNS and the VBT flag.
 
 Acceptance: Scan lists nearby SSIDs; Connect imported joins the network and
-shows an IP; Start CarPlay pairing makes the car discoverable and brings the
+shows an IP; Start CarPlay AP makes the car discoverable and brings the
 AP up at 10.42.0.1.
 
 ## Phase 2 — Client proof

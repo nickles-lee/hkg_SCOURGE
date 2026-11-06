@@ -3,7 +3,36 @@
 **Date:** 2026-11-06
 **Target:** Ioniq 5 Gen5W, `NE_E.EUR.S5W_L.001.001.260128`
 
-## Done
+## VM validation (2026-11-06/07)
+
+Validated in the firmware VM (vendor kernel 4.1.27-abl + decrypted 260128
+rootfs, using per-run overlays):
+
+- **Vendor Qt 5.4 qmllint**: all 21 shipped QML artifacts pass, including
+  every patched host variant.
+- **Daemon on the guest kernel**: one-shots, HTTP `/status`+`/logs`, an
+  ~80 s no-wlan0 soak, and clean shutdown all healthy.  One real bug found
+  and fixed: instant death when loopback was not up (now brings `lo` up
+  and retries the bind for 30 s).
+- **Real connmand 1.29**: the `--hidden/--frequency/--maxsta/--appinfo 1`
+  tether form parses and issues the correct D-Bus calls; the positional
+  form reproduces the car's `unknown option` errors; `config --wifi`
+  reproduces the car's exact error; the agent registers.  Server-side
+  technology calls need the car's wifi hardware.
+- **Home/Star watcher**: fully validated against the real session bus
+  (home method call and star signal both bump `home_seq` correctly).
+- **texfat log dump**: validated end-to-end with the real Tuxera driver.
+- **Installer/restore on the real QML tree**: status=OK, all variants
+  detected, SMACK labels preserved, `car` persisted in all four account
+  files, supplicantmanager units masked, the manual-start fallback branch
+  exercised, and restore returns the exact stock md5.
+- **Real AppHomeScreen** with `-gui:3`: loads the patched `qml_eco3.0`
+  tree, draws the patched Advanced QML (WifiTile + WifiPage) with zero
+  QML errors.  The later Wayland teardown crash is the documented
+  headless-compositor limitation.
+
+Details in `docs/FINDINGS.md` §5.2f.
+
 
 - Firmware findings documented in `docs/FINDINGS.md`.
 - Static C daemon `src/wifi_daemon` built and smoke-tested:
@@ -52,7 +81,8 @@
   evicting `supplicantmanager`; scan via `wpa_cli`, client connect with
   `wpa_cli add_network/set_network/select_network` and ConnMan DHCP;
   AP start keeps the supplicant alive before `connmanctl tether`.
-- CarPlay pairing button: power/discoverable/pairable via the vendor `vbtd`
+- CarPlay AP button (labelled "Start CarPlay AP"; it also opens the Bluetooth
+  pairing window): power/discoverable/pairable via the vendor `vbtd`
   CommonAPI adapter on the session bus, real BT address for the CarPlay IE,
   and AP/iAP2/mDNS start in one action.
 - Diagnostic script expanded with wpa_supplicant, `iw list`, `vbtd`,
@@ -74,10 +104,27 @@
 - Daemon responsiveness: failed applies back the watchdog off to 60 s
   instead of hammering the stack every 15-20 s; status.json keeps updating
   during long connect waits; worst-case connect waits shortened.
-- Round-3 fixes: scan parser off-by-one (0 dBm), md5-based ConnMan service
-  matching, async forked apply (responsive UI + instant mode switching),
-  2.4 GHz tether fallback, Tuxera `texfat` log-dump detection, live
-  daemon/supplicant console on the wide layout with a Dump button.
+- Round-4 fixes (firmware-verified by executing the car binaries):
+  - tether switched to `--hidden/--frequency/--maxsta/--appinfo 1`; the
+    positional form was the source of `cmd_tether_wifi: unknown option`;
+  - client connect uses the ConnMan agent flow (`agent on` + `connect` +
+    passphrase) because this build has no `config --wifi`; output is
+    redacted;
+  - `wpa_cli` always uses `-p /var/run/wpa_supplicant`;
+  - `wifi_daemon`/`dropbearmulti` use the SMACK floor label `_` (the
+    Battery-proven label); `supplicantmanager.path`/`.service` are masked
+    by the installer and unmasked by restore;
+  - overlay conforms to `APP_OVERLAY_CHECKLIST.md` (requested/open/close,
+    foreground gating, full input shield, close on navigation);
+  - header/exit/console moved ~24 px inside the 90 px menu bar;
+  - daemon tails the session bus for Home/Star, writes `home.json`
+    immediately and exposes `home_seq`/`home_epoch`; QML closes within
+    ~0.5-1 s while open;
+  - the real client-connect error is saved before `ssh_start()`, so the
+    UI no longer reports "SSH deferred: no WLAN IP" instead of the actual
+    association failure;
+  - HTTP/apply sockets are `FD_CLOEXEC`, so a hung `systemctl`/`connmanctl`
+    child cannot keep the daemon's port bound.
 - Self-review fixes: session-bus address off-by-2 (pairing was dead on the
   car), own wpa_supplicant config (no open-network auto-associate), ConnMan
   service token lookup, scan no longer changes mode/auto-connects, SSH
@@ -101,7 +148,7 @@
   survives a page swipe/reboot.
 - On-car confirmation that Scan lists nearby SSIDs and Connect imported
   obtains an IP.
-- On-car confirmation that Start CarPlay pairing enables discoverability and
+- On-car confirmation that Start CarPlay AP enables discoverability and
   the AP comes up at 10.42.0.1.
 
 ## USB tree

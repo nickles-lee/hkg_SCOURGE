@@ -9,8 +9,9 @@ It follows the same deployment model as the Hello and Battery apps: a USB
 `/rw_data/wifi`, and a systemd service. Nothing is flashed; the updater,
 bootloader and partitions are untouched.
 
-**Status:** built and packaged. The WLAN/client/AP/SSH paths are based on
-verified firmware components and prior on-car tests. Wireless CarPlay is
+**Status:** built and packaged; VM-validated on the vendor kernel/Qt
+(daemon, command forms, QML, installer/restore, Home/Star overlay close).
+On-car retest is pending for the radio paths; Wireless CarPlay is
 implemented but still needs the on-car iPhone test.
 
 ---
@@ -33,8 +34,11 @@ implemented but still needs the on-car iPhone test.
   the install, so all custom tiles follow the light/dark theme instead of
   drawing white text on a light background.
 - Opens a full-screen WiFi page with four tabs. The page sits below the
-  90px status bar, consumes clicks (nothing falls through to the home grid),
-  and closes on the steering-wheel Home/Back key as well as its Close button:
+  90px status bar with 24 px header clearance, owns all input (nothing
+  falls through to the home grid), and follows the repo overlay checklist:
+  `open()`/`close()`, foreground gating, and auto-close on navigation. The
+  steering-wheel Home/Star key is a session-bus event, so the daemon tails
+  it and writes `home.json`; the page closes on a new counter value:
   - **Status** — WLAN on/off, mode, IP, AP state, SSH state, import button.
   - **Client** — imported SSID, scan results, connect/disconnect, import.
   - **CarPlay AP** — SSID/key, band/channel, AP state, CarPlay transport,
@@ -45,6 +49,10 @@ implemented but still needs the on-car iPhone test.
 - Runs `dropbear` with password auth for `car` / `electric` by default.
 - Writes status to `/rw_data/wifi/status.json`; the QML page polls it and
   falls back to the local HTTP API.
+- Uses the SMACK floor label `_` for the daemon and dropbear (the label the
+  Battery app proves works for D-Bus/socket access) and masks the OEM
+  `supplicantmanager.path`/`.service` so it cannot respawn and steal the
+  wpa_supplicant control socket. Restore unmasks them.
 
 ---
 
@@ -77,7 +85,7 @@ wifi_app/
 ## Build
 
 ```sh
-cd ~/ioniq/wifi_app
+cd packages/wifi
 sh scripts/build_payload.sh
 ```
 
@@ -223,15 +231,19 @@ CarPlay mode does:
 2. load `cfg80211` / `bcmdhd`,
 3. start and keep our own `/usr/sbin/wpa_supplicant -u -Dnl80211 -iwlan0`
    (the OEM manager otherwise leaves no supplicant for ConnMan),
-4. start ConnMan AP tethering:
-   `connmanctl tether wifi on <ssid> <psk> <hidden> <freq> <max_sta>`,
+4. start ConnMan AP tethering with the option form this vendor
+   `connmanctl` actually parses:
+   `connmanctl tether wifi on <ssid> <psk> --hidden no --frequency <freq>
+   --maxsta <n> --appinfo 1`
+   (the positional form is rejected with `unknown option`; `--appinfo 1`
+   marks the AP as CarPlay),
 5. add the CarPlay information element:
    `connmanctl tether_carplay_ie wifi on <manufacturer> <model> <name> <id> <btaddr>`,
 6. start `carplay_iAP2.service` and `carplay_mdnsd.service` if needed,
 7. set `ENABLE_WIRELESS_CARPLAY=true` in `/app/data/vbt/VBTConfig.json` and
    restart `vbtd` only if the file changed.
 
-**Start CarPlay pairing** (on the CarPlay AP tab) additionally:
+**Start CarPlay AP** (on the CarPlay AP tab) additionally:
 
 1. enables Bluetooth powered/discoverable/pairable through the vendor `vbtd`
    CommonAPI adapter on the **session bus** (`/tmp/session_appmgr.env`),
@@ -246,6 +258,24 @@ discoverability off again.
 If pairing reports “Bluetooth control unavailable”, the exact vendor D-Bus
 name differs on that build; the diagnostic stick prints the session-bus names
 and the adapter introspection XML so the candidate list can be updated.
+
+### Firmware-verified command syntax
+
+The car binaries were executed with the firmware's own loader to capture
+their parser behaviour, not just their help text:
+
+| Command | Verified form |
+|---|---|
+| AP tether | `connmanctl tether wifi on <ssid> <psk> --hidden no --frequency 5180 --maxsta 2 --appinfo 1` |
+| CarPlay IE | `connmanctl tether_carplay_ie wifi on <mfg> <model> <name> <id> <btaddr>` |
+| Client key | ConnMan agent flow: `agent on`, `connect <service>`, passphrase on stdin |
+| `wpa_cli` | `wpa_cli -p /var/run/wpa_supplicant -i wlan0 ...` |
+| `wpa_supplicant` v2.5 | no `-f`, no `-B`; `-u -Dnl80211,wext -i wlan0 -c <conf> -P <pid>` |
+
+This build has **no `connmanctl config --wifi`**; the old command printed
+`Error '--wifi': Invalid argument` and connmand then refused the connect
+with `Not registered` because no agent was registered. The daemon now runs
+the agent flow and redacts the passphrase from captured output.
 
 ---
 
@@ -325,6 +355,17 @@ Backups under `/rw_data/wifi/backup/` are kept; the live config and imported cre
 
 ---
 
+## VM validation
+
+The app has been validated against the real firmware in the project's
+QEMU/KVM harness (vendor kernel + decrypted 260128 rootfs): vendor Qt 5.4
+qmllint over every shipped QML file, the daemon on the guest kernel, the
+tether/agent command forms against real connmand, the Home/Star session-bus
+watcher, log dumps onto a real Tuxera texfat stick, full install/restore on
+the real QML tree, and a real AppHomeScreen launch that loads the patched
+qml_eco3.0 tree and draws the patched Advanced page with zero QML errors.
+See `docs/FINDINGS.md` §5.2f.
+
 ## Known limitations / risks
 
 - Wireless CarPlay is not yet proven on this exact car. Apple authentication,
@@ -333,9 +374,10 @@ Backups under `/rw_data/wifi/backup/` are kept; the live config and imported cre
 - `carplay_iAP2.service` runs `/etc/iap2_mod.sh`, which may switch the front
   USB port to gadget mode. If it is already running for wired CarPlay, the
   app leaves it alone; if not, test USB media afterwards.
-- The OEM `supplicantmanager` can respawn and reclaim `wlan0`; the daemon stops
-  it and runs a watchdog, but a reboot/firmware update can recreate
-  `/tmp/no_unece`.
+- The OEM `supplicantmanager` is masked by the installer; a firmware update
+  can reset `/etc/systemd/system` and undo the mask. The daemon's watchdog
+  still stops a respawned manager, and the diagnostic reports the mask
+  state.
 - SSH password auth uses a known default password. Change it.
 - The app is a QML page inside `AppHomeScreen`, not a separate AppLauncher
   app ID/process (same limitation as Hello/Battery).

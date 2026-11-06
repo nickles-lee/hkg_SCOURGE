@@ -34,7 +34,9 @@ fail() { log "FAIL: $*"; result "status=FAIL" "error=$*"; exit 1; }
 
 mount -o remount,rw "$USB_DIR" 2>/dev/null || true
 [ -f "$USB_DIR/manifest.md5" ] || fail "manifest.md5 missing"
-if ! ( cd "$USB_DIR" && md5sum -c manifest.md5 ) > "$RW_DIR/restore-manifest.log" 2>&1; then
+MD5SUM_BIN=md5sum
+command -v md5sum >/dev/null 2>&1 || MD5SUM_BIN=md5sum.coreutils
+if ! ( cd "$USB_DIR" && "$MD5SUM_BIN" -c manifest.md5 ) > "$RW_DIR/restore-manifest.log" 2>&1; then
     fail "manifest check failed"
 fi
 
@@ -128,11 +130,18 @@ fi
 
 # Keep backups; remove runtime pieces and secrets.
 rm -f "$RW_DIR/wifi_daemon" "$RW_DIR/status.json" "$RW_DIR/daemon.log" \
-      "$RW_DIR/config.conf" "$RW_DIR/wifi.txt" 2>/dev/null || true
+      "$RW_DIR/config.conf" "$RW_DIR/wifi.txt" "$RW_DIR/home.json" \
+      "$RW_DIR/apply.result" "$RW_DIR/bt.state" "$RW_DIR/ssh.bound" \
+      "$RW_DIR/wpa_supplicant.conf" "$RW_DIR/wpa_supplicant.log" \
+      "$RW_DIR/wpa_supplicant.pid" "$RW_DIR/connman.agent" 2>/dev/null || true
 rm -rf "$RW_DIR/bin" "$RW_DIR/ssh" "$RW_DIR/home" 2>/dev/null || true
 
 if command -v systemctl >/dev/null 2>&1; then
+    # The installer masked the OEM WiFi manager so it could not respawn and
+    # fight for the control socket.  Put the stock state back.
+    systemctl unmask supplicantmanager.path supplicantmanager.service 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
+    systemctl start supplicantmanager.path 2>/dev/null || true
 fi
 sync
 

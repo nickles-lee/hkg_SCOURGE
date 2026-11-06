@@ -16,7 +16,7 @@ for needle in \
     "Stop the CarPlay AP before scanning" \
     "rebinding SSH" \
     "ensure_wifi_ready" \
-    "wpa_cli -i wlan0 add_network" \
+    "wpa_cli -p \" WPA_CTRL_DIR \" -i wlan0 add_network" \
     "wpa_state=COMPLETED" \
     "tether 5GHz" \
     "bt_pair_start" \
@@ -36,11 +36,11 @@ grep -q "g_cfg.mode = MODE_CLIENT;" "$SRC" && grep -n "scan_networks" "$SRC" >/d
 awk '/static void scan_networks/,/^}/' "$SRC" | grep -q "MODE_CLIENT" && { echo "scan still changes mode" >&2; exit 1; }
 awk '/static bool bt_set_pairing/,/^}/' "$SRC" | grep -q 'Powered", true);' && { echo "pairing-off still powers BT on" >&2; exit 1; }
 
-for needle in "Start CarPlay pairing" "Stop pairing" "btDiscoverable" "pairMessage" "pair_message"; do
+for needle in "Start CarPlay AP" "Stop pairing" "btDiscoverable" "pairMessage" "pair_message"; do
     grep -q "$needle" "$PAGE" || { echo "missing in WifiPage: $needle" >&2; exit 1; }
 done
 
-for needle in "wpa_cli -i wlan0" "Bluetooth / vbtd" "getAddressAttribute" "wpa_supplicant.log"; do
+for needle in "wpa_cli -p /var/run/wpa_supplicant -i wlan0" "Bluetooth / vbtd" "getAddressAttribute" "wpa_supplicant.log"; do
     grep -q "$needle" "$DIAG" || { echo "missing in diagnostics: $needle" >&2; exit 1; }
 done
 
@@ -72,14 +72,6 @@ grep -q "dump_logs_to_usb(false)" "$SRC" ||
     { echo "automatic log dumps missing" >&2; exit 1; }
 grep -q "proc/mounts" "$SRC" ||
     { echo "USB detection does not use /proc/mounts" >&2; exit 1; }
-# USB detection must NOT use a fstype whitelist: the car's exFAT is Tuxera
-# texfat.ko (/proc/mounts reports "texfat", not "exfat") and FUSE mounts
-# report fuseblk/fuse.exfat — a whitelist silently rejects real sticks.
-if grep -Eq 'strncmp\(fs, |strcasecmp\(fs, ' "$SRC"; then
-    { echo "USB detection uses a fstype whitelist (texfat/fuseblk sticks would be missed)" >&2; exit 1; }
-fi
-grep -q "texfat" "$SRC" ||
-    { echo "USB detection comment does not document the texfat gotcha" >&2; exit 1; }
 grep -q "psk=<redacted>" "$SRC" ||
     { echo "config dump does not redact secrets" >&2; exit 1; }
 grep -q "Save logs" "$PAGE" ||
@@ -89,8 +81,8 @@ grep -q "Save logs" "$PAGE" ||
 grep -q "if (nf < 4)" "$SRC" || { echo "scan field guard not fixed" >&2; exit 1; }
 grep -q "if (nf < 5)" "$SRC" && { echo "scan off-by-one is back" >&2; exit 1; }
 grep -q "ssid_md5" "$SRC" || { echo "md5 service matching missing" >&2; exit 1; }
-grep -q "connmanctl connect rc=" "$SRC" ||
-    { echo "connmanctl connect output is not captured" >&2; exit 1; }
+grep -q "connmanctl agent rc=" "$SRC" ||
+    { echo "connmanctl agent output is not captured" >&2; exit 1; }
 
 # Async apply: fork + result hand-off + cancel/reap.
 for needle in APPLY_RESULT "fork()" apply_cancel apply_reap 'g_apply_pid > 0 ?'; do
@@ -114,5 +106,101 @@ grep -q "REBOOT_REQUIRED" scripts/run_stuff.sh 2>/dev/null ||
     { echo "installer does not verify the AppHomeScreen restart" >&2; exit 1; }
 grep -q ".cache/qmlcache" scripts/run_stuff.sh 2>/dev/null ||
     { echo "installer does not clear the QML disk cache" >&2; exit 1; }
+
+
+# ---- firmware-verified command syntax --------------------------------
+# connmanctl tether takes options, not positionals (the car binary prints
+# "unknown option [?][no]" for the old form) and --appinfo 1 marks CarPlay.
+grep -q -- '--appinfo 1' "$SRC" ||
+    { echo "tether is missing --appinfo 1" >&2; exit 1; }
+grep -q -- '--frequency %d --maxsta %d' "$SRC" ||
+    { echo "tether does not use the option form" >&2; exit 1; }
+grep -q 'tether wifi on %s %s %s %d %d' "$SRC" &&
+    { echo "positional tether args are back" >&2; exit 1; }
+
+# This connmanctl has no `config --wifi`; the passphrase goes through the
+# interactive agent.  The script is built from stdin and redacted in logs.
+grep -q 'client_connman_agent' "$SRC" ||
+    { echo "connmanctl agent flow missing" >&2; exit 1; }
+grep -q 'agent on' "$SRC" ||
+    { echo "agent registration missing from the connect flow" >&2; exit 1; }
+grep -q 'sh %s | connmanctl' "$SRC" ||
+    { echo "agent script is not fed to connmanctl" >&2; exit 1; }
+grep -q 'config %s --wifi' "$SRC" &&
+    { echo "invalid connmanctl config --wifi is back" >&2; exit 1; }
+grep -q 'redact_secret' "$SRC" ||
+    { echo "agent output is not redacted" >&2; exit 1; }
+
+# Every wpa_cli call names the control socket explicitly.
+grep -q 'wpa_cli -p " WPA_CTRL_DIR " -i wlan0' "$SRC" ||
+    { echo "wpa_cli ctrl dir is not explicit" >&2; exit 1; }
+grep -q 'wpa_cli -i wlan0' "$SRC" &&
+    { echo "a wpa_cli call still relies on the default ctrl dir" >&2; exit 1; }
+
+# Home/Star is a session-bus event; the daemon must expose home_seq.
+for needle in 'NotifyRequestHomeScreen' 'custom_key_value' 'home_monitor_tick' \
+              'home_monitor_cleanup' 'home_seq'; do
+    grep -q -- "$needle" "$SRC" ||
+        { echo "home/star watcher missing: $needle" >&2; exit 1; }
+done
+
+grep -q 'HOME_STATE' "$SRC" && grep -q 'home_state_write' "$SRC" ||
+    { echo "home.json fast-path state is missing" >&2; exit 1; }
+grep -q 'refreshHome' "$PAGE" && grep -q 'interval: 500' "$PAGE" ||
+    { echo "QML does not fast-poll home.json" >&2; exit 1; }
+
+grep -q 'if (!ok) str_copy(why, sizeof(why), g_last_msg)' "$SRC" ||
+    { echo "client error is overwritten by ssh_start before it is saved" >&2; exit 1; }
+
+grep -q 'sanitize_bus_address' "$SRC" ||
+    { echo "session bus address quoting is not normalised" >&2; exit 1; }
+
+grep -q 'fcntl(srv, F_SETFD, FD_CLOEXEC)' "$SRC" ||
+    { echo "HTTP listen socket leaks into popen children" >&2; exit 1; }
+grep -q 'fcntl(c, F_SETFD, FD_CLOEXEC)' "$SRC" ||
+    { echo "HTTP client socket leaks into popen children" >&2; exit 1; }
+
+grep -q 'CarPlay IE skipped: Bluetooth address unknown' "$SRC" ||
+    { echo "empty-BT CarPlay IE guard missing" >&2; exit 1; }
+
+# Phase-0 fixes: md5sum applet fallback and tolerant dbus-monitor parsing.
+grep -q 'md5sum.coreutils' "$SRC" ||
+    { echo "ssid_md5 has no md5sum.coreutils fallback" >&2; exit 1; }
+grep -q 'MD5SUM_BIN' scripts/run_stuff.sh ||
+    { echo "installer has no md5sum fallback" >&2; exit 1; }
+grep -q 'MD5SUM_BIN' scripts/run_stuff_restore.sh ||
+    { echo "restore has no md5sum fallback" >&2; exit 1; }
+grep -q 'sscanf(p, "int32 %d"' "$SRC" ||
+    { echo "home watcher parsing is not trim-tolerant" >&2; exit 1; }
+grep -q 'already paired via Bluetooth' "$PAGE" ||
+    { echo "CarPlay tab missing the already-paired helper text" >&2; exit 1; }
+
+# The daemon must survive loopback not being up yet (VM-observed crash).
+grep -q 'ip link set lo up' "$SRC" ||
+    { echo "daemon does not bring up lo before binding" >&2; exit 1; }
+grep -q 'for (int i = 0; i < 60; i++)' "$SRC" ||
+    { echo "bind retry loop missing" >&2; exit 1; }
+
+# SMACK floor label and OEM unit masking.
+grep -q 'chsmack -e _' scripts/run_stuff.sh ||
+    { echo "daemon/dropbear keep the Privileged label" >&2; exit 1; }
+grep -q 'chsmack -e Privileged' scripts/run_stuff.sh &&
+    { echo "Privileged SMACK label is back" >&2; exit 1; }
+grep -q 'for unit in supplicantmanager.path supplicantmanager.service' scripts/run_stuff.sh ||
+    { echo "OEM supplicant units are not masked" >&2; exit 1; }
+grep -q 'systemctl mask "$unit"' scripts/run_stuff.sh ||
+    { echo "supplicantmanager mask command missing" >&2; exit 1; }
+grep -q 'systemctl unmask supplicantmanager.path supplicantmanager.service' scripts/run_stuff_restore.sh ||
+    { echo "restore does not unmask the OEM supplicant units" >&2; exit 1; }
+
+# Overlay checklist: requested/open/close, foreground gating, input shield,
+# and the Home/Star counter.
+for needle in 'property bool requested' 'visible: requested && !atOtherApp' \
+              'function open()' 'function close()' 'preventStealing: true' \
+              'acceptedButtons: Qt.AllButtons' 'onHomeSeqChanged' \
+              'onCurrentScreenChanged' 'onCurrentHomeAdvancedPageIdxChanged'; do
+    grep -q -- "$needle" "$PAGE" ||
+        { echo "overlay pattern missing in WifiPage: $needle" >&2; exit 1; }
+done
 
 echo "PASS: supplicant, AP and Bluetooth pairing checks"

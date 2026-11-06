@@ -55,7 +55,9 @@ the stack directly and bypasses the gate.
 
 ### AP / hotspot
 
-- `connmanctl tether wifi on <ssid> <psk> <hidden> <freq> <maxsta>`.
+- `connmanctl tether wifi on <ssid> <psk> --hidden <yes|no>
+  --frequency <MHz> --maxsta <n> --appinfo 1` (verified by executing the
+  car binary; the positional form is rejected).
 - ConnMan has `enable_wifi_tethering`, `dhcp_server_start`,
   `TetheringIdentifier`, `TetheringPassphrase`, `TetheringFrequency`,
   `TetheringMaxSta`.
@@ -90,9 +92,9 @@ Driver/ConnMan support P2P; not used.
 ## 5. SSH
 
 - No stock SSH server.
-- Static `dropbearmulti` built for the owner-access project:
-  `initial_root/third_party/ioniq5-usb-toctou/pizero/payload/bin/dropbearmulti`
-  (425,392 bytes, static musl x86-64).
+- Static `dropbearmulti` built by `packages/wifi/scripts/build_dropbear.sh`
+  (pinned Alpine container / musl-gcc; static musl x86-64, ~425 KB, with the
+  static-link gate in the same script).
 - Prior field test started it over the AP and connected.
 - Password auth now enabled for user `car` / `electric`; key import supported.
 - Firewall default `DROP`; app adds a `wlan0` rule for the chosen port.
@@ -223,6 +225,165 @@ nohup /usr/sbin/wpa_supplicant -u -Dnl80211,wext -iwlan0 \
 - **Live console**: `GET /logs?source=...` returns the last 16 KB of a log;
   the wide layout shows a right-hand console with daemon/supplicant tabs
   and a Dump button.
+
+### 5.2e On-car round 4 fixes (2026-11-06)
+
+The on-car log showed `cmd_tether_wifi: unknown args/options`, "Error
+enabling wifi tethering: Permission denied", a dead wpa_supplicant control
+socket, and ConnMan "Not registered".  The car binaries were executed with
+the firmware loader (`ld-2.25.so` + the firmware libraries) to verify each
+command instead of trusting the help text:
+
+- **Tether args** — the vendor parser accepts only
+  `--hidden/--frequency/--maxsta/--appinfo`:
+  `tether wifi on <ssid> <psk> --hidden no --frequency 5180 --maxsta 2
+  --appinfo 1` reports `hidden [0] frequency [5180] maxsta [2]
+  app_info [1]`.  The old positional form reports
+  `unknown option [?][no]` / `unknown option [?][5180]`, exactly the car
+  log.  The daemon now uses the option form for both 5 GHz and the 2.4 GHz
+  fallback.
+- **No `config --wifi`** — this build's `connmanctl config` only covers
+  nameservers/timeservers/domains/ipv4/ipv6/proxy/autoconnect/remove.
+  `config <service> --wifi passphrase ...` prints
+  `Error '--wifi': Invalid argument`, then `connect` fails with
+  `Not registered` because no agent is registered.  Client mode now runs
+  the agent flow (`agent on` → `connect <service>` → passphrase → `quit`)
+  with a paced stdin script, and redacts the key from the captured output.
+- **SMACK** — the installer used `chsmack -e Privileged`.  That label is
+  inherited by wpa_supplicant, wpa_cli and connmanctl, and has no rule for
+  the ConnMan/supplicant sockets.  The Battery daemon deliberately uses the
+  floor label `_`; WiFi now does the same for `wifi_daemon` and
+  `dropbearmulti`.  This addresses the tethering "Permission denied" and
+  the dead control socket.
+- **OEM respawn** — `supplicantmanager.service` is `Restart=always` behind
+  `supplicantmanager.path`; stopping it only makes it respawn and reclaim
+  `/var/run/wpa_supplicant/wlan0`.  The installer now masks both units;
+  the restore script unmasks and restarts the path unit.
+- **Control socket** — every `wpa_cli` call now passes
+  `-p /var/run/wpa_supplicant` explicitly, and a failed ping logs the
+  directory listing (rate-limited).
+- **Overlay geometry and input** — the page is at `y = MENU_BAR_Y` with
+  header content starting ~24 px inside it, so the exit button and console
+  tabs are no longer at the bar's edge.  It follows
+  `APP_OVERLAY_CHECKLIST.md`: `requested`/`open()`/`close()`,
+  `visible: requested && !isAtOtherApp`, navigation/foreground close
+  handlers, and a full `preventStealing` all-buttons shield with content at
+  `z: 2`.
+- **Session-bus address quoting** — Dbuslaunch has written both
+  `DBUS_SESSION_BUS_ADDRESS=unix:...` and the shell-quoted
+  `DBUS_SESSION_BUS_ADDRESS='unix:...';` form.  `session_bus_address()`
+  now strips the quotes/semicolon and a stale `guid=` before handing the
+  address to `dbus-send`/`dbus-monitor`; this also hardens BT pairing.
+- **Misleading client error** — `ssh_start()` sets "SSH deferred: no WLAN
+  IP" when there is no address, and it ran *before* the failure message was
+  copied.  Every client failure therefore looked like an SSH problem.  The
+  real association/DHCP error is now captured first.
+- **Socket inheritance** — `popen` children inherited the HTTP listener;
+  a hung `systemctl` kept the port bound after the daemon was killed.  The
+  listener and accepted sockets are now `FD_CLOEXEC`.
+- **Home/Star** — the daemon now tails the session bus with `dbus-monitor`
+  (`NotifyRequestHomeScreen` / `custom_key_value`), writes a tiny
+  `home.json` immediately and exposes `home_seq`/`home_epoch` in
+  `/status`.  The QML polls `home.json` at 500 ms while open and closes on a
+  new event; `home_epoch` prevents a daemon restart (counter reset) from
+  being mistaken for a key press.
+
+### 5.2f VM validation on the real firmware (2026-11-06/07)
+
+The app was validated in a local QEMU/KVM harness booting the exact vendor
+kernel 4.1.27-abl + decrypted 260128 rootfs (SMACK active, vendor Qt 5.4,
+Tuxera texfat).  Runs used per-run qcow2 overlays; the shared images were
+never modified.
+
+**Tier 1 — vendor QML parser + daemon**
+
+- All 21 shipped QML artifacts (WifiPage, tiles, all 12 patched host
+  variants, Q_ThemeImage) pass the car's own `/usr/bin/qt5/qmllint`
+  (Qt 5.4), plus a stock control file.
+- **Bug found and fixed**: the daemon died instantly with
+  `bind(http): Cannot assign requested address` when loopback was not up
+  yet.  It now brings `lo` up and retries the bind for 30 s.
+- In-guest soak (~80 s, no wlan0): daemon alive, `status.json`/`home.json`
+  written, HTTP `/status` and `/logs?source=...` return 200, clean SIGTERM.
+- `md5sum` resolves on the firmware image (both the busybox applet and
+  `/usr/bin/md5sum.coreutils` exist); the daemon/installer fallback is
+  harmless insurance.
+- Guest facts: busybox has **no** `wget` applet (use `bash /dev/tcp`).
+
+**Tier 2 — real firmware services**
+
+- Real `connmand` 1.29 + system bus started in-guest.  The option-form
+  tether produces `cmd_tether_wifi arg num [13] hidden [0] frequency [5180]
+  maxsta [2] app_info [1]` and issues the real D-Bus calls; the positional
+  control reproduces `unknown option [?][no]/[?][5180]`.  `config --wifi`
+  reproduces the exact car error.  Server-side "Method ... doesn't exist"
+  errors are environmental: the VM has no network interfaces, so connmand
+  registers no technology objects.  The actual SetProperty/tether acceptance
+  still needs the car's wifi technology.
+- `connmanctl` **exits 0 even on server errors** — validates the daemon's
+  design of checking output text for "Error", not just the exit code.
+- Agent flow: `agent on` registers against real connmand; the paced stdin
+  script behaves (no premature passphrase consumption).
+- SMACK A/B: inconclusive in the VM (default policy, not the car's rule
+  set).  Learned: `/usr/sbin/connmand` itself carries `SMACK64="_"`, and
+  `chsmack -e` (SMACK64EXEC) works for both `Privileged` and `_`.
+- wpa_supplicant v2.5 `-u -g` global ctrl socket + `wpa_cli -g ... ping`
+  works (both labels).
+- **Home/Star watcher fully validated** against the real session bus:
+  a dispatched `NotifyRequestHomeScreen` method call bumps `seq` with
+  `source:"home"`; a `custom_key_value` signal bumps it with
+  `source:"star"` and the right `last_app_key`.  Method calls to *unowned*
+  names are rejected by the bus pre-dispatch and invisible to
+  dbus-monitor — on the car the name is owned, so this is VM-only
+  behaviour.
+- **texfat log dump validated end-to-end**: the real Tuxera driver mounts
+  the exFAT stick as `texfat` (exact car fstype string) and
+  `--dump-logs` writes a complete bundle (daemon/wpa/ssh logs, redacted
+  config, home.json, state.txt with SMACK labels and mask state).
+
+**Tier 3 — installer end-to-end on the real QML tree**
+
+- `run_stuff.sh` against the real `/app/share/AppHomeScreen`:
+  `status=OK`, `variant=wifi/wifi/wifi/wifi/wifi` (the VM rootfs matches
+  our reference md5s — no firmware drift), `oem_mask=ok`,
+  `daemon=systemd-restart-failed+manual` — **the manual-start fallback
+  branch was exercised for the first time and works**.
+- Installed QML keeps the stock SMACK label (`SMACK64="_"`); the daemon
+  and dropbearmulti get `SMACK64EXEC="_"`; `car` lands in passwd,
+  passwd.legacy, passwd.secure and shadow.Global; both supplicantmanager
+  units report `masked`.
+- `run_stuff_restore.sh` returns the Advanced QML to the exact stock md5,
+  removes the user, daemon and WiFi QML, and unmask succeeds.
+
+**Tier 4 — real AppHomeScreen with the patched QML**
+
+- The real launcher verifies AppHomeScreen's stock `.sign` (`CheckSign
+  ret = 1`) and spawns it with the full vendor argv; the app registers
+  (`[REGISTERED] AppId[11]`) and creates its IVI surface.
+- Direct launch with `-gui:3` (the car's eco3.0 selector) confirms:
+  `m_qmlBasePath ... "/app/share/AppHomeScreen/qml_eco3.0/"` — the
+  **patched tree** — then `screenNext:
+  "HomeScreen/QHMI_HomeScreenMain_Advanced.qml"`, `SCREEN_STATE: START
+  DRAW` → `DRAW FINISHED` with **zero QML errors**.  The patched Advanced
+  (WifiTile + WifiPage embedded) loads cleanly in the real engine with the
+  real ConstantModel/defineModel.
+- The process later dies on the headless-compositor teardown
+  (`wl_display error: invalid object`) — the documented harness graphics
+  limitation, not our QML.
+- VM facts worth remembering: the launcher passes `-gui:1` by default
+  (bootinfo-dependent), and the launcher redirects child stdout to
+  /dev/null — capture requires a direct launch.
+
+**VM environment gotchas (for future runs)**
+
+- `/var` is a symlink into `/rw_data`: `mkdir -p /var/run` fails on the
+  dangling link — create `/rw_data/var/...` first.
+- `dbus-daemon --system` needs `/tmp/passwd` (esinit normally provides
+  it): `cp /etc/passwd.legacy /tmp/passwd`.
+- `/mnt` is a symlink; use `/media` or `/tmp` for mounts.
+- The 4.1 kernel refuses a second mount of the same ext4 with different
+  options (rw then ro); bind-mount instead.
+- `timeout(1)` does not exist in the guest.
 
 ### 5.3 WiFi supplicant ownership
 

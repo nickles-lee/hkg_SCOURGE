@@ -64,8 +64,12 @@
 #define APPLY_RESULT   APP_DIR "/apply.result"
 #define BT_STATE       APP_DIR "/bt.state"
 #define SSH_BOUND      APP_DIR "/ssh.bound"
+#define HOME_STATE     APP_DIR "/home.json"
 #define SESSION_ENV    "/tmp/session_appmgr.env"
 #define SESSION_ADDR   "/tmp/session_appmgr"
+#define WPA_CTRL_DIR   "/var/run/wpa_supplicant"
+#define HOME_BUS_FILE  "/tmp/session_appmgr"
+#define DBUS_MONITOR   "/usr/bin/dbus-monitor"
 
 #define BCMDHD_KO \
     "/lib/modules/4.1.27-abl/kernel/drivers/net/wireless/bcmdhd/bcmdhd.ko"
@@ -133,6 +137,17 @@ static bool g_bt_discoverable;
 static bool g_bt_pairable;
 static int64_t g_bt_fail_ms;
 static char g_pair_msg[256];
+static pid_t g_home_pid = -1;
+static int g_home_fd = -1;
+static int64_t g_home_retry_ms;
+static int g_home_seq;
+static long g_home_epoch;
+static char g_home_source[12] = "none";
+static int g_home_last_key = -1;
+static bool g_home_monitor;
+static char g_home_line[512];
+static size_t g_home_line_len;
+static char g_home_member[48];
 
 /* ------------------------------------------------------------------ */
 /* small helpers                                                       */
@@ -254,6 +269,20 @@ static void shq(char *dst, size_t n, const char *src)
     }
     if (j + 1 < n) dst[j++] = '\'';
     dst[j] = 0;
+}
+
+/* Overwrite every occurrence of a secret in a captured command output.
+ * connmanctl's interactive loop may print an unrecognised line verbatim;
+ * the passphrase is one of those lines when no RequestInput was needed. */
+static void redact_secret(char *buf, const char *secret)
+{
+    if (!buf || !secret || !*secret) return;
+    size_t sl = strlen(secret);
+    char *p = buf;
+    while ((p = strstr(p, secret)) != NULL) {
+        memset(p, '*', sl);
+        p += sl;
+    }
 }
 
 static void json_escape(char *dst, size_t n, const char *src)
@@ -536,8 +565,13 @@ static bool ssid_md5(const char *ssid, char *out, size_t n)
     if (out && n) out[0] = 0;
     char ssid_q[256], raw[128];
     shq(ssid_q, sizeof(ssid_q), ssid);
-    if (sh_out(raw, sizeof(raw), "printf %%s %s | md5sum 2>/dev/null",
-               ssid_q) != 0)
+    /* This firmware ships md5sum only as a busybox applet; the coreutils
+     * binary is /usr/bin/md5sum.coreutils.  Try both so the service-id
+     * hash never depends on the applet alone. */
+    if (sh_out(raw, sizeof(raw),
+               "(printf %%s %s | md5sum) 2>/dev/null || "
+               "(printf %%s %s | md5sum.coreutils) 2>/dev/null",
+               ssid_q, ssid_q) != 0)
         return false;
     char *p = trim(raw);
     if (strlen(p) < 32) return false;
@@ -974,7 +1008,21 @@ static bool load_driver(void)
 
 static bool wpa_ping(void)
 {
-    return sh("wpa_cli -i wlan0 ping 2>/dev/null | grep -q PONG") == 0;
+    if (sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 ping 2>/dev/null | grep -q PONG") == 0)
+        return true;
+
+    /* A running supplicant with a dead/unreadable socket is the classic
+     * SMACK-label mismatch seen on this car.  Log the socket state (at most
+     * once a minute) so the reason is in the console and the log bundle. */
+    static int64_t last_log;
+    int64_t now = now_ms();
+    if (now - last_log > 60000) {
+        last_log = now;
+        char ls[1024] = "";
+        sh_out(ls, sizeof(ls), "ls -la " WPA_CTRL_DIR " 2>&1");
+        log_msg("wpa_cli ping failed; ctrl dir: %s", trim(ls));
+    }
+    return false;
 }
 
 static void stop_wpa_supplicant(void)
@@ -1111,7 +1159,7 @@ static bool ensure_wifi_ready(void)
 static bool wpa_state_completed(void)
 {
     char buf[2048];
-    if (sh_out(buf, sizeof(buf), "wpa_cli -i wlan0 status 2>/dev/null") != 0)
+    if (sh_out(buf, sizeof(buf), "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 status 2>/dev/null") != 0)
         return false;
     return strstr(buf, "wpa_state=COMPLETED") != NULL;
 }
@@ -1143,12 +1191,20 @@ static bool ap_start(void)
     sh("connmanctl tether_carplay_ie wifi off 2>/dev/null");
     sh("connmanctl tether wifi off 2>/dev/null");
     sh("connmanctl enable wifi 2>/dev/null");
-    sh("wpa_cli -i wlan0 disconnect 2>/dev/null");
+    sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 disconnect 2>/dev/null");
     iface_up();
 
+    /* This vendor connmanctl parses tether options, not positionals.
+     * Verified by executing the car binary with its own loader:
+     *   tether wifi on <ssid> <psk> --hidden no --frequency 5180 --maxsta 2
+     *            --appinfo 1
+     * Positional "<hidden> <frequency> <maxsta>" yields
+     * "unknown option [?][no]" and "unknown option [?][5180]" - the exact
+     * errors in the on-car log.  --appinfo 1 marks the AP as CarPlay. */
     char out[4096] = "";
     int rc = sh_out(out, sizeof(out),
-                    "connmanctl tether wifi on %s %s %s %d %d 2>&1",
+                    "connmanctl tether wifi on %s %s --hidden %s "
+                    "--frequency %d --maxsta %d --appinfo 1 2>&1",
                     ssid_q, psk_q, g_cfg.cp_hidden ? "yes" : "no", freq,
                     g_cfg.cp_max_sta);
     log_msg("tether 5GHz rc=%d out=%s", rc, trim(out));
@@ -1163,7 +1219,8 @@ static bool ap_start(void)
         /* 5 GHz / channel 36 may be rejected by the driver or regdomain.
          * Retry on 2.4 GHz channel 6 and remember it if that works. */
         rc = sh_out(out, sizeof(out),
-                    "connmanctl tether wifi on %s %s %s %d %d 2>&1",
+                    "connmanctl tether wifi on %s %s --hidden %s "
+                    "--frequency %d --maxsta %d --appinfo 1 2>&1",
                     ssid_q, psk_q, g_cfg.cp_hidden ? "yes" : "no", 2437,
                     g_cfg.cp_max_sta);
         log_msg("tether 2.4GHz rc=%d out=%s", rc, trim(out));
@@ -1204,6 +1261,24 @@ static bool json_get_string_value(const char *path, const char *key,
 /* Bluetooth (vendor vbtd, CommonAPI on the session bus)               */
 /* ------------------------------------------------------------------ */
 
+/* Dbuslaunch has shipped both shell-quoted (`ADDRESS='unix:...';`) and
+ * bare (`ADDRESS=unix:...`) forms.  Normalise before handing the string to
+ * dbus-send/dbus-monitor. */
+static void sanitize_bus_address(char *s)
+{
+    if (!s) return;
+    char *p = s;
+    while (*p == ' ' || *p == '\t' || *p == '\'' || *p == '"') p++;
+    char *e = p + strlen(p);
+    while (e > p &&
+           (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' ||
+            e[-1] == '\r' || e[-1] == '\'' || e[-1] == '"' ||
+            e[-1] == ';'))
+        *--e = 0;
+    if (p != s)
+        memmove(s, p, strlen(p) + 1);
+}
+
 static bool session_bus_address(char *out, size_t n)
 {
     if (out && n) out[0] = 0;
@@ -1219,6 +1294,7 @@ static bool session_bus_address(char *out, size_t n)
             if (len >= n) len = n - 1;
             memcpy(out, p, len);
             out[len] = 0;
+            sanitize_bus_address(out);
             if (out[0]) return true;
         }
     }
@@ -1226,6 +1302,7 @@ static bool session_bus_address(char *out, size_t n)
         char *v = trim(buf);
         if (*v) {
             str_copy(out, n, v);
+            sanitize_bus_address(out);
             return true;
         }
     }
@@ -1252,6 +1329,150 @@ static bool session_bus_address(char *out, size_t n)
         }
     }
     return out && out[0];
+}
+
+/* ------------------------------------------------------------------ */
+/* Home/Star watcher (session bus)                                     */
+/*                                                                    */
+/* The steering-wheel Home/Star key never reaches QML: the app        */
+/* manager delivers NotifyRequestHomeScreen (method call) or          */
+/* custom_key_value (signal) on the session bus.  Tail dbus-monitor   */
+/* and expose home_seq so the overlay can close itself.  This is the  */
+/* same proven pattern as the Battery daemon.                          */
+/* ------------------------------------------------------------------ */
+
+static void home_state_write(void)
+{
+    char buf[192];
+    snprintf(buf, sizeof(buf),
+             "{\"seq\":%d,\"epoch\":%ld,\"source\":\"%s\","
+             "\"last_app_key\":%d,\"monitor\":%s}\n",
+             g_home_seq, g_home_epoch, g_home_source, g_home_last_key,
+             g_home_monitor ? "true" : "false");
+    write_file_atomic(HOME_STATE, buf, 0644);
+}
+
+static void home_monitor_line(const char *line)
+{
+    if (strstr(line, "member=custom_key_value")) {
+        snprintf(g_home_member, sizeof(g_home_member), "custom_key_value");
+        return;
+    }
+    if (strstr(line, "member=NotifyRequestHomeScreen")) {
+        g_home_seq++;
+        snprintf(g_home_source, sizeof(g_home_source), "home");
+        g_home_member[0] = 0;
+        home_state_write();
+        return;
+    }
+    if (g_home_member[0]) {
+        int v;
+        /* dbus-monitor prints the argument on its own line, indented by a
+         * space.  Do not rely on the exact indentation: trim, then match. */
+        const char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (sscanf(p, "int32 %d", &v) == 1) {
+            g_home_last_key = v;
+            g_home_seq++;
+            snprintf(g_home_source, sizeof(g_home_source), "star");
+            home_state_write();
+        }
+        g_home_member[0] = 0;
+    }
+}
+
+static void home_monitor_start(void)
+{
+    if (g_home_fd >= 0) return;
+
+    char addr[1024];
+    if (!session_bus_address(addr, sizeof(addr)))
+        return;   /* Dbuslaunch has not written the address yet; retry. */
+
+    /* A stale guid in the address file would make libdbus refuse the
+     * connection after a bus restart; the path alone identifies the bus. */
+    char *guid = strstr(addr, ",guid=");
+    if (guid) *guid = 0;
+
+    int fds[2];
+    if (pipe(fds) < 0) return;
+    pid_t pid = fork();
+    if (pid < 0) { close(fds[0]); close(fds[1]); return; }
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], STDOUT_FILENO);
+        dup2(fds[1], STDERR_FILENO);
+        close(fds[1]);
+        int nul = open("/dev/null", O_RDONLY);
+        if (nul >= 0) { dup2(nul, STDIN_FILENO); close(nul); }
+        execl(DBUS_MONITOR, "dbus-monitor", "--address", addr,
+              "type='signal',interface='com.lge.avn.appmanager.info',"
+              "member='custom_key_value'",
+              "type='method_call',interface='com.lge.hkmc.avn.appfunc.appInterface',"
+              "member='NotifyRequestHomeScreen'",
+              (char *)NULL);
+        _exit(127);
+    }
+    close(fds[1]);
+    int fl = fcntl(fds[0], F_GETFL, 0);
+    if (fl >= 0) fcntl(fds[0], F_SETFL, fl | O_NONBLOCK);
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    g_home_fd = fds[0];
+    g_home_pid = pid;
+    g_home_monitor = true;
+    g_home_line_len = 0;
+    g_home_member[0] = 0;
+    home_state_write();
+    log_msg("home monitor: watching %s", addr);
+}
+
+static void home_monitor_tick(void)
+{
+    if (g_home_fd < 0) {
+        int64_t now = now_ms();
+        if (now >= g_home_retry_ms) {
+            g_home_retry_ms = now + 5000;
+            home_monitor_start();
+        }
+        return;
+    }
+
+    char buf[1024];
+    for (;;) {
+        ssize_t n = read(g_home_fd, buf, sizeof(buf));
+        if (n > 0) {
+            for (ssize_t i = 0; i < n; i++) {
+                char c = buf[i];
+                if (c == '\n' || c == '\r') {
+                    if (g_home_line_len > 0) {
+                        g_home_line[g_home_line_len] = 0;
+                        home_monitor_line(g_home_line);
+                        g_home_line_len = 0;
+                    }
+                } else if (g_home_line_len + 1 < sizeof(g_home_line)) {
+                    g_home_line[g_home_line_len++] = c;
+                }
+            }
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        /* EOF or real error: the monitor died (bus shutdown); retry later. */
+        close(g_home_fd);
+        g_home_fd = -1;
+        g_home_monitor = false;
+        home_state_write();
+        return;
+    }
+}
+
+static void home_monitor_cleanup(void)
+{
+    if (g_home_fd >= 0) { close(g_home_fd); g_home_fd = -1; }
+    if (g_home_pid > 0) {
+        kill(g_home_pid, SIGTERM);
+        g_home_pid = -1;
+    }
+    g_home_monitor = false;
 }
 
 static int session_dbus(char *out, size_t n, const char *dest, const char *path,
@@ -1549,6 +1770,15 @@ static bool carplay_ie_on(void)
         shq(bt, sizeof(bt), g_cfg.cp_btaddr);
     }
 
+    if (!g_cfg.cp_btaddr[0]) {
+        /* An empty CarPlayBluetoothAddr makes connmand reject the IE.  The
+         * pairing path powers Bluetooth and fills this in; tell the user
+         * instead of sending a command that cannot succeed. */
+        log_msg("CarPlay IE skipped: Bluetooth address unknown");
+        set_msg("CarPlay IE not set: Bluetooth address unknown; use Start CarPlay pairing");
+        return false;
+    }
+
     char out[2048];
     int rc = sh_out(out, sizeof(out),
                     "connmanctl tether_carplay_ie wifi on %s %s %s %s %s 2>&1",
@@ -1780,30 +2010,32 @@ static bool client_connman_find(char *service, size_t service_n)
 static bool client_connect_wpa_cli(void)
 {
     char idbuf[64];
-    sh("wpa_cli -i wlan0 remove_network all >/dev/null 2>&1");
+    sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 remove_network all >/dev/null 2>&1");
     if (sh_out(idbuf, sizeof(idbuf),
-               "wpa_cli -i wlan0 add_network 2>/dev/null") != 0)
+               "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 add_network 2>/dev/null") != 0)
         return false;
     char *idp = trim(idbuf);
-    if (!*idp || !strncmp(idp, "FAIL", 4))
+    if (!*idp || !strncmp(idp, "FAIL", 4)) {
+        log_msg("wpa_cli add_network failed: %s", idp);
         return false;
+    }
     int id = atoi(idp);
 
     char quoted[512], q[600];
     snprintf(quoted, sizeof(quoted), "\"%s\"", g_cfg.ssid);
     shq(q, sizeof(q), quoted);
-    sh("wpa_cli -i wlan0 set_network %d ssid %s >/dev/null 2>&1", id, q);
+    sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 set_network %d ssid %s >/dev/null 2>&1", id, q);
 
     if (g_cfg.psk[0]) {
         snprintf(quoted, sizeof(quoted), "\"%s\"", g_cfg.psk);
         shq(q, sizeof(q), quoted);
-        sh("wpa_cli -i wlan0 set_network %d psk %s >/dev/null 2>&1", id, q);
-        sh("wpa_cli -i wlan0 set_network %d key_mgmt WPA-PSK >/dev/null 2>&1", id);
+        sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 set_network %d psk %s >/dev/null 2>&1", id, q);
+        sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 set_network %d key_mgmt WPA-PSK >/dev/null 2>&1", id);
     } else {
-        sh("wpa_cli -i wlan0 set_network %d key_mgmt NONE >/dev/null 2>&1", id);
+        sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 set_network %d key_mgmt NONE >/dev/null 2>&1", id);
     }
-    sh("wpa_cli -i wlan0 enable_network %d >/dev/null 2>&1", id);
-    sh("wpa_cli -i wlan0 select_network %d >/dev/null 2>&1", id);
+    sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 enable_network %d >/dev/null 2>&1", id);
+    sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 select_network %d >/dev/null 2>&1", id);
     log_msg("wpa_cli network %d for '%s'", id, g_cfg.ssid);
 
     for (int i = 0; i < 30; i++) {
@@ -1813,6 +2045,69 @@ static bool client_connect_wpa_cli(void)
         usleep(500000);
     }
     return false;
+}
+
+/* This vendor connmanctl has no `config --wifi`: the only config options
+ * are nameservers/timeservers/domains/ipv4/ipv6/proxy/autoconnect/remove.
+ * The passphrase must be supplied by a registered agent, so run the
+ * interactive command loop non-interactively:
+ *
+ *     agent on
+ *     connect <service>
+ *     <passphrase>
+ *     quit
+ *
+ * Verified against the car binary: it prints "Passphrase? " and reads the
+ * next stdin line when connmand raises RequestInput.  The script lives in
+ * a 0600 file (never argv) and is removed immediately. */
+static bool client_connman_agent(const char *service)
+{
+    if (strchr(g_cfg.psk, '\n') || strchr(g_cfg.psk, '\r')) {
+        log_msg("client: passphrase contains a newline; refusing agent flow");
+        return false;
+    }
+
+    /* Feed the interactive loop in real time.  Piping all four lines at
+     * once races the RequestInput callback: readline can consume the
+     * passphrase as a command before connmand asks for it.  A short paced
+     * script lets connmanctl register the agent and raise "Passphrase? "
+     * first.  The passphrase is in a 0600 script, never in argv, and the
+     * script is removed immediately after the run. */
+    char path[128];
+    snprintf(path, sizeof(path), APP_DIR "/connman.agent");
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        log_msg("client: cannot create %s: %s", path, strerror(errno));
+        return false;
+    }
+
+    char psk_q[512];
+    shq(psk_q, sizeof(psk_q), g_cfg.psk);
+
+    fputs("#!/bin/sh\n", f);
+    fputs("printf 'agent on\\n'\n", f);
+    fputs("sleep 1\n", f);
+    fprintf(f, "printf 'connect %s\\n'\n", service);
+    /* Give connmand time to raise RequestInput and install its
+     * "Passphrase? " readline prompt before the key line arrives. */
+    fputs("sleep 5\n", f);
+    if (g_cfg.psk[0])
+        fprintf(f, "printf '%%s\\n' %s\n", psk_q);
+    fputs("sleep 6\n", f);
+    fputs("printf 'quit\\n'\n", f);
+    if (fclose(f) != 0) {
+        log_msg("client: cannot write %s: %s", path, strerror(errno));
+        unlink(path);
+        return false;
+    }
+    chmod(path, 0600);
+
+    char out[4096] = "";
+    int rc = sh_out(out, sizeof(out), "sh %s | connmanctl 2>&1", path);
+    unlink(path);
+    redact_secret(out, g_cfg.psk);
+    log_msg("connmanctl agent rc=%d out=%s", rc, trim(out));
+    return rc == 0 && !strstr(out, "Error");
 }
 
 static bool client_connect(void)
@@ -1829,45 +2124,37 @@ static bool client_connect(void)
     sh("connmanctl enable wifi 2>/dev/null");
     iface_up();
     sh("connmanctl scan wifi 2>/dev/null");
-    sh("wpa_cli -i wlan0 scan >/dev/null 2>&1");
+    sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 scan >/dev/null 2>&1");
 
     char service[256];
     bool found = client_connman_find(service, sizeof(service));
     if (found) {
-        char co[2048] = "";
-        if (g_cfg.psk[0]) {
-            char psk_q[256];
-            shq(psk_q, sizeof(psk_q), g_cfg.psk);
-            int crc = sh_out(co, sizeof(co),
-                             "connmanctl config %s --wifi passphrase %s 2>&1",
-                             service, psk_q);
-            log_msg("connmanctl config rc=%d out=%s", crc, trim(co));
-        }
-        int crc = sh_out(co, sizeof(co), "connmanctl connect %s 2>&1", service);
-        log_msg("connmanctl connect rc=%d out=%s", crc, trim(co));
-        if (crc == 0 && !strstr(co, "Error") && client_wait_ip(40))
+        if (client_connman_agent(service) && client_wait_ip(40))
             return true;
-        log_msg("ConnMan connect to '%s' did not yield an IP; trying wpa_cli", g_cfg.ssid);
+        log_msg("ConnMan agent connect to '%s' did not yield an IP; trying wpa_cli",
+                g_cfg.ssid);
     }
 
     /* Direct wpa_cli path.  This also covers networks ConnMan did not list
      * (hidden/imported SSID).  ConnMan is then used only for DHCP. */
     if (!client_connect_wpa_cli()) {
         char st[2048];
-        sh_out(st, sizeof(st), "wpa_cli -i wlan0 status 2>/dev/null");
+        sh_out(st, sizeof(st), "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 status 2>/dev/null");
         set_msg("client: could not associate with '%s': %s",
                 g_cfg.ssid, trim(st));
         return false;
     }
 
+    /* The supplicant is associated; let ConnMan register the service and
+     * take over DHCP.  If it needs the key, the agent supplies it. */
     found = client_connman_find(service, sizeof(service));
     if (found)
-        sh("connmanctl connect %s 2>/dev/null", service);
+        client_connman_agent(service);
 
     if (client_wait_ip(40)) return true;
 
     char st[2048];
-    sh_out(st, sizeof(st), "wpa_cli -i wlan0 status 2>/dev/null");
+    sh_out(st, sizeof(st), "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 status 2>/dev/null");
     set_msg("client connected to '%s' but no IP: %s", g_cfg.ssid, trim(st));
     return false;
 }
@@ -2314,13 +2601,15 @@ static bool apply_mode_work(bool pair)
         ap_stop();
         carplay_ie_off();
         bool ok = client_connect();
+        /* Capture the real association/DHCP error before ssh_start() can
+         * replace g_last_msg with "SSH deferred: no WLAN IP".  That
+         * overwrite made every client failure look like an SSH problem in
+         * the on-car log. */
+        char why[256] = "";
+        if (!ok) str_copy(why, sizeof(why), g_last_msg);
         if (g_cfg.ssh_enabled) ssh_start();
         if (ok) set_msg("client mode: %s", g_cfg.ssid);
-        else {
-            char why[256];
-            str_copy(why, sizeof(why), g_last_msg);
-            set_msg("client mode failed: %s", why);
-        }
+        else set_msg("client mode failed: %s", why);
         config_save();
         return ok;
     }
@@ -2335,7 +2624,7 @@ static bool apply_mode_work(bool pair)
         return false;
     }
     carplay_fw_open();
-    carplay_ie_on();
+    bool ie_ok = carplay_ie_on();
     ensure_carplay_services();
 
     bool vbt_changed = false;
@@ -2345,8 +2634,9 @@ static bool apply_mode_work(bool pair)
     if (g_cfg.ssh_enabled) ssh_start();
     char ap_ssid[80] = {0};
     tethering_on(ap_ssid, sizeof(ap_ssid));
-    set_msg("CarPlay AP running (SSID=%s, %d MHz)",
-            ap_ssid[0] ? ap_ssid : g_cfg.cp_ssid, channel_to_freq());
+    set_msg("CarPlay AP running (SSID=%s, %d MHz)%s",
+            ap_ssid[0] ? ap_ssid : g_cfg.cp_ssid, channel_to_freq(),
+            ie_ok ? "" : " - CarPlay IE not set");
     config_save();
     return true;
 }
@@ -2376,7 +2666,11 @@ static void apply_reap(void)
     int st = 0;
     pid_t r = waitpid(g_apply_pid, &st, WNOHANG);
     if (r == 0) {
-        if (now_ms() - g_apply_start_ms > 90000) {
+        /* Client mode can spend ~20 s waiting for the supplicant, ~8 s
+         * finding the ConnMan service, ~9 s in the agent flow, then the
+         * wpa_cli fallback and DHCP waits.  150 s covers that path; a new
+         * mode request cancels the child immediately. */
+        if (now_ms() - g_apply_start_ms > 150000) {
             log_msg("apply: timed out; killing");
             kill(g_apply_pid, SIGKILL);
             waitpid(g_apply_pid, NULL, 0);
@@ -2568,6 +2862,11 @@ static void build_status(char *out, size_t n)
              "{\"ok\":true,"
              "\"mode\":\"%s\","
              "\"applying\":%s,"
+             "\"home_seq\":%d,"
+             "\"home_epoch\":%ld,"
+             "\"home_source\":\"%s\","
+             "\"last_app_key\":%d,"
+             "\"home_monitor\":%s,"
              "\"wlan_on\":%s,"
              "\"driver\":%s,"
              "\"iface\":\"wlan0\","
@@ -2603,6 +2902,8 @@ static void build_status(char *out, size_t n)
              "\"message\":\"%s\"}\n",
              mode_name(),
              g_apply_pid > 0 ? "true" : "false",
+             g_home_seq, g_home_epoch, g_home_source, g_home_last_key,
+             g_home_monitor ? "true" : "false",
              g_cfg.wlan_on ? "true" : "false",
              iface_present() ? "true" : "false",
              ip_e, ssid_e, signal,
@@ -2666,9 +2967,9 @@ static void scan_networks(char *out, size_t n)
     char buf[32768];
     int rc = -1;
     for (int attempt = 0; attempt < 2 && rc != 0; attempt++) {
-        sh("wpa_cli -i wlan0 scan >/dev/null 2>&1");
+        sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 scan >/dev/null 2>&1");
         sleep(3);
-        rc = sh_out(buf, sizeof(buf), "wpa_cli -i wlan0 scan_results 2>/dev/null");
+        rc = sh_out(buf, sizeof(buf), "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 scan_results 2>/dev/null");
         if (rc == 0 && strchr(buf, '\t'))
             break;
     }
@@ -2922,6 +3223,7 @@ static bool dump_logs_to_usb(bool verbose)
     copy_if_exists(dir, APP_DIR "/ssh.log");
     copy_if_exists(dir, APP_DIR "/install.log");
     copy_if_exists(dir, g_status_path);
+    copy_if_exists(dir, HOME_STATE);
     copy_config_redacted(dir);
 
     char state[800];
@@ -2935,8 +3237,12 @@ static bool dump_logs_to_usb(bool verbose)
         snap_cmd(f, "ps w | grep -E 'wpa_supplicant|connmand|supplicantmanager|wifi_daemon|dropbear|vbtd' | grep -v grep");
         snap_cmd(f, "connmanctl technologies");
         snap_cmd(f, "connmanctl services");
-        snap_cmd(f, "wpa_cli -i wlan0 status");
-        snap_cmd(f, "wpa_cli -i wlan0 scan_results");
+        snap_cmd(f, "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 status");
+        snap_cmd(f, "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 scan_results");
+        snap_cmd(f, "ls -la " WPA_CTRL_DIR);
+        snap_cmd(f, "getfattr -n security.SMACK64 /rw_data/wifi/wifi_daemon /rw_data/wifi/bin/dropbearmulti");
+        snap_cmd(f, "getfattr -n security.SMACK64EXEC /rw_data/wifi/wifi_daemon /rw_data/wifi/bin/dropbearmulti");
+        snap_cmd(f, "systemctl is-enabled supplicantmanager.path supplicantmanager.service");
         snap_cmd(f, "iw dev wlan0 info");
         snap_cmd(f, "iw dev wlan0 link");
         snap_cmd(f, "ifconfig wlan0");
@@ -3288,6 +3594,13 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    /* 127.0.0.1 must exist for the local HTTP API.  Normal boots have lo
+     * up long before this daemon starts, but an early start or a minimal
+     * environment can race it; without this the daemon died instantly with
+     * "Cannot assign requested address" (observed in the firmware VM). */
+    sh("ip link set lo up 2>/dev/null");
+    sh("ifconfig lo up 2>/dev/null");
+
     int srv = socket(AF_INET, SOCK_STREAM, 0);
     if (srv < 0) { perror("socket"); return 1; }
     int one = 1;
@@ -3297,7 +3610,20 @@ int main(int argc, char **argv)
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     sa.sin_port = htons((uint16_t)port);
-    if (bind(srv, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+    int bound = -1;
+    for (int i = 0; i < 60; i++) {
+        if (bind(srv, (struct sockaddr *)&sa, sizeof(sa)) == 0) {
+            bound = 0;
+            break;
+        }
+        if (i == 0)
+            log_msg("bind(http) failed (%s); bringing up lo and retrying",
+                    strerror(errno));
+        sh("ip link set lo up 2>/dev/null");
+        sh("ifconfig lo up 2>/dev/null");
+        usleep(500000);
+    }
+    if (bound != 0) {
         perror("bind(http)");
         close(srv);
         return 1;
@@ -3307,8 +3633,16 @@ int main(int argc, char **argv)
         close(srv);
         return 1;
     }
+    /* popen() children (connmanctl, wpa_cli, systemctl) must not inherit the
+     * listening socket: a hung child would otherwise keep the HTTP port
+     * bound and prevent a daemon restart. */
+    fcntl(srv, F_SETFD, FD_CLOEXEC);
 
     g_start_ms = now_ms();
+    /* Monotonic instance id: a daemon restart within the same boot always
+     * gets a new value, even if the wall clock has not been set yet. */
+    g_home_epoch = (long)g_start_ms;
+    home_state_write();
     log_msg("wifi_daemon started: mode=%s wlan_on=%d http=127.0.0.1:%d",
             mode_name(), g_cfg.wlan_on ? 1 : 0, port);
 
@@ -3328,6 +3662,7 @@ int main(int argc, char **argv)
         if (pr > 0 && (pfd.revents & POLLIN)) {
             int c = accept(srv, NULL, NULL);
             if (c >= 0) {
+                fcntl(c, F_SETFD, FD_CLOEXEC);
                 struct timeval tv = {.tv_sec = 30, .tv_usec = 0};
                 setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
                 http_handle(c);
@@ -3335,6 +3670,7 @@ int main(int argc, char **argv)
         }
         watchdog();
         apply_reap();
+        home_monitor_tick();
         int64_t now = now_ms();
         if (now - g_last_status_ms > 2000) {
             write_status();
@@ -3342,6 +3678,7 @@ int main(int argc, char **argv)
         }
     }
 
+    home_monitor_cleanup();
     close(srv);
     log_msg("wifi_daemon stopped");
     return 0;

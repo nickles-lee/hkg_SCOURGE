@@ -46,6 +46,7 @@ sed -e "s#/etc/passwd#$TMP/etc/passwd#g" \
     -e 's#dbus-send#false#g' \
     -e 's#sleep 2#sleep 0#g' \
     -e 's#sleep 1#sleep 0#g' \
+    -e 's#^sync$#true#g' \
     "$ROOT/scripts/run_stuff.sh" > "$TMP/install.sh"
 sed -e "s#/etc/passwd#$TMP/etc/passwd#g" \
     -e "s#/etc/shadow#$TMP/etc/shadow#g" \
@@ -59,6 +60,7 @@ sed -e "s#/etc/passwd#$TMP/etc/passwd#g" \
     -e 's#dbus-send#false#g' \
     -e 's#sleep 2#sleep 0#g' \
     -e 's#sleep 1#sleep 0#g' \
+    -e 's#^sync$#true#g' \
     "$ROOT/scripts/run_stuff_restore.sh" > "$TMP/restore.sh"
 # Do not let the restore test run the host daemon.
 sed -i 's#if \[ -x "\$RW_DIR/wifi_daemon" \]; then#if false; then#' "$TMP/restore.sh"

@@ -55,7 +55,7 @@ This is likely readily adaptable to other cars & environments, but I am noting t
 |---|---|
 | TOCTOU delivery + stage-1 root firmware (sideloading, failsafe) | Validated on the target car |
 | Updater signature-check bypass baked into the firmware | Built & verified offline; on-car validation in progress |
-| Battery / WiFi+SSH / Tweaks app packages | Work-in-progress, almost working |
+| Battery / WiFi+SSH / Tweaks app packages | Work-in-progress; the WiFi package is VM-validated on the vendor kernel/Qt (on-car retest pending) |
 | Tweaks: safety-disclaimer auto-accept | Working reliably |
 | Anything beyond the exact firmware above (`NE_E.EUR.S5W_L.001.001.260128`, EU) | Untested — see the porting runbook before trying |
 

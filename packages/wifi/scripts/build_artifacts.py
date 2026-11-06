@@ -252,7 +252,7 @@ def wifi_tile_block(menu: str, page: int, custom_index: int) -> str:
                     width: k_itemWidth
                     height: k_itemHeight
                     z: 6
-                    onClicked: wifiPage.visible = true
+                    onClicked: wifiPage.open()
                 }}
 """
 
@@ -288,23 +288,7 @@ def patch_advanced(src: str) -> str:
         y: ConstantModel.MENU_BAR_Y
         width: AppHomeModel.isWideScr ? DEVICE_WIDTH : ConstantModel.SCREEN_WIDTH
         height: DEVICE_HEIGHT - ConstantModel.MENU_BAR_Y
-        visible: false
         z: 2000
-    }
-
-    // Steering-wheel Home/Back key closes the page, like the Battery
-    // overlay.  A switch to another app (top-bar home/launcher) closes it
-    // too, so the page never stays on top of a different screen.
-    Connections {
-        target: AppHomeModel
-        onButtonBackClicked: {
-            if (wifiPage.visible)
-                wifiPage.visible = false
-        }
-        onSwitchToOtherApp: {
-            if (wifiPage.visible)
-                wifiPage.visible = false
-        }
     }
 
 """
@@ -352,7 +336,7 @@ def patch_wide(src: str) -> str:
             MouseArea {{
                 id: wifiMouse
                 anchors.fill: parent
-                onClicked: wifiPage.visible = true
+                onClicked: wifiPage.open()
             }}
         }}
 
@@ -365,23 +349,7 @@ def patch_wide(src: str) -> str:
         y: ConstantModel.MENU_BAR_Y
         width: AppHomeModel.isWideScr ? DEVICE_WIDTH : ConstantModel.SCREEN_WIDTH
         height: DEVICE_HEIGHT - ConstantModel.MENU_BAR_Y
-        visible: false
         z: 2000
-    }
-
-    // Steering-wheel Home/Back key closes the page, like the Battery
-    // overlay.  A switch to another app (top-bar home/launcher) closes it
-    // too, so the page never stays on top of a different screen.
-    Connections {
-        target: AppHomeModel
-        onButtonBackClicked: {
-            if (wifiPage.visible)
-                wifiPage.visible = false
-        }
-        onSwitchToOtherApp: {
-            if (wifiPage.visible)
-                wifiPage.visible = false
-        }
     }
 
 """
@@ -396,11 +364,11 @@ def add_wifi_page_and_signal(text: str) -> str:
         if "onHelloClicked:" in text:
             pos = text.find("onHelloClicked:")
             end = find_block_end(text, pos)
-            text = text[:end] + "\n            onWifiClicked: wifiPage.visible = true" + text[end:]
+            text = text[:end] + "\n            onWifiClicked: wifiPage.open()" + text[end:]
         else:
             pos = text.find("onMenuItemClicked:")
             end = find_block_end(text, pos)
-            text = text[:end] + "\n            onWifiClicked: wifiPage.visible = true" + text[end:]
+            text = text[:end] + "\n            onWifiClicked: wifiPage.open()" + text[end:]
 
     if "id: wifiPage" not in text:
         page = """    WifiPage {
@@ -409,23 +377,7 @@ def add_wifi_page_and_signal(text: str) -> str:
         y: ConstantModel.MENU_BAR_Y
         width: AppHomeModel.isWideScr ? DEVICE_WIDTH : ConstantModel.SCREEN_WIDTH
         height: DEVICE_HEIGHT - ConstantModel.MENU_BAR_Y
-        visible: false
         z: 2000
-    }
-
-    // Steering-wheel Home/Back key closes the page, like the Battery
-    // overlay.  A switch to another app (top-bar home/launcher) closes it
-    // too, so the page never stays on top of a different screen.
-    Connections {
-        target: AppHomeModel
-        onButtonBackClicked: {
-            if (wifiPage.visible)
-                wifiPage.visible = false
-        }
-        onSwitchToOtherApp: {
-            if (wifiPage.visible)
-                wifiPage.visible = false
-        }
     }
 
 """

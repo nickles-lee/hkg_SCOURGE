@@ -135,11 +135,11 @@ the first tile row starts below it. If you add a new page, copy the existing
 ## 4b. Full-screen overlay pages
 
 A full-screen page (WiFi, Battery overlay) is **not** a ListView page. It is
-an overlay item at the root of the host screen. Three rules from the first
-WiFi build, which all showed up as bugs on the car:
+an overlay item at the root of the host screen. Follow
+`docs/ui/APP_OVERLAY_CHECKLIST.md`; the short version:
 
 1. **Lay out below the 90px status bar.** `main.qml` draws the status bar at
-   `z: 2` over every screen. Embed the page like the Battery overlay does:
+   `z: 2` over every screen. Declare the page at the host root:
 
    ```qml
    WifiPage {
@@ -148,35 +148,47 @@ WiFi build, which all showed up as bugs on the car:
        y: ConstantModel.MENU_BAR_Y
        width: AppHomeModel.isWideScr ? DEVICE_WIDTH : ConstantModel.SCREEN_WIDTH
        height: DEVICE_HEIGHT - ConstantModel.MENU_BAR_Y
-       visible: false
        z: 2000
+       // do NOT set visible: the page owns it
    }
    ```
 
-   The page's internal layout is then designed for 630 px
-   (`DEVICE_HEIGHT - MENU_BAR_Y`), not 720 px. Content under `y < 90` is
-   hidden behind the clock/status bar.
+   The page's internal layout is designed for 630 px
+   (`DEVICE_HEIGHT - MENU_BAR_Y`), not 720 px. Leave ~16-24 px of padding
+   below the bar before the title/Exit row; do not put controls at the
+   page's y=0 edge. Tiles/menu entries call `wifiPage.open()`, never
+   `wifiPage.visible = true`.
 
-2. **Consume clicks.** A plain `Rectangle` background does not accept mouse
-   events, so taps on the page fall through to the home-screen grid beneath.
-   The page must contain a full-size `MouseArea` (declared after the
-   background, before the content) with an empty `onClicked` handler.
-
-3. **Handle the steering-wheel Home/Back key.** The key arrives as
-   `AppHomeModel.onButtonBackClicked`. Without a handler the user can only
-   exit via the on-screen Close button:
+2. **The page owns visibility and foreground state.**
 
    ```qml
-   Connections {
-       target: AppHomeModel
-       onButtonBackClicked: {
-           if (wifiPage.visible)
-               wifiPage.visible = false
-       }
+   Item {
+       id: root
+       property bool requested: false
+       property bool atOtherApp: typeof AppHomeModel !== "undefined"
+                                  ? AppHomeModel.isAtOtherApp : false
+       visible: requested && !atOtherApp
+       function open()  { requested = true; refresh() }
+       function close() { if (!requested) return; requested = false }
    }
    ```
 
-   Hello and Battery both do this; any new overlay must too.
+   Never paint while another app owns the Wayland surface: the clicks would
+   land on that app. Close on `onButtonBackClicked`, `isAtOtherApp`,
+   `currentScreen`, `currentHomeAdvancedPageIdx`, `requestHomeByPP`, and
+   `onSwitchToOtherApp`.
+
+3. **Consume all input.** A bare `MouseArea { onClicked: {} }` is not
+   enough. Use a full-size shield at `z: 1` with
+   `preventStealing: true`, `acceptedButtons: Qt.AllButtons`, accepted
+   press/release/click/wheel, and put the real content at `z: 2`.
+
+4. **The steering-wheel Home/Star key is not a QML key event.** It arrives
+   on the session bus (`NotifyRequestHomeScreen` / `custom_key_value`).
+   A helper daemon tails `dbus-monitor` and exposes a counter; the WiFi
+   daemon writes `home.json` (`{"seq":N,"epoch":E,...}`) and the QML polls
+   it at 500 ms while open. `AppHomeModel.onButtonBackClicked` is only the
+   on-screen back affordance. Do not claim it handles Home/Star.
 
 `z: 2000` matches the Battery overlay and keeps the page above the home grid,
 page indicators and animation helpers.

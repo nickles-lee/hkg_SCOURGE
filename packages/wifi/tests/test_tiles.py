@@ -93,11 +93,19 @@ def main() -> int:
     # UX: full-screen page must sit below the 90px status bar, consume
     # clicks and close on the steering-wheel Home/Back key.
     page = (QML / "HomeScreen/WifiPage.qml").read_text(encoding="utf-8")
-    require("height: 630" in page, "WifiPage must be laid out for 630px below the bar")
+    require("height: DEVICE_HEIGHT - ConstantModel.MENU_BAR_Y" in page,
+            "WifiPage must be laid out for 630px below the bar")
     require("height: 720" not in page, "WifiPage must not use the full 720px")
     require("u2715  Exit" in page, "Exit button missing or not prominent")
-    require("y: 16" in page, "Exit button must clear the 90px bar with margin")
-    require("Start CarPlay pairing" in page, "CarPlay pairing button missing")
+    # Header clearance: the page starts at screen y=90, so y=26 puts the
+    # exit button at 116 - comfortably below the status bar.
+    require("id: closeButton" in page and "y: 26" in page,
+            "Exit button must clear the 90px bar with margin")
+    require("id: tabRow" in page and "y: 110" in page,
+            "content tabs must clear the status bar")
+    require("id: consolePanel" in page and "y: 20" in page,
+            "console panel must clear the status bar")
+    require("Start CarPlay AP" in page, "CarPlay AP button missing")
     require("Save logs" in page and "/logs/dump" in page,
             "log dump button missing from the Status tab")
     require("consolePanel" in page and "showConsole" in page,
@@ -110,8 +118,29 @@ def main() -> int:
     require("btDiscoverable" in page and "pairMessage" in page,
             "CarPlay pairing status properties missing")
 
-    require("MouseArea {" in page and "anchors.fill: parent" in page,
-            "WifiPage must consume clicks so they do not fall through")
+    require("property bool requested" in page,
+            "overlay is missing the requested state")
+    require("visible: requested && !atOtherApp" in page,
+            "overlay visibility is not gated on request and foreground")
+    require("function open()" in page and "function close()" in page,
+            "overlay does not expose open()/close()")
+    require("onButtonBackClicked: root.close()" in page,
+            "overlay does not close on the back affordance")
+    require("onIsAtOtherAppChanged" in page, "overlay does not close on app switch")
+    require("onCurrentScreenChanged" in page, "overlay does not close on screen change")
+    require("onCurrentHomeAdvancedPageIdxChanged" in page,
+            "overlay does not close on page change")
+    require("onRequestHomeByPPChanged" in page,
+            "overlay does not close on requestHomeByPP")
+    require("onHomeSeqChanged" in page and "homeSeq" in page,
+            "overlay does not consume the daemon home_seq")
+    require("preventStealing: true" in page, "input shield cannot prevent stealing")
+    require("acceptedButtons: Qt.AllButtons" in page,
+            "input shield does not accept all buttons")
+    require("onWheel: wheel.accepted = true" in page,
+            "input shield does not consume the wheel")
+    require("z: 1" in page and "id: content" in page and "z: 2" in page,
+            "content is not above the input shield")
     require("y: ConstantModel.MENU_BAR_Y" not in page, "page itself must not offset; hosts do")
 
     for rel in ("HomeScreen/QHMI_HomeScreenMain_Advanced.hello_battery_wifi.qml",
@@ -125,10 +154,12 @@ def main() -> int:
         require("height: DEVICE_HEIGHT - ConstantModel.MENU_BAR_Y" in host,
                 f"{rel}: page must stop above the bottom edge")
         require("z: 2000" in host, f"{rel}: page must be on top of the home screen")
-        require("onButtonBackClicked" in host and "wifiPage.visible = false" in host,
-                f"{rel}: Home/Back key must close the page")
-        require("onSwitchToOtherApp" in host,
-                f"{rel}: app switch must close the page")
+        require("wifiPage.open()" in host,
+                f"{rel}: tiles/menu must call the overlay's open()")
+        require("wifiPage.visible" not in host,
+                f"{rel}: hosts must not assign the overlay's visible state")
+        require("visible: false\n        z: 2000" not in host,
+                f"{rel}: host still overrides the overlay's visibility")
 
     require(image_is_blue(ROOT / "artifacts/assets/wifi/wifi_icon_n.png"), "WiFi icon is not blue")
     require(image_is_blue(ROOT / "artifacts/assets/hello/hello_icon_n.png"), "Hello icon is not blue")
