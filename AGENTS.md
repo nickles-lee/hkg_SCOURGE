@@ -67,6 +67,7 @@ repo.
 | To port to another firmware/region/car | docs/09 gates first; docs/10 only if hashes differ |
 | To build/fix a package's UI | `docs/ui/styleguide.md` → `deployment-modes.md` → `ux-patterns.md` → the overlay checklist, before writing any QML |
 | To debug a failure | docs/11; rig issues also docs/04 + the upstream field journal (docs/13) |
+| To bench-test something in the VM lab before the car | docs/14 (WIP — the lab is not yet packaged in-repo) |
 | To understand the exploit | docs/01 (no mitigation content in ours; upstream's is linked via docs/13) |
 | Legal/safety framing | docs/12 |
 
@@ -112,5 +113,5 @@ repo.
     notice). Third-party/fetched material never gets our header.
 - Package installers follow the docs/06 house rules (manifest, stock-hash
   guards, backups, idempotency, explicit status lines).
-- Docs are numbered `docs/01–13`; UI research lives in `docs/ui/`.
+- Docs are numbered `docs/01–14`; UI research lives in `docs/ui/`.
 - Scripts are run with `sh`/`bash`/`python3` (do not rely on +x bits).

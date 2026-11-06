@@ -97,6 +97,7 @@ As a general rule of thumb:
 - Packaging & making it easier to sideload apps
 - Making sideload app installers less likely to interfere with each other
 - Support networked installation scripts/packages
+- A QEMU/KVM **VM lab** for bench-testing packages, installers and patches against your own decrypted firmware before they go near the car, with a planned graphics mode for UI work — see `docs/14-vm-lab.md` (WIP: the harness runs today, but is not yet packaged in-repo)
 - Separate-process custom apps: the platform's AppLauncher RSA-verifies every spawned app's `.sign` section, which blocks the "official app" route. A bypass exists (built, not yet tested — not shipped), and there is a second route (an own Wayland process outside AppLauncher) that needs no patch at all. See `docs/07-packages.md` and `docs/ui/deployment-modes.md`.
 
 ## AI Usage Disclaimer
