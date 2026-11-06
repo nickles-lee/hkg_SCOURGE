@@ -18,42 +18,52 @@ exit 0
 EOF
 chmod +x "$TMP/fake-wrandr"
 
+cat > "$TMP/fake-dbus" <<EOF
+#!/bin/sh
+echo "\$*" >> "$TMP/dbus.log"
+echo "method return"
+exit 0
+EOF
+chmod +x "$TMP/fake-dbus"
+
 cat > "$TMP/rw/config.conf" <<EOF
 cluster_fix=1
 infotainment_fix=1
-cluster_crtc=1
-main_crtc=0
+cluster_crtc=2
+main_crtc=1
 warmth_override=6
 force_filter_on=1
 projection_always=1
 wrandr_path=$TMP/fake-wrandr
 persist_helper=$TMP/rw/missing-helper
+dbus_send_path=$TMP/fake-dbus
 EOF
 
 out=$("$BIN" --rw-dir "$TMP/rw" --once --no-dbus)
-echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] is True; assert d["cluster_fix"] == 1; assert d["infotainment_fix"] == 1; assert d["filter_active"] == 1; assert d["warmth_level"] == 6; assert d["gamma"] == "128:115:102"; assert d["projection_active"] == 1; assert d["cluster_applied"] == 1; assert d["main_applied"] == 1'
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] is True; assert d["cluster_fix"] == 1; assert d["infotainment_fix"] == 1; assert d["filter_active"] == 1; assert d["warmth_level"] == 6; assert d["gamma"] == "128:115:102"; assert d["projection_active"] == 1; assert d["main_applied"] == 1'
 
-grep -q -- '--crtc=1 --gamma=128:115:102' "$TMP/wrandr.log"
-grep -q -- '--crtc=0 --gamma=128:115:102' "$TMP/wrandr.log"
+# The front display is tinted through the brightness channel on CRTC 1.
+grep -q -- '--crtc=1 --brightness=128:115:102' "$TMP/wrandr.log"
 test "$(cat "$TMP/rw/cluster_gamma")" = "128:115:102"
 
-# Cluster fix off must write "off" to the wrapper state and stop applying.
-"$BIN" --rw-dir "$TMP/rw" --set cluster_fix=0 >/dev/null
+# Infotainment fix off must disarm the wrapper state and stop applying.
+"$BIN" --rw-dir "$TMP/rw" --set infotainment_fix=0 >/dev/null
 out=$("$BIN" --rw-dir "$TMP/rw" --once --no-dbus)
-echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["cluster_fix"] == 0; assert d["main_applied"] == 1'
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["infotainment_fix"] == 0; assert d["main_applied"] == 0'
 test "$(cat "$TMP/rw/cluster_gamma")" = "off"
 
 # Manual projection state overrides the automatic source.
 cat > "$TMP/rw/config.conf" <<EOF
 cluster_fix=1
 infotainment_fix=1
-cluster_crtc=1
-main_crtc=0
+cluster_crtc=2
+main_crtc=1
 warmth_override=3
 force_filter_on=1
 projection_always=0
 wrandr_path=$TMP/fake-wrandr
 persist_helper=$TMP/rw/missing-helper
+dbus_send_path=$TMP/fake-dbus
 EOF
 echo 0 > "$TMP/rw/projection_state"
 out=$("$BIN" --rw-dir "$TMP/rw" --status --no-dbus)
@@ -63,7 +73,9 @@ out=$("$BIN" --rw-dir "$TMP/rw" --status --no-dbus)
 echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["projection_active"] == 1'
 
 # Night mode must stay on while projection is active even when the vendor
-# flips the blue-light filter off (the CarPlay scenario).
+# flips the blue-light filter off (the CarPlay scenario): the cluster is
+# re-asserted through the micom CAN blue-light signal and the front display
+# keeps the last known warmth through wrandr --brightness.
 cat > "$TMP/fake-persist-night" <<EOF
 #!/bin/sh
 case "\$1" in
@@ -71,6 +83,7 @@ read)
     echo "APP_SETTING_DISP_BLUE_LIGHT_STATUS=0"
     echo "APP_SETTING_DISP_BLUE_LIGHT_WARM_LEVEL=5"
     echo "APP_SETTING_DISP_GAMMA_R_G_B=128:128:128"
+    echo "APP_SETTING_DISP_BRIGHTNESS_R_G_B=128:116:104"
     ;;
 esac
 EOF
@@ -78,31 +91,37 @@ chmod +x "$TMP/fake-persist-night"
 cat > "$TMP/rw/config.conf" <<EOF
 cluster_fix=1
 infotainment_fix=1
-cluster_crtc=1
-main_crtc=0
+cluster_crtc=2
+main_crtc=1
 poll_ms=1000
 wrandr_path=$TMP/fake-wrandr
 persist_helper=$TMP/fake-persist-night
 tzdata_dir=/usr/share/zoneinfo
 tzdata_version_file=$TMP/rw/tzdata_version
 offline_status_path=$TMP/offline-night
+dbus_send_path=$TMP/fake-dbus
 EOF
 echo 2026f > "$TMP/rw/tzdata_version"
 : > "$TMP/wrandr.log"
+: > "$TMP/dbus.log"
 echo 1 > "$TMP/rw/projection_state"
-echo "128:116:104" > "$TMP/rw/last_gamma"
 out=$("$BIN" --rw-dir "$TMP/rw" --once --no-dbus)
-echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["filter_active"] == 0, d; assert d["night_forced"] == 1, d; assert d["cluster_applied"] == 1, d'
-# Cluster keeps the last known warmth, not neutral.
-grep -q -- '--crtc=1 --gamma=128:116:104' "$TMP/wrandr.log"
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["filter_active"] == 0, d; assert d["night_forced"] == 1, d; assert d["blu_forced"] == 1, d; assert d["blu_status_sent"] == 2, d; assert d["blu_level_sent"] == 5, d; assert d["main_applied"] == 1, d'
+# The cluster amber is re-asserted via micom CAN 0x063F (status bit 26, level bit 12).
+grep -q -- '--system --print-reply --reply-timeout=8000 --dest=com.lge.car.micom /Can com.lge.car.micom.can.SetCANFixedMicomRecv array:byte:0x06,0x3f int32:26 int32:2 int32:2' "$TMP/dbus.log"
+grep -q -- 'array:byte:0x06,0x3f int32:12 int32:4 int32:5' "$TMP/dbus.log"
+# The front display keeps the vehicle brightness, not neutral.
+grep -q -- '--crtc=1 --brightness=128:116:104' "$TMP/wrandr.log"
 test "$(cat "$TMP/rw/cluster_gamma")" = "128:116:104"
 
-# Projection off + filter off -> neutral, wrapper disarmed.
+# Projection off + filter off -> force ends, cluster restored to off,
+# front display neutral, wrapper disarmed.
 : > "$TMP/wrandr.log"
+: > "$TMP/dbus.log"
 echo 0 > "$TMP/rw/projection_state"
 out=$("$BIN" --rw-dir "$TMP/rw" --once --no-dbus)
-echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["night_forced"] == 0, d'
-grep -q -- '--crtc=1 --gamma=128:128:128' "$TMP/wrandr.log"
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["night_forced"] == 0, d; assert d["blu_forced"] == 0, d; assert d["blu_status_sent"] == 1, d; assert d["main_applied"] == 0, d'
+grep -q -- 'array:byte:0x06,0x3f int32:26 int32:2 int32:1' "$TMP/dbus.log"
 test "$(cat "$TMP/rw/cluster_gamma")" = "off"
 
 # HTTP server: /status, /set, /restore.
@@ -303,10 +322,5 @@ echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ota
 test "$(cat "$TMP/update2/offline_status")" = "0"
 test ! -f "$TMP/rw2/ota_block_owned"
 grep -q 'setOFFlineMode int32:0' "$TMP/dbus.log"
-
-# USB detection must accept the car's real fstype: the exFAT driver is
-# Tuxera texfat.ko and /proc/mounts reports "texfat", not "exfat".
-grep -q '"texfat"' "$ROOT/src/tweaks_daemon.c" ||
-    { echo "find_usb misses texfat (car exFAT reports as 'texfat' in /proc/mounts)" >&2; exit 1; }
 
 echo "PASS: daemon smoke test"

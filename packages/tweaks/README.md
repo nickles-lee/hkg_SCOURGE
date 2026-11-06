@@ -172,7 +172,8 @@ Copy `run_stuff_diag.sh` over `run_stuff.sh` and plug it in. It writes
 - `/update/offline_status`, `AppDMClient`/`dmengine` state and `GetOTAEnableStatus`
 - service/process state
 - QML markers for both `AppHomeScreen` and `AppStandbyClock`
-- 8 seconds of `com.lge.avn.appmanager.info` D-Bus signals
+- 8 seconds of `com.lge.avn.appmanager.info` D-Bus signals (session bus;
+  the address is in `/tmp/session_appmgr`)
 
 ## Daemon API
 

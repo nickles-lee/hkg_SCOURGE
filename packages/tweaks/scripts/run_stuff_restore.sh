@@ -119,6 +119,22 @@ rm -rf /root/.cache/AppHomeScreen 2>/dev/null || true
 rm -rf /tmp/qmlcache 2>/dev/null || true
 rm -rf /tmp/qt-qml-cache 2>/dev/null || true
 
+# Stop the daemon first so it cannot re-assert the cluster blue-light force.
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop tweaks-daemon.service 2>/dev/null || true
+fi
+
+# If Tweaks left the cluster blue-light forced on, restore the vendor state.
+# Destination is the bus name the micom service owns (com.lge.car.micom); the
+# CAN interface is com.lge.car.micom.can at /Can - see docs/FINDINGS.md.
+if [ -f "$RW_DIR/blu_forced" ] && command -v dbus-send >/dev/null 2>&1; then
+    dbus-send --system --print-reply --reply-timeout=8000 \
+        --dest=com.lge.car.micom /Can \
+        com.lge.car.micom.can.SetCANFixedMicomRecv \
+        array:byte:0x06,0x3f int32:26 int32:2 int32:1 >> "$LOG" 2>&1 || true
+    log "restored cluster blue-light off"
+fi
+
 # Remove runtime pieces, keep backups.  failures.log is deliberately kept
 # for post-mortem after an uninstall.
 rm -f "$RW_DIR/tweaks_daemon" "$RW_DIR/tweaks_persist" \
@@ -126,7 +142,8 @@ rm -f "$RW_DIR/tweaks_daemon" "$RW_DIR/tweaks_persist" \
       "$RW_DIR/last_gamma" "$RW_DIR/config.conf" \
       "$RW_DIR/disclaimer_auto" "$RW_DIR/disclaimer_timeout_ms" \
       "$RW_DIR/zones.txt" "$RW_DIR/tzdata_version" "$RW_DIR/ota_call.out" \
-      "$RW_DIR/dst_write_failed" "$RW_DIR/pcl_write_app" 2>/dev/null || true
+      "$RW_DIR/dst_write_failed" "$RW_DIR/pcl_write_app" \
+      "$RW_DIR/blu_forced" "$RW_DIR/blu_call.out" 2>/dev/null || true
 rm -rf "$RW_DIR/zoneinfo" "$RW_DIR/zoneinfo.new" 2>/dev/null || true
 
 # Release the vendor OTA offline flag only if Tweaks set it.

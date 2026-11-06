@@ -304,8 +304,8 @@ if [ ! -f "$RW_DIR/config.conf" ]; then
 # Tweaks daemon configuration
 cluster_fix=1
 infotainment_fix=1
-cluster_crtc=1
-main_crtc=0
+cluster_crtc=2
+main_crtc=1
 warmth_override=0
 force_filter_on=0
 projection_always=0
@@ -325,6 +325,7 @@ tzdata_version_file=$RW_DIR/tzdata_version
 offline_status_path=/update/offline_status
 session_bus_file=/tmp/session_appmgr
 dbus_send_path=/usr/bin/dbus-send
+xdg_runtime_dir=/var/run/user/root
 EOF
     chmod 600 "$RW_DIR/config.conf" 2>/dev/null || true
 fi

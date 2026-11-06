@@ -49,6 +49,24 @@
 #define DEFAULT_DBUS_SEND "/usr/bin/dbus-send"
 #define DEFAULT_DST_ZONE "Europe/Amsterdam"
 #define DEFAULT_DST_DIR "/rw_data/tweaks/zoneinfo"
+#define DEFAULT_XDG_RUNTIME_DIR "/var/run/user/root"
+/*
+ * Vendor blue-light cluster signalling, verified in ApplicationManager:
+ * MicomInterfaceM::setBLUStatus/setBLULevel send SetCANFixedMicomRecv on
+ * the system bus (com.lge.car.micom.can /Can com.lge.car.micom) with CAN
+ * ID 0x063F:  status at bit 26, 2 bits (data 2 = on, 1 = off); warm level
+ * at bit 12, 4 bits (1-9).  The instrument cluster ECU renders the amber
+ * itself; it is not a head-unit CRTC.
+ */
+#define BLU_CAN_ID_HI 0x06
+#define BLU_CAN_ID_LO 0x3F
+#define BLU_STATUS_BIT 26
+#define BLU_STATUS_SIZE 2
+#define BLU_LEVEL_BIT 12
+#define BLU_LEVEL_SIZE 4
+#define BLU_STATUS_ON 2
+#define BLU_STATUS_OFF 1
+#define BLU_KEEPALIVE_S 30
 
 static const char *GAMMA_TABLE[10] = {
     "128:128:128",
@@ -88,6 +106,7 @@ typedef struct {
     char offline_status_path[MAX_PATH];
     char session_bus_file[MAX_PATH];
     char dbus_send_path[MAX_PATH];
+    char xdg_runtime_dir[MAX_PATH];
 } config_t;
 
 typedef struct {
@@ -95,7 +114,10 @@ typedef struct {
     int warmth_level;
     char gamma[32];
     int gamma_valid;
+    char brightness[32];       /* APP_SETTING_DISP_BRIGHTNESS_R_G_B */
+    int brightness_valid;
     char last_gamma[32];
+    char last_brightness[32];
     int projection_active;
     char projection_source[32];
     int cluster_applied;
@@ -107,6 +129,11 @@ typedef struct {
     int identify_crtc;
     time_t identify_until;
     int night_forced;
+    /* cluster blue-light force via micom CAN 0x063F */
+    int blu_forced;
+    int blu_status_sent;       /* last status data written: 1=off 2=on, 0=none */
+    int blu_level_sent;        /* last level written, 0=none */
+    time_t blu_last_send;
     /* auto-DST */
     int dst_active;
     char dst_state[32];
@@ -155,6 +182,9 @@ typedef struct {
 } mon_t;
 
 static mon_t g_mon[2];   /* [0] = system bus, [1] = session bus */
+/* One-shot modes (--once/--status/--set) must not fork dbus-monitors: the
+ * process exits right after the tick and would orphan the children. */
+static int g_once_mode;
 
 static int mon_any_alive(void)
 {
@@ -249,8 +279,7 @@ static int usb_mount_point(char *out, size_t size)
         if (sscanf(line, "%255s %511s %63s", dev, mp, fs) < 3)
             continue;
         if (strcasecmp(fs, "vfat") && strcasecmp(fs, "exfat") &&
-            strcasecmp(fs, "texfat") && strcasecmp(fs, "ntfs") &&
-            strcasecmp(fs, "msdos"))
+            strcasecmp(fs, "ntfs") && strcasecmp(fs, "msdos"))
             continue;
         if (!strncmp(mp, "/media/", 7) || !strncmp(mp, "/mnt/", 5)) {
             snprintf(out, size, "%s", mp);
@@ -528,14 +557,19 @@ static int night_mode_on(void)
 }
 
 /*
- * The warmth to enforce while night mode is on.  When the vendor has flipped
- * the filter off, rt.gamma is neutral, so fall back to the last warmth the
- * vehicle actually used (persisted in last_gamma), then the table default.
+ * The warmth to enforce while night mode is on.  The vendor tints the front
+ * display through wrandr's BRIGHTNESS channel (setFrontBrightnessRGBValue
+ * sends "wrandr --crtc=1 --brightness=<r:g:b>"), so prefer the vehicle's
+ * BRIGHTNESS_R_G_B value, then the gamma key, then the table default.
  */
 static void effective_warmth(char *out, size_t size)
 {
-    if (valid_gamma(rt.gamma) && !is_neutral_gamma(rt.gamma))
+    if (valid_gamma(rt.brightness) && !is_neutral_gamma(rt.brightness))
+        snprintf(out, size, "%s", rt.brightness);
+    else if (valid_gamma(rt.gamma) && !is_neutral_gamma(rt.gamma))
         snprintf(out, size, "%s", rt.gamma);
+    else if (valid_gamma(rt.last_brightness) && !is_neutral_gamma(rt.last_brightness))
+        snprintf(out, size, "%s", rt.last_brightness);
     else if (valid_gamma(rt.last_gamma) && !is_neutral_gamma(rt.last_gamma))
         snprintf(out, size, "%s", rt.last_gamma);
     else
@@ -550,8 +584,10 @@ static void load_config(void)
     memset(&cfg, 0, sizeof(cfg));
     cfg.cluster_fix = 1;
     cfg.infotainment_fix = 1;
-    cfg.cluster_crtc = 1;
-    cfg.main_crtc = 0;
+    /* wrandr numbers CRTCs from 1: CRTC 1 is the front display (HDMI1,
+     * 1920x720) - the vendor's setFrontBrightnessRGBValue targets it. */
+    cfg.cluster_crtc = 2;
+    cfg.main_crtc = 1;
     cfg.warmth_override = 0;
     cfg.force_filter_on = 0;
     cfg.projection_always = 0;
@@ -576,6 +612,8 @@ static void load_config(void)
     snprintf(cfg.session_bus_file, sizeof(cfg.session_bus_file), "%s",
              DEFAULT_SESSION_BUS_FILE);
     snprintf(cfg.dbus_send_path, sizeof(cfg.dbus_send_path), "%s", DEFAULT_DBUS_SEND);
+    snprintf(cfg.xdg_runtime_dir, sizeof(cfg.xdg_runtime_dir), "%s",
+             DEFAULT_XDG_RUNTIME_DIR);
 
     snprintf(path, sizeof(path), "%s/config.conf", cfg.rw_dir);
     f = fopen(path, "r");
@@ -638,6 +676,8 @@ static void load_config(void)
             snprintf(cfg.session_bus_file, sizeof(cfg.session_bus_file), "%s", v);
         else if (!strcmp(k, "dbus_send_path"))
             snprintf(cfg.dbus_send_path, sizeof(cfg.dbus_send_path), "%s", v);
+        else if (!strcmp(k, "xdg_runtime_dir"))
+            snprintf(cfg.xdg_runtime_dir, sizeof(cfg.xdg_runtime_dir), "%s", v);
     }
     fclose(f);
     if (cfg.poll_ms < 200)
@@ -681,14 +721,15 @@ static void save_config(void)
              "tzdata_version_file=%s\n"
              "offline_status_path=%s\n"
              "session_bus_file=%s\n"
-             "dbus_send_path=%s\n",
+             "dbus_send_path=%s\n"
+             "xdg_runtime_dir=%s\n",
              cfg.cluster_fix, cfg.infotainment_fix, cfg.cluster_crtc, cfg.main_crtc,
              cfg.warmth_override, cfg.force_filter_on, cfg.projection_always,
              cfg.projection_app_id, cfg.poll_ms, cfg.disclaimer_auto,
              cfg.disclaimer_timeout_ms, cfg.auto_dst, cfg.dst_zone, cfg.dst_check_ms,
              cfg.ota_block, cfg.wrandr_path, cfg.persist_helper, cfg.tzdata_dir,
              cfg.zones_file, cfg.tzdata_version_file, cfg.offline_status_path,
-             cfg.session_bus_file, cfg.dbus_send_path);
+             cfg.session_bus_file, cfg.dbus_send_path, cfg.xdg_runtime_dir);
     write_atomic(path, data);
 }
 
@@ -1251,14 +1292,11 @@ static int start_ota_call(int mode)
         return -1;
     }
     if (pid == 0) {
-        int devnull = open("/dev/null", O_WRONLY);
         if (have_bus)
             setenv("DBUS_SESSION_BUS_ADDRESS", bus, 1);
         dup2(fd, STDOUT_FILENO);
-        if (devnull >= 0) {
-            dup2(devnull, STDERR_FILENO);
-            close(devnull);
-        }
+        /* Capture dbus-send's errors for ota_call.out diagnostics. */
+        dup2(fd, STDERR_FILENO);
         close(fd);
         snprintf(cmd, sizeof(cmd),
                  "\"%s\" --session --print-reply --reply-timeout=8000 "
@@ -1418,9 +1456,9 @@ static void load_last_gamma(void)
 
 static void read_vendor_state(void)
 {
-    char out[4096], status[128], warm[128], gamma[128];
+    char out[4096], status[128], warm[128], gamma[128], bright[128];
     int st = -1, level = -1;
-    int have_gamma = 0;
+    int have_gamma = 0, have_bright = 0;
 
     if (run_persist_helper(out, sizeof(out)) > 0) {
         if (line_value(out, "APP_SETTING_DISP_BLUE_LIGHT_STATUS", status, sizeof(status)))
@@ -1429,6 +1467,8 @@ static void read_vendor_state(void)
             level = atoi(warm);
         if (line_value(out, "APP_SETTING_DISP_GAMMA_R_G_B", gamma, sizeof(gamma)))
             have_gamma = valid_gamma(gamma);
+        if (line_value(out, "APP_SETTING_DISP_BRIGHTNESS_R_G_B", bright, sizeof(bright)))
+            have_bright = valid_gamma(bright);
         clear_error();
     } else {
         set_error("vehicle persistence unavailable");
@@ -1439,17 +1479,19 @@ static void read_vendor_state(void)
     if (cfg.force_filter_on)
         st = 1;
 
-    if (st < 0 && have_gamma)
-        st = is_neutral_gamma(gamma) ? 0 : 1;
+    if (st < 0 && (have_gamma || have_bright))
+        st = (is_neutral_gamma(gamma) && is_neutral_gamma(bright)) ? 0 : 1;
 
     if (st < 0) {
         rt.filter_on = 0;
         rt.warmth_level = level > 0 ? level : 0;
         snprintf(rt.gamma, sizeof(rt.gamma), "128:128:128");
         rt.gamma_valid = 1;
+        snprintf(rt.brightness, sizeof(rt.brightness), "128:128:128");
+        rt.brightness_valid = 1;
         if (!rt.last_error[0])
             set_error("vehicle blue-light state unavailable");
-        if (level <= 0 && !have_gamma)
+        if (level <= 0 && !have_gamma && !have_bright)
             set_error("vehicle blue-light keys empty");
         return;
     }
@@ -1458,10 +1500,40 @@ static void read_vendor_state(void)
     rt.warmth_level = (level >= 1 && level <= 9) ? level : 0;
 
     if (!rt.filter_on) {
-        snprintf(rt.gamma, sizeof(rt.gamma), "128:128:128");
+        /*
+         * The filter is off (the vendor flips it when projection takes
+         * over), but PCL often still carries the last warmth values.
+         * Record them so the night-mode logic can reuse them; neutral
+         * values are skipped by effective_warmth anyway.
+         */
+        if (have_bright && !is_neutral_gamma(bright)) {
+            snprintf(rt.brightness, sizeof(rt.brightness), "%s", bright);
+            snprintf(rt.last_brightness, sizeof(rt.last_brightness), "%s", bright);
+        } else {
+            snprintf(rt.brightness, sizeof(rt.brightness), "128:128:128");
+        }
+        rt.brightness_valid = 1;
+        if (have_gamma && !is_neutral_gamma(gamma)) {
+            snprintf(rt.gamma, sizeof(rt.gamma), "%s", gamma);
+        } else {
+            snprintf(rt.gamma, sizeof(rt.gamma), "128:128:128");
+        }
         rt.gamma_valid = 1;
         return;
     }
+
+    if (have_bright && !is_neutral_gamma(bright)) {
+        snprintf(rt.brightness, sizeof(rt.brightness), "%s", bright);
+    } else if (rt.warmth_level >= 1 && rt.warmth_level <= 9) {
+        snprintf(rt.brightness, sizeof(rt.brightness), "%s", GAMMA_TABLE[rt.warmth_level]);
+    } else if (valid_gamma(rt.last_brightness) && !is_neutral_gamma(rt.last_brightness)) {
+        snprintf(rt.brightness, sizeof(rt.brightness), "%s", rt.last_brightness);
+    } else {
+        snprintf(rt.brightness, sizeof(rt.brightness), "%s", GAMMA_TABLE[5]);
+    }
+    rt.brightness_valid = 1;
+    if (!is_neutral_gamma(rt.brightness))
+        snprintf(rt.last_brightness, sizeof(rt.last_brightness), "%s", rt.brightness);
 
     if (have_gamma && !is_neutral_gamma(gamma)) {
         snprintf(rt.gamma, sizeof(rt.gamma), "%s", gamma);
@@ -1477,15 +1549,15 @@ static void read_vendor_state(void)
         snprintf(rt.last_gamma, sizeof(rt.last_gamma), "%s", rt.gamma);
 }
 
-static int run_wrandr(int crtc, const char *gamma)
+static int run_wrandr(int crtc, const char *brightness)
 {
     pid_t pid;
     int status = 0;
     time_t deadline;
-    char arg_crtc[64], arg_gamma[64];
+    char arg_crtc[64], arg_brightness[64];
 
     snprintf(arg_crtc, sizeof(arg_crtc), "--crtc=%d", crtc);
-    snprintf(arg_gamma, sizeof(arg_gamma), "--gamma=%s", gamma);
+    snprintf(arg_brightness, sizeof(arg_brightness), "--brightness=%s", brightness);
 
     pid = fork();
     if (pid < 0)
@@ -1497,10 +1569,14 @@ static int run_wrandr(int crtc, const char *gamma)
             dup2(devnull, STDERR_FILENO);
             close(devnull);
         }
-        execl(cfg.wrandr_path, cfg.wrandr_path, arg_crtc, arg_gamma,
-              "--brightness=128:128:128", (char *)NULL);
-        execl("/usr/bin/wrandr", "/usr/bin/wrandr", arg_crtc, arg_gamma,
-              "--brightness=128:128:128", (char *)NULL);
+        /* wrandr is a Wayland client: it needs the session's runtime dir
+         * (the vendor session uses /var/run/user/root). */
+        if (cfg.xdg_runtime_dir[0])
+            setenv("XDG_RUNTIME_DIR", cfg.xdg_runtime_dir, 1);
+        execl(cfg.wrandr_path, cfg.wrandr_path, arg_crtc, arg_brightness,
+              (char *)NULL);
+        execl("/usr/bin/wrandr", "/usr/bin/wrandr", arg_crtc, arg_brightness,
+              (char *)NULL);
         _exit(127);
     }
 
@@ -1540,12 +1616,174 @@ static int apply_gamma(int crtc, const char *gamma, char *last, size_t last_size
     return -1;
 }
 
+/*
+ * Send a blue-light fixed CAN signal to the instrument cluster through the
+ * vendor micom service, exactly like MicomInterfaceM::setBLUStatus /
+ * setBLULevel do: system bus, destination com.lge.car.micom (the bus name
+ * the micom service owns), path /Can, interface com.lge.car.micom.can,
+ * method SetCANFixedMicomRecv with (canID bytes, startBit, size, data) on
+ * CAN 0x063F.
+ */
+static int send_blu_signal(int start_bit, int size, int data)
+{
+    /* dbus-send takes each message argument as a separate argv word; a single
+     * combined string is parsed as one array-of-bytes value and the call goes
+     * out with signature "ay" instead of "ayiii" (verified against a real
+     * dbus-daemon in the VM lab). */
+    char arg_id[32], arg_bit[16], arg_size[16], arg_data[16], outpath[MAX_PATH];
+    int fd;
+    pid_t pid;
+
+    snprintf(arg_id, sizeof(arg_id), "array:byte:0x%02x,0x%02x",
+             BLU_CAN_ID_HI, BLU_CAN_ID_LO);
+    snprintf(arg_bit, sizeof(arg_bit), "int32:%d", start_bit);
+    snprintf(arg_size, sizeof(arg_size), "int32:%d", size);
+    snprintf(arg_data, sizeof(arg_data), "int32:%d", data);
+    snprintf(outpath, sizeof(outpath), "%s/blu_call.out", cfg.rw_dir);
+    fd = open(outpath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0)
+        return -1;
+    pid = fork();
+    if (pid < 0) {
+        close(fd);
+        return -1;
+    }
+    if (pid == 0) {
+        dup2(fd, STDOUT_FILENO);
+        /* Capture dbus-send's errors too: a failed micom send must leave
+         * evidence in blu_call.out for the failure log. */
+        dup2(fd, STDERR_FILENO);
+        close(fd);
+        execl(cfg.dbus_send_path, "dbus-send", "--system", "--print-reply",
+              "--reply-timeout=8000",
+              "--dest=com.lge.car.micom", "/Can",
+              "com.lge.car.micom.can.SetCANFixedMicomRecv",
+              arg_id, arg_bit, arg_size, arg_data, (char *)NULL);
+        {
+            char err[256];
+            int len = snprintf(err, sizeof(err),
+                              "exec %s failed: %s\n",
+                              cfg.dbus_send_path, strerror(errno));
+            if (len > 0)
+                (void)!write(STDOUT_FILENO, err, (size_t)len);
+        }
+        _exit(127);
+    }
+    close(fd);
+    {
+        int status = 0;
+        time_t deadline = time(NULL) + 10;
+        while (time(NULL) <= deadline) {
+            if (waitpid(pid, &status, WNOHANG) == pid)
+                return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
+            usleep(50000);
+        }
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
+    }
+    return -1;
+}
+
+static int send_blu_status(int on)
+{
+    return send_blu_signal(BLU_STATUS_BIT, BLU_STATUS_SIZE,
+                           on ? BLU_STATUS_ON : BLU_STATUS_OFF);
+}
+
+static int send_blu_level(int level)
+{
+    return send_blu_signal(BLU_LEVEL_BIT, BLU_LEVEL_SIZE, level);
+}
+
+static int blu_forced_marker(void)
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%s/blu_forced", cfg.rw_dir);
+    return access(path, F_OK) == 0;
+}
+
+static void set_blu_forced_marker(int on)
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%s/blu_forced", cfg.rw_dir);
+    if (on)
+        write_atomic(path, "1");
+    else
+        unlink(path);
+}
+
+/*
+ * Cluster night mode: while projection is active and the vendor has flipped
+ * the blue-light filter off, keep re-asserting the cluster's amber by
+ * writing the same fixed CAN signals the vendor uses.  When the force ends
+ * and the vendor filter is still off, restore the vendor state once.
+ */
+static void check_cluster_blu(time_t now)
+{
+    static int initialized;
+    int want_forced = cfg.cluster_fix && rt.projection_active && !rt.filter_on;
+
+    if (!initialized) {
+        /* A previous daemon run may have left the cluster forced on. */
+        if (blu_forced_marker()) {
+            rt.blu_forced = 1;
+            rt.blu_status_sent = BLU_STATUS_ON;
+        }
+        initialized = 1;
+    }
+
+    if (want_forced) {
+        int need = (rt.blu_status_sent != BLU_STATUS_ON) ||
+                   (rt.blu_level_sent != rt.warmth_level);
+        if (!need && rt.blu_last_send &&
+            now - rt.blu_last_send >= BLU_KEEPALIVE_S)
+            need = 1;   /* keepalive: the vendor may re-assert its own state */
+        if (need) {
+            int ok = send_blu_status(1);
+            if (rt.warmth_level >= 1 && rt.warmth_level <= 9)
+                ok |= send_blu_level(rt.warmth_level);
+            if (ok == 0) {
+                rt.blu_status_sent = BLU_STATUS_ON;
+                rt.blu_level_sent = rt.warmth_level;
+                rt.blu_last_send = now;
+                rt.cluster_applied = 1;
+                rt.blu_forced = 1;
+                set_blu_forced_marker(1);
+                log_msg("cluster BLU: forced on via CAN 0x063F (level %d)",
+                        rt.warmth_level);
+            } else {
+                set_error("micom blue-light send failed");
+            }
+        }
+        rt.blu_forced = 1;
+    } else if (rt.blu_forced) {
+        /* Force period over.  If the vendor filter is still off, restore
+         * the cluster to the vendor state; if the vendor restored the
+         * filter it will have sent its own state already. */
+        rt.blu_forced = 0;
+        set_blu_forced_marker(0);
+        if (!rt.filter_on && rt.blu_status_sent == BLU_STATUS_ON) {
+            if (send_blu_status(0) == 0) {
+                rt.blu_status_sent = BLU_STATUS_OFF;
+                rt.blu_last_send = now;
+                rt.cluster_applied = 0;
+                log_msg("cluster BLU: force ended, restored off");
+            }
+        } else {
+            rt.blu_status_sent = 0;
+            rt.cluster_applied = 0;
+        }
+    } else {
+        rt.cluster_applied = rt.filter_on ? 1 : 0;
+    }
+}
+
 static void write_cluster_desired(void)
 {
     static char last[64];
     char path[MAX_PATH], value[64];
     snprintf(path, sizeof(path), "%s/cluster_gamma", cfg.rw_dir);
-    if (cfg.cluster_fix && night_mode_on()) {
+    if (cfg.infotainment_fix && night_mode_on()) {
         effective_warmth(value, sizeof(value));
     } else {
         snprintf(value, sizeof(value), "off");
@@ -1857,6 +2095,10 @@ static void build_status(char *out, size_t size)
              "\"cluster_applied\":%d,"
              "\"main_applied\":%d,"
              "\"night_forced\":%d,"
+             "\"brightness\":\"%s\","
+             "\"blu_forced\":%d,"
+             "\"blu_status_sent\":%d,"
+             "\"blu_level_sent\":%d,"
              "\"disclaimer_auto\":%d,"
              "\"disclaimer_timeout_ms\":%d,"
              "\"auto_dst\":%d,"
@@ -1891,6 +2133,10 @@ static void build_status(char *out, size_t size)
              rt.cluster_applied ? 1 : 0,
              rt.main_applied ? 1 : 0,
              rt.night_forced ? 1 : 0,
+             valid_gamma(rt.brightness) ? rt.brightness : "128:128:128",
+             rt.blu_forced ? 1 : 0,
+             rt.blu_status_sent,
+             rt.blu_level_sent,
              cfg.disclaimer_auto ? 1 : 0,
              cfg.disclaimer_timeout_ms,
              cfg.auto_dst ? 1 : 0,
@@ -1976,7 +2222,8 @@ static void tick(void)
              * drop the amber tint; the next signal refreshes the state. */
         }
     }
-    start_dbus_monitor();
+    if (!g_once_mode)
+        start_dbus_monitor();
     if (g_last_vendor_read == 0 || now - g_last_vendor_read >= 2) {
         read_vendor_state();
         g_last_vendor_read = now;
@@ -1992,6 +2239,7 @@ static void tick(void)
     rt.night_forced = night_on && !rt.filter_on;
     effective_warmth(warmth, sizeof(warmth));
 
+    check_cluster_blu(now);
     write_cluster_desired();
 
     if (rt.identify_crtc >= 0 && rt.identify_until <= now) {
@@ -2002,35 +2250,16 @@ static void tick(void)
         rt.main_applied = 0;
     }
 
-    int identifying_cluster = (rt.identify_crtc == cfg.cluster_crtc);
     int identifying_main = (rt.identify_crtc == cfg.main_crtc);
 
-    if (!identifying_cluster) {
-        if (cfg.cluster_fix && night_on) {
-            /*
-             * Re-apply every tick (force): the vendor resets the CRTC LUT to
-             * neutral when projection takes over, and this daemon must not
-             * follow the filter flag the vendor just flipped off.
-             */
-            apply_gamma(cfg.cluster_crtc, warmth,
-                        rt.last_cluster_gamma, sizeof(rt.last_cluster_gamma),
-                        &rt.cluster_applied, 1);
-        } else if (cfg.cluster_fix) {
-            apply_gamma(cfg.cluster_crtc, "128:128:128",
-                        rt.last_cluster_gamma, sizeof(rt.last_cluster_gamma),
-                        &rt.cluster_applied, 0);
-        } else if (!cfg.cluster_fix && rt.cluster_applied) {
-            /* Restore the vendor state once, then stop interfering. */
-            if (apply_gamma(cfg.cluster_crtc, rt.filter_on ? warmth : "128:128:128",
-                            rt.last_cluster_gamma, sizeof(rt.last_cluster_gamma),
-                            &rt.cluster_applied, 0) == 0)
-                rt.cluster_applied = 0;
-        }
-    }
-
+    /*
+     * Front (infotainment) display: the vendor tints it with
+     * "wrandr --crtc=1 --brightness=<r:g:b>" (setFrontBrightnessRGBValue).
+     * Re-apply every tick while the fix is on and night mode is effective,
+     * so a vendor reset during projection is corrected within a second.
+     */
     if (!identifying_main) {
-        if (cfg.infotainment_fix && rt.projection_active) {
-            /* Same reasoning as the cluster: re-apply every tick. */
+        if (cfg.infotainment_fix && night_on) {
             apply_gamma(cfg.main_crtc, warmth,
                         rt.last_main_gamma, sizeof(rt.last_main_gamma),
                         &rt.main_applied, 1);
@@ -2359,6 +2588,10 @@ int main(int argc, char **argv)
     snprintf(rt.dst_state, sizeof(rt.dst_state), "unknown");
     snprintf(rt.ota_state, sizeof(rt.ota_state), "unknown");
     g_now_override = dst_at;
+    /* One-shot modes exit after a single tick: no dbus-monitors, or they
+     * would be orphaned when this process returns. */
+    if (once || do_status || set_key[0])
+        g_once_mode = 1;
     if (rw_override[0])
         snprintf(g_rw_override, sizeof(g_rw_override), "%s", rw_override);
     load_config();

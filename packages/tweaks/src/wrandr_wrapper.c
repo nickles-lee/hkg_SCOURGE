@@ -5,11 +5,13 @@
 /*
  * wrandr wrapper for the Ioniq 5 Tweaks app.
  *
- * The vendor ApplicationManager resets the cluster gamma with:
- *   wrandr --crtc=1 --gamma=128:128:128 --brightness=128:128:128
- * when the blue-light filter is disabled.  If the Tweaks cluster fix is
- * enabled, replace only that neutral gamma with the current Hyundai warmth.
- * Everything else goes straight to the real wrandr binary.
+ * The vendor tints the front display with:
+ *   wrandr --crtc=1 --brightness=<r:g:b>
+ * (ApplicationManager setFrontBrightnessRGBValue) and resets it to
+ * --brightness=128:128:128 when the blue-light filter is disabled, which
+ * CarPlay/Android Auto trigger.  If the Tweaks infotainment fix is enabled,
+ * replace only that neutral brightness with the current warmth.  Everything
+ * else goes straight to the real wrandr binary.
  */
 #define _GNU_SOURCE
 #include <ctype.h>
@@ -20,7 +22,7 @@
 
 #define REAL_WRANDR "/usr/bin/wrandr.real"
 #define GAMMA_FILE "/rw_data/tweaks/cluster_gamma"
-#define DEFAULT_CLUSTER_CRTC 1
+#define DEFAULT_FRONT_CRTC 1
 
 const char *tweaks_wrandr_marker = "TWEAKS_WRANDR_WRAPPER";
 
@@ -35,13 +37,13 @@ static const char *gamma_file(void)
     return GAMMA_FILE;
 }
 
-static int read_cluster_crtc(void)
+static int read_front_crtc(void)
 {
     const char *rw = getenv("TWEAKS_RW_DIR");
-    const char *env = getenv("TWEAKS_CLUSTER_CRTC");
+    const char *env = getenv("TWEAKS_FRONT_CRTC");
     char path[512], line[256];
     FILE *f;
-    int crtc = DEFAULT_CLUSTER_CRTC;
+    int crtc = DEFAULT_FRONT_CRTC;
 
     if (env && *env)
         return atoi(env);
@@ -53,8 +55,8 @@ static int read_cluster_crtc(void)
     if (!f)
         return crtc;
     while (fgets(line, sizeof(line), f)) {
-        if (!strncmp(line, "cluster_crtc=", 13)) {
-            crtc = atoi(line + 13);
+        if (!strncmp(line, "main_crtc=", 10)) {
+            crtc = atoi(line + 10);
             break;
         }
     }
@@ -88,15 +90,15 @@ static int parse_crtc(const char *arg)
 int main(int argc, char **argv)
 {
     char desired[64];
-    char gamma_arg[80];
+    char brightness_arg[80];
     char *new_argv[64];
     const char *real = getenv("TWEAKS_REAL_WRANDR");
     int i, out = 0;
-    int cluster_crtc = read_cluster_crtc();
+    int front_crtc = read_front_crtc();
     int crtc = -1;
     int have_crtc = 0;
     int is_neutral = 0;
-    int have_gamma = 0;
+    int have_brightness = 0;
 
     if (!real || !*real)
         real = REAL_WRANDR;
@@ -107,29 +109,29 @@ int main(int argc, char **argv)
             crtc = c;
             have_crtc = 1;
         }
-        if (!strncmp(argv[i], "--gamma=", 8)) {
-            have_gamma = 1;
-            if (!strcmp(argv[i] + 8, "128:128:128"))
+        if (!strncmp(argv[i], "--brightness=", 13)) {
+            have_brightness = 1;
+            if (!strcmp(argv[i] + 13, "128:128:128"))
                 is_neutral = 1;
         }
     }
 
     /*
-     * Only rewrite a neutral gamma that explicitly targets the cluster.
-     * A command without --crtc= must pass through untouched, otherwise a
-     * vendor call for another display could be tinted amber.
+     * Only rewrite a neutral brightness that explicitly targets the front
+     * display.  A command without --crtc= must pass through untouched,
+     * otherwise a vendor call for another display could be tinted amber.
      */
-    if (!have_crtc || crtc != cluster_crtc || !have_gamma || !is_neutral ||
+    if (!have_crtc || crtc != front_crtc || !have_brightness || !is_neutral ||
         read_desired(desired, sizeof(desired)) < 0) {
         execv(real, argv);
         perror("wrandr wrapper: execv");
         return 127;
     }
 
-    snprintf(gamma_arg, sizeof(gamma_arg), "--gamma=%s", desired);
+    snprintf(brightness_arg, sizeof(brightness_arg), "--brightness=%s", desired);
     for (i = 0; i < argc && out < (int)(sizeof(new_argv) / sizeof(new_argv[0])) - 1; i++) {
-        if (!strncmp(argv[i], "--gamma=", 8))
-            new_argv[out++] = gamma_arg;
+        if (!strncmp(argv[i], "--brightness=", 13))
+            new_argv[out++] = brightness_arg;
         else
             new_argv[out++] = argv[i];
     }

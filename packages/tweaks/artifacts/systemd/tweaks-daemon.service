@@ -8,6 +8,8 @@ ConditionPathExists=/rw_data/tweaks/tweaks_daemon
 [Service]
 Type=simple
 Environment=PATH=/bin:/sbin:/usr/bin:/usr/sbin
+# wrandr is a Wayland client; the vendor session runs with this runtime dir.
+Environment=XDG_RUNTIME_DIR=/var/run/user/root
 ExecStart=/bin/sh -c 'exec /rw_data/tweaks/tweaks_daemon --port 8091 >> /rw_data/tweaks/daemon.log 2>&1'
 Restart=always
 RestartSec=3

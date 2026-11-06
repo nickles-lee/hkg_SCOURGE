@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
 # SPDX-License-Identifier: AGPL-3.0-only
-# Wrapper unit test: neutral reset rewrite vs passthrough.
+# Wrapper unit test: neutral brightness reset rewrite vs passthrough.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(dirname "$HERE")
@@ -18,30 +18,39 @@ chmod +x "$TMP/real"
 
 run() {
     TWEAKS_RW_DIR="$TMP" TWEAKS_REAL_WRANDR="$TMP/real" \
-    TWEAKS_CLUSTER_CRTC=1 "$BIN" "$@"
+    TWEAKS_FRONT_CRTC=1 "$BIN" "$@"
 }
 
 echo "128:115:102" > "$TMP/cluster_gamma"
-run --crtc=1 --gamma=128:128:128 --brightness=128:128:128
-grep -q -- '--crtc=1 --gamma=128:115:102' "$TMP/log"
+# The vendor's neutral front-display reset must be rewritten to the warmth.
+run --crtc=1 --brightness=128:128:128
+grep -q -- '--crtc=1 --brightness=128:115:102' "$TMP/log"
 
 : > "$TMP/log"
-run --crtc=1 --gamma=128:112:96 --brightness=128:128:128
-grep -q -- '--crtc=1 --gamma=128:112:96' "$TMP/log"
+# A non-neutral brightness passes through untouched.
+run --crtc=1 --brightness=128:112:96
+grep -q -- '--crtc=1 --brightness=128:112:96' "$TMP/log"
 
 : > "$TMP/log"
-run --crtc=0 --gamma=128:128:128 --brightness=128:128:128
-grep -q -- '--crtc=0 --gamma=128:128:128' "$TMP/log"
+# Another CRTC passes through untouched.
+run --crtc=2 --brightness=128:128:128
+grep -q -- '--crtc=2 --brightness=128:128:128' "$TMP/log"
 
 : > "$TMP/log"
+# Disarmed ("off") passes the neutral reset through.
 echo off > "$TMP/cluster_gamma"
-run --crtc=1 --gamma=128:128:128 --brightness=128:128:128
-grep -q -- '--crtc=1 --gamma=128:128:128' "$TMP/log"
+run --crtc=1 --brightness=128:128:128
+grep -q -- '--crtc=1 --brightness=128:128:128' "$TMP/log"
 
 : > "$TMP/log"
 echo "128:115:102" > "$TMP/cluster_gamma"
 # A command without --crtc= must pass through untouched (regression).
-run --gamma=128:128:128 --brightness=128:128:128
-grep -q -- '--gamma=128:128:128' "$TMP/log"
+run --brightness=128:128:128
+grep -q -- '--brightness=128:128:128' "$TMP/log"
+
+: > "$TMP/log"
+# Gamma args pass through untouched: the vendor uses the brightness channel.
+run --crtc=1 --gamma=128:128:128 --brightness=128:115:102
+grep -q -- '--crtc=1 --gamma=128:128:128 --brightness=128:115:102' "$TMP/log"
 
 echo "PASS: wrapper test"

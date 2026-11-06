@@ -92,10 +92,15 @@ Brightness is kept at `128:128:128`.
 
 ## 7. Infotainment fix
 
-- Daemon monitors `com.lge.avn.appmanager.info`:
+- Daemon watches `com.lge.avn.appmanager.info` on **both the system and the
+  session bus** (AppNavi subscribes to it via `QDBusConnection::sessionBus()`,
+  so the session bus is the one that carries the signals in practice):
   - `carplay_play_enable_status`
   - `android_auto_play_enable_status`
   - `front_drawing_application`
+- `status.json` exposes `mon_system`, `mon_session`, `sig_carplay`,
+  `sig_android`, `sig_front` and `sig_bus` so a test drive proves which bus
+  delivered the signals.
 - The CarPlay and Android Auto app IDs are learned separately, each from the
   `front_drawing_application` value at the moment its play-enable flag turns
   on (0→1). A later front-app signal never overwrites the learned ID, so

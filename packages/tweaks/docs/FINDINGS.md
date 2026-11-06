@@ -23,21 +23,30 @@ level 9   128:112:96
 off       128:128:128
 ```
 
-## 2. Cluster tint is a DRM gamma reset
+## 2. How the blue-light filter actually works (verified in decompiled code)
 
-`ApplicationManager` applies the cluster tint with:
+`ApplicationManager` owns the whole pipeline. Its `PersistenceHandler`
+registers the PCL keys, and on change calls:
 
-```sh
-wrandr --crtc=1 --gamma=<r:g:b> --brightness=128:128:128
-```
+- **Instrument cluster**: `MicomInterfaceM::setBLUStatus(bool)` /
+  `setBLULevel(int)` send `SetCANFixedMicomRecv` on the **system bus**
+  (`com.lge.car.micom.can` → `/Can` → `com.lge.car.micom`):
+  - status: CAN **0x063F**, start bit **26**, 2 bits, data **2 = on / 1 = off**
+  - level: CAN **0x063F**, start bit **12**, 4 bits, data **1–9**
+  The cluster ECU renders its own amber from these signals — the cluster is
+  **not** a head-unit CRTC.
+- **Head-unit front display** (where CarPlay/Android Auto render):
+  `PlatformUtils::writeBLValue` runs
+  `wrandr --crtc=1 --brightness=<r:g:b>` through `QProcess::startDetached`,
+  and checks the command for `brightness=128:128:128` to decide the cluster
+  status. `wrandr` is a **Wayland client** (`ias_crtc` protocol); the session
+  runs with `XDG_RUNTIME_DIR=/var/run/user/root` (ApplicationLauncher.service).
+  wrandr numbers CRTCs from **1**: CRTC 1 is the front display (HDMI1,
+  1920x720).
 
-When the filter is disabled it issues:
-
-```sh
-wrandr --crtc=1 --gamma=128:128:128 --brightness=128:128:128
-```
-
-This is the “remove amber tint” command. It is not a CAN/body command.
+So the earlier model ("cluster = CRTC 1, reset via --gamma") was wrong on
+both counts: the cluster amber is CAN-driven, and the only wrandr target is
+the front display via the **brightness** channel.
 
 ## 3. Why CarPlay/Android Auto triggers it
 
@@ -68,12 +77,14 @@ diagnostic script and `Identify display` buttons confirm this on the car.
 
 ## 5. Fix strategy
 
-- Cluster: while the fix is on and night mode is *effective* (filter on OR
-  projection active), re-apply the last known Hyundai warmth to the cluster
-  CRTC every tick, and keep `cluster_gamma` armed so the wrandr wrapper also
-  rewrites the vendor's neutral reset instantly.
-- Infotainment: apply the same warmth to the main CRTC while projection is
-  foreground, regardless of the filter flag the vendor flips off.
+- Cluster: while the fix is on and projection is active while the vendor has
+  flipped the filter off, re-assert the vendor's own blue-light CAN signals
+  (0x063F status=on + level) through the micom D-Bus service, and restore the
+  vendor state when the force ends. A marker file survives daemon restarts.
+- Front display: apply the same warmth via `wrandr --crtc=1 --brightness=…`
+  with the session's `XDG_RUNTIME_DIR`, re-applying every tick; the wrandr
+  wrapper also rewrites the vendor's neutral `--brightness=128:128:128`
+  reset instantly.
 - Both are independent switches in the Tweaks app.
 
 ## 6. Disclaimer and DST
@@ -136,3 +147,48 @@ dbus-send --session --print-reply --dest=com.lge.hkmc.avn.upgrade.fota \
 addr=$(cut -d, -f1 /tmp/session_appmgr)
 dbus-monitor --address "$addr" "type='signal',interface='com.lge.avn.appmanager.info'"
 ```
+
+## 9. VM validation (2026-11-06)
+
+The daemon was validated in a local QEMU lab booting the vendor kernel and
+rootfs (a private research harness; not part of this repository) against a
+real vendor `dbus-daemon` plus a signature-checking micom stand-in that owns
+`com.lge.car.micom` and implements `SetCANFixedMicomRecv(ayiii)` at `/Can` on
+`com.lge.car.micom.can` — 24/24 checks pass on the vendor kernel 4.1.27
+rootfs:
+
+- filter on + projection idle: no CAN call, front tint applied via wrandr;
+- CarPlay scenario (projection on, vendor filter off): night forced, cluster
+  amber re-asserted through exactly two CAN 0x063F writes (status bit 26 = 2,
+  level bit 12 = 4), `blu_forced` marker written, method returns received;
+- projection end: cluster restored (status = 1), marker cleared;
+- session-bus monitor against a real session bus: `carplay_play_enable_status`
+  and `front_drawing_application` counted, guid-stripped address works with
+  the vendor `dbus-monitor --address`.
+
+Bugs the VM run caught (all fixed):
+
+1. **micom D-Bus destination swap** — the daemon sent to
+   `--dest=com.lge.car.micom.can`, a bus name nobody owns; the vendor's
+   ApplicationManager sends to `com.lge.car.micom` with interface
+   `com.lge.car.micom.can` (verified at the `QDBusMessage::createMethodCall`
+   call site). On the car every blue-light write would have failed with
+   `ServiceUnknown`.
+2. **CAN argument packing** — the four message arguments were passed to
+   `dbus-send` as one argv string, so the call went out with signature `ay`
+   instead of `ayiii` (dbus-send parses one argv word as one argument). The
+   host suite missed it because its fake dbus-send does not validate
+   signatures; the signature-checking VM sim rejected it with `UnknownMethod`.
+3. **Swallowed micom errors** — dbus-send's stderr was redirected to
+   /dev/null; a failed CAN write left an empty `blu_call.out` and no evidence.
+   `blu_call.out`/`ota_call.out` now capture stderr, and exec failures log
+   errno.
+4. **Orphaned dbus-monitors** — `tick()` started dbus-monitors even in
+   `--once`/`--status`/`--set` mode, orphaning them when the process exited
+   one tick later. One-shot modes no longer fork monitors.
+
+VM-only artifacts (not daemon bugs): the guest boots without loopback (the
+status server correctly fail-fasts; the test raises `lo` with the vendor
+busybox), `/etc/passwd` is a symlink to `/tmp/passwd`, and `/var` is a symlink
+to `rw_data/var`.
+
