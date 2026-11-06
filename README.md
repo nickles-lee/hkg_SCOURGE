@@ -2,6 +2,8 @@
 
 Lets you run your own software on Linux-based Gen5W head units & fixes some annoyances in the stock firmware that have gone unfixed after all these years. Think of this as the Linux counterpart to the (unrelated, unaffiliated) [HMG NEMESIS](https://github.com/xwtk/hmg_nemesis) project.
 
+**Repository:** <https://github.com/nickles-lee/hkg_SCOURGE>
+
 We have a [Discord channel](https://discord.com/channels/1074629698379841567/1272790207971721216)!
 
 ## Support
