@@ -17,6 +17,14 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn('reboot-marker PASS', command)
         self.assertIn('reboot -f', command)
 
+    def test_no_space_scenario_contract(self) -> None:
+        scenario = load_scenario('recovery-no-space')
+        self.assertEqual(scenario['requires_storage'], 'split')
+        self.assertEqual(scenario['storage_size'], {'update': 16})
+        command = scenario_command(scenario, load_profile('conformance'))
+        self.assertIn('no space', command)
+        self.assertIn('/update/.no-space', command)
+
 
 if __name__ == '__main__':
     unittest.main()

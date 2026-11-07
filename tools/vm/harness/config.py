@@ -15,7 +15,7 @@ SCENARIO_NAMES = ('boot', 'usb-discovery', 'dbus-ready', 'dmclient-events',
                   'updater-launch', 'stock-update-stage', 'storage-isolation', 'environment-audit', 'update-graphics',
                   'entropy-ready', 'vendor-lifecycle', 'applauncher-sigstub',
                   'vendor-lifecycle-sigstub', 'ui-smoke', 'wifi-ui',
-                  'can-smoke', 'recovery-reboot')
+                  'can-smoke', 'recovery-reboot', 'recovery-no-space')
 
 
 def load_profile(name: str) -> dict:
@@ -67,6 +67,22 @@ def scenario_command(scenario: dict, profile: dict, graphics: str = 'patched-off
         return (VM / 'probes' / 'can-smoke.sh').read_text()
     if name == 'recovery-reboot':
         return ("echo 'HARNESS_CHECK reboot-marker PASS'; sync; reboot -f\n")
+    if name == 'recovery-no-space':
+        return r'''set -u
+dd if=/dev/zero of=/update/.no-space bs=1M count=32 2>/tmp/no-space.log
+rc=$?
+rm -f /update/.no-space 2>/dev/null || true
+if [ "$rc" -eq 0 ]; then
+    echo 'HARNESS_FAIL recovery-no-space (write unexpectedly succeeded)'
+    exit 1
+fi
+if ! grep -qi 'no space' /tmp/no-space.log; then
+    echo 'HARNESS_FAIL recovery-no-space (missing ENOSPC)'
+    cat /tmp/no-space.log
+    exit 1
+fi
+echo 'HARNESS_CHECK recovery-no-space PASS'
+'''
     if name == 'environment-audit':
         return audit_script()
     if name == 'storage-isolation':

@@ -724,7 +724,10 @@ def run(cmd: str | None, interactive: bool, timeout: float,
             inputs['payload'] = (build_payload_image(payload, run_dir / 'payload.img')
                                  if payload.is_dir() else payload)
         if storage_mode == 'split':
-            storage = create_storage(run_dir, storage_sizes)
+            effective_sizes = storage_sizes
+            if not effective_sizes and scenario and scenario.get('storage_size'):
+                effective_sizes = scenario['storage_size']
+            storage = create_storage(run_dir, effective_sizes)
             result['storage'] = storage
             for name, item in storage['volumes'].items():
                 inputs[item['overlay_name']] = Path(item['backing'])

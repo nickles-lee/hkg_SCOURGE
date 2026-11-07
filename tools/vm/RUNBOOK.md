@@ -238,6 +238,14 @@ plus a terminated QEMU as PASS (`reboot_exit: true`). This is a first
 recovery slice, not power-loss, corrupt-media, no-space or repeated-update
 coverage.
 
+`recovery-no-space` fills a 16 MiB synthetic update volume until ENOSPC,
+asserts the error, and removes the filler:
+
+```sh
+python3 -B launch.py run --profile conformance --scenario recovery-no-space \
+  --storage split --timeout 120
+```
+
 ## Troubleshooting
 
 | Symptom | Action |

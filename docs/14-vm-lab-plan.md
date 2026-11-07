@@ -511,9 +511,13 @@ items beyond that.
   ACK for `SetCANFixedMicomRecv` and `SetCANMicomRecv` with argument values.
   Vendor run PASS; serial contains the full simulator log. 203 tests. This
   is a deterministic interface test, not real CAN timing/vehicle fidelity.
-- **2026-11-07 — P2-7 slice**: `recovery-reboot` accepts a marker plus a
-  terminated `-no-reboot` QEMU (`reboot_exit=true`). Vendor run PASS. Other
-  recovery cases (power-loss, corrupt media, no-space, USB removal, repeat
-  update) remain.
-- **Remaining:** P2-3 wcap (client absent), P2-7 full recovery matrix,
-  P2-8 stock boot. P3 deferred.
+- **2026-11-07 — P2-7 slices complete**: `recovery-reboot` (marker +
+  terminated `-no-reboot` QEMU) and `recovery-no-space` (16 MiB synthetic
+  update volume, ENOSPC, cleanup). Both real runs PASS. Power-loss, corrupt
+  media, USB removal and repeat-update recovery remain.
+- **2026-11-07 — P2-9/P2-7 sync**: SCOURGE commit `253bf08` pushed with
+  CAN smoke, forced-reboot recovery, tests and docs (127 files in
+  `tools/vm/`). Policy audit clean. The no-space addition is pending the next
+  sync.
+- **Remaining:** P2-3 wcap (client absent), P2-7 remaining cases, P2-8 stock
+  boot. P3 deferred.

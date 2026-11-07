@@ -1,0 +1,1 @@
+{"name":"recovery-no-space","description":"Fill the synthetic update volume until ENOSPC, assert the failure is reported, and remove the filler. Not a production eMMC layout test.","requires":[],"checks":["recovery-no-space"],"blockers":{},"requires_storage":"split","storage_size":{"update":16}}

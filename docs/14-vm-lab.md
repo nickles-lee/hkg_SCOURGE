@@ -49,6 +49,7 @@ VM-validated (vendor kernel):
 - update-engine state machines up to the device-credential gate
 - forced-reboot recovery smoke (marker + QEMU `-no-reboot` exit; one slice,
   not power-loss/corrupt-media coverage)
+- no-space recovery on a synthetic 16 MiB update volume (ENOSPC assertion)
 - synthetic micom CAN interface smoke (`can-smoke`): READY/CALL/ACK for
   fixed and bulk calls; contract only, not real CAN timing
 
