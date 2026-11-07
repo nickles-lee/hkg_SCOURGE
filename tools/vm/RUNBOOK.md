@@ -189,6 +189,32 @@ Starts the system bus and the synthetic `tweaks-micom-can-sim`, then calls
 method returns. It is an interface/contract test, not real CAN timing or
 vehicle-state fidelity.
 
+## Vehicle-state model (lab-defined)
+
+```sh
+python3 -B launch.py run --profile research --scenario vehicle-state \
+  --payload payload/tweaks-vm --timeout 180
+```
+
+The synthetic micom simulator packs fixed-frame writes into per-canid frames
+and decodes two lab-defined canids into a deterministic state:
+
+- `0x0100`: speed (0..300, clamped), gear (P/R/N/D), ignition
+  (OFF/ACC/ON/START)
+- `0x0101`: battery SOC (0..100, clamped), doors bitmask, climate setpoint in
+  half-degrees C (16..30, clamped), outside temperature as int8 C (-40..85,
+  clamped)
+
+The lab-only `org.scourge.vehicle.State` interface at `/Vehicle` exposes
+`GetState`/`Reset`; the last `SetCANMicomRecv` payload is retained as
+`bulk=<hex>`. The probe asserts decoded values, one clamp marker per
+out-of-range write, bulk retention, reset defaults and a hostile
+`startbit=INT_MAX`/boundary range guard (ignored and logged, never written).
+Rebuild the payload with `sh build_research_tools.sh` after changing the
+simulator. The frame
+mapping is lab-defined: it is not a vendor DBC and does not claim stock
+vehicle fidelity.
+
 ## Visual regression
 
 ```sh

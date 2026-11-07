@@ -15,7 +15,7 @@ SCENARIO_NAMES = ('boot', 'usb-discovery', 'dbus-ready', 'dmclient-events',
                   'updater-launch', 'stock-update-stage', 'storage-isolation', 'environment-audit', 'update-graphics',
                   'entropy-ready', 'vendor-lifecycle', 'applauncher-sigstub',
                   'vendor-lifecycle-sigstub', 'ui-smoke', 'wifi-ui',
-                  'can-smoke', 'recovery-reboot', 'recovery-no-space',
+                  'can-smoke', 'vehicle-state', 'recovery-reboot', 'recovery-no-space',
                   'recovery-corrupt-media', 'recovery-usb-removal',
                   'recovery-power-loss', 'vendor-systemd',
                   'vendor-systemd-dbus', 'recovery-repeat-update')
@@ -88,6 +88,8 @@ echo 'HARNESS_CHECK recovery-no-space PASS'
 '''
     if name == 'vendor-systemd-dbus':
         return (VM / 'probes' / 'vendor-systemd-dbus.sh').read_text()
+    if name == 'vehicle-state':
+        return (VM / 'probes' / 'vehicle-state.sh').read_text()
     if name == 'recovery-corrupt-media':
         return (VM / 'probes' / 'recovery-corrupt-media.sh').read_text()
     if name == 'recovery-repeat-update':

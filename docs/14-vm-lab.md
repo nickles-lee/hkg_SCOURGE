@@ -67,6 +67,9 @@ VM-validated (vendor kernel):
   without vehicle hardware (lab fixture, not stock/esinit)
 - synthetic micom CAN interface smoke (`can-smoke`): READY/CALL/ACK for
   fixed and bulk calls; contract only, not real CAN timing
+- vehicle-state model (`vehicle-state`): lab-defined fixed-frame decode for
+  speed/gear/ignition/battery/doors/climate/outside, clamps, bulk retention
+  and reset; not a vendor DBC or stock vehicle fidelity
 
 VM-validated (compat kernel):
 

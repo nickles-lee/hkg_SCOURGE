@@ -545,6 +545,12 @@ items beyond that.
   (socket/service startup in order, not on-demand activation).
   Real run PASS with ordered evidence; only `System service for micommanager`
   failed (vehicle hardware absent). Lab fixture, not stock/esinit. 223 tests.
+- **2026-11-07 — P2-9 slice (vehicle state)**: `vehicle-state` extends the
+  micom simulator with lab-defined speed/gear/ignition/battery/doors/climate/
+  outside decoding, clamp evidence, a hostile-range guard, bulk retention and
+  a lab GetState/Reset interface. Real run PASS; `can-smoke` still PASS. Lab
+  mapping, not a vendor DBC. 228 tests.
 - **Remaining:** P2-3 wcap (client absent), P2-7 AppUpgrade-engine repeat
   behaviour (credential-gated), P2-8 deeper stock/esinit fidelity (needs the
-  vendor boot chain), P2-9 broader vehicle-state model. P3 deferred.
+  vendor boot chain), P2-9 further signals/real DBC mapping (lab model
+  landed). P3 deferred.
