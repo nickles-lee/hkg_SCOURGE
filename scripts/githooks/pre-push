@@ -18,9 +18,23 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         python3 "$REPO/scripts/policy_check.py" spdx
         python3 "$REPO/scripts/policy_check.py" ignore
         python3 "$REPO/scripts/policy_check.py" refs
+        RANGE=$(git rev-list "$local_sha" --not --remotes=origin)
     else
         python3 "$REPO/scripts/policy_check.py" all \
             --range "$remote_sha..$local_sha"
+        RANGE=$(git rev-list "$remote_sha..$local_sha")
+    fi
+
+    # Rule 11: a second opinion is recorded as a `Second-Opinion:` trailer.
+    # This is a warning, not a gate — the hook cannot verify a real review.
+    MISSING=""
+    for sha in $RANGE; do
+        git log -1 --format=%B "$sha" | grep -q '^Second-Opinion:' ||
+            MISSING="$MISSING $sha"
+    done
+    if [ -n "$MISSING" ]; then
+        echo "pre-push: warning — commits without a Second-Opinion: trailer:$MISSING" >&2
+        echo "pre-push: rule 11 requires self-review plus a distinct second agent (AGENTS.md)." >&2
     fi
 
     if [ "${SCOURGE_SKIP_TEST_GATE:-0}" = "1" ]; then

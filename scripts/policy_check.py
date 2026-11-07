@@ -310,6 +310,7 @@ IGNORE_PROBES = (
     "tools/vm/runs/probe/result.json",
     "config/key.local",
     "config/paths.local.env",
+    "config/reviewer.local",
     "usb.img",
 )
 

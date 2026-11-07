@@ -56,6 +56,22 @@ repo.
    stop and report it.
 10. **Status honesty.** Mark what is car-validated vs offline-validated
     vs WIP everywhere. Never imply more validation than exists.
+11. **Unattended commits and merges get a second opinion.** This applies
+    whenever work lands without a human reading the diff first — an agent
+    committing, merging, rebasing, or force-pushing on the owner's behalf.
+    The committer must self-review the full diff against these rules and
+    the task's requirements, then a **distinct** second agent (a different
+    session and/or model from the committer) must independently double-check
+    the same diff. Record the verdict in the commit message as
+    `Second-Opinion: <agent/model> — PASS`. A FAIL is a stop: fix it or
+    ask the human; never land a FAIL-reviewed change. Ask the human at the
+    **start** of the task which agent/model should review (store it in
+    gitignored `config/reviewer.local`, copied from
+    `config/reviewer.local.example`); if no pick is stored and the human
+    is unreachable, use a distinct available agent and record both the
+    agent/model and the fallback fact in the trailer. The pre-push hook
+    warns, but cannot verify, that the trailer exists — the real check is
+    the recorded review.
 
 ## Task routing
 
@@ -78,6 +94,10 @@ repo.
 - The TE2 key if `00_fetch_third_party.sh` could not fetch it.
 - The Pi host/user for rig deployment.
 - Which packages to put on a combo stick (`packages/compose.sh` prompts).
+- Which agent/model gives the rule-11 second opinion for unattended
+  commits/merges (or whether to prompt for it every task). Store the pick
+  in gitignored `config/reviewer.local`; the committed example is
+  `config/reviewer.local.example`.
 - Confirmation before `14_format_usb.sh`, Pi deployment, and every car step.
 
 ## Environment
@@ -137,6 +157,10 @@ per clone via `core.hooksPath scripts/githooks`:
   listed in `scripts/known_test_failures.txt` (reviewed,
   environment-dependent reds) do not block, **new failures block**, and
   stale entries print a warning so the list cannot rot.
+- **second opinion (rule 11)** — pre-push also warns (does not block) for
+  pushed commits with no `Second-Opinion:` trailer. The hook cannot
+  verify a real review happened, so this is a reminder; the recorded
+  verdict is the actual control.
 
 The checks:
 
