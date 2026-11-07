@@ -498,5 +498,11 @@ items beyond that.
   state forces `writethrough`. Boot benchmark: writeback 5.92/6.15 s,
   writethrough 7.23/5.77 s, directsync 46.26/44.93 s; keep writeback.
   199 tests.
-- **Remaining P2:** P2-3 wcap, P2-4 virgl, P2-7/P2-8 recovery/stock boot,
-  P2-9 CAN expansion. P3 stays deferred.
+- **2026-11-07 — P2-2/P2-10/P2-11 sync**: SCOURGE commit `e079e20`
+  pushed (121 files in `tools/vm/`) with daemon, governor, cache modes and
+  tests. Policy audit clean.
+- **2026-11-07 — P2-4 documented no-win**: `egl-headless` + `virtio-vga-gl`
+  boots the compat guest, but QMP screendump has no surface. Keep
+  `virtio-vga` for screenshots; GTK+GL remains untested headless. 200 tests.
+- **Remaining P2:** P2-3 wcap (client absent), P2-7/P2-8 recovery/stock boot,
+  P2-9 CAN expansion. P3 deferred.

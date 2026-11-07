@@ -186,10 +186,10 @@ def _serve(config: dict) -> int:
             for name, path in inputs.items():
                 overlays.update(launch.create_overlays(daemon_dir, {name: path}))
         qmp_socket = daemon_dir / "qmp.sock"
-        display_device = config.get("display_device") or (
-            "virtio-vga" if kernel_target == "compat" else "std")
+        display_device = config.get("display_device") or "none"
         if display_device == "none":
-            display_device = "virtio-vga" if kernel_target == "compat" else "std"
+            display_device = ("virtio-vga-gl" if config.get("display") == "egl-headless"
+                              else "virtio-vga") if kernel_target == "compat" else "std"
         argv = launch.qemu_argv(
             daemon_dir, usb, tools, False, payload, overlays,
             qmp_socket=qmp_socket, display_device=display_device,

@@ -199,6 +199,19 @@ python3 -B regress.py --no-lock ...      # only for controlled, non-booting work
 
 `summary.json` records `locked: true`. `--no-lock` is an explicit opt-out.
 
+## Virgl experiment
+
+```sh
+python3 -B launch.py run --kernel compat --display egl-headless \
+  --display-device virtio-vga-gl --scenario boot
+```
+
+This boots and the guest accepts the virtio-vga-gl device, but QEMU's
+`egl-headless` display exposes no surface to QMP (`screendump: no surface`).
+It is a documented no-win for the screenshot-first workflow; keep
+`--display-device virtio-vga` for QMP captures. GTK with GL may work on a
+desktop session but cannot be validated on this headless host.
+
 ## Troubleshooting
 
 | Symptom | Action |

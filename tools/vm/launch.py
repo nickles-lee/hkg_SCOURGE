@@ -357,6 +357,8 @@ def qemu_argv(run_dir: Path, usb: Path | None = None,
         argv += ["-display", "gtk"]
     elif display == "vnc":
         argv += ["-vnc", vnc_display]
+    elif display == "egl-headless":
+        argv += ["-display", "egl-headless"]
     else:
         raise ValueError(f"unknown display: {display}")
     if network:
@@ -394,6 +396,8 @@ def qemu_argv(run_dir: Path, usb: Path | None = None,
         argv += ["-vga", "std"]
     elif display_device == "virtio-vga":
         argv += ["-vga", "none", "-device", "virtio-vga,xres=1280,yres=720"]
+    elif display_device == "virtio-vga-gl":
+        argv += ["-vga", "none", "-device", "virtio-vga-gl,xres=1280,yres=720"]
     elif display_device == "none":
         argv += ["-vga", "none"]
     else:
@@ -550,14 +554,16 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         raise ValueError('conformance requires a managed --scenario; arbitrary commands are research only')
     if interactive and screenshot:
         raise ValueError('--screenshot requires noninteractive execution')
-    if display_device not in ('none', 'std', 'virtio-vga'):
+    if display_device not in ('none', 'std', 'virtio-vga', 'virtio-vga-gl'):
         raise ValueError(f'unknown display device: {display_device}')
     if qmp_screenshot and display_device == 'none':
-        display_device = 'virtio-vga' if kernel_target == 'compat' else 'std'
-    if display not in ('none', 'gtk', 'vnc'):
+        display_device = ('virtio-vga-gl' if display == 'egl-headless' else 'virtio-vga') \
+            if kernel_target == 'compat' else 'std'
+    if display not in ('none', 'gtk', 'vnc', 'egl-headless'):
         raise ValueError(f'unknown display backend: {display}')
     if display != 'none' and display_device == 'none':
-        display_device = 'virtio-vga' if kernel_target == 'compat' else 'std'
+        display_device = ('virtio-vga-gl' if display == 'egl-headless' else 'virtio-vga') \
+            if kernel_target == 'compat' else 'std'
     if smp not in (1, 2, 4):
         raise ValueError('smp must be 1, 2 or 4 (vendor NR_CPUS=4)')
     if not 1024 <= memory_mb <= 8192:
@@ -1146,9 +1152,9 @@ def main() -> int:
     ds.add_argument('--usb', type=Path, default=None)
     ds.add_argument('--payload', type=Path, default=None)
     ds.add_argument('--share', type=Path, default=None)
-    ds.add_argument('--display', choices=('none', 'gtk', 'vnc'), default='none')
+    ds.add_argument('--display', choices=('none', 'gtk', 'vnc', 'egl-headless'), default='none')
     ds.add_argument('--vnc-display', default=':1')
-    ds.add_argument('--display-device', choices=('none', 'std', 'virtio-vga'), default='none')
+    ds.add_argument('--display-device', choices=('none', 'std', 'virtio-vga', 'virtio-vga-gl'), default='none')
     ds.add_argument('--network', action='store_true')
     ds.add_argument('--audio', action='store_true')
     ds.add_argument('--usb-host', action='append', default=[], metavar='VENDOR:PRODUCT')
@@ -1194,7 +1200,7 @@ def main() -> int:
                    help="second raw image exposed as a USB stick (research tools)")
     r.add_argument('--share', type=Path, default=None,
                    help='compat mode only: host directory mounted at /media/host via 9p')
-    r.add_argument('--display', choices=('none', 'gtk', 'vnc'), default='none',
+    r.add_argument('--display', choices=('none', 'gtk', 'vnc', 'egl-headless'), default='none',
                    help='interactive display backend (gtk needs a desktop session)')
     r.add_argument('--vnc-display', default=':1', metavar=':N',
                    help='VNC display number/address for --display vnc (default :1)')
@@ -1219,7 +1225,7 @@ def main() -> int:
                    help='capture wayland-screenshot.png through the second serial artifact channel')
     r.add_argument('--qmp-screenshot', action='store_true',
                    help='attach a display device and capture qmp-screenshot.png via QMP')
-    r.add_argument('--display-device', choices=('none', 'std', 'virtio-vga'), default='none',
+    r.add_argument('--display-device', choices=('none', 'std', 'virtio-vga', 'virtio-vga-gl'), default='none',
                    help='QEMU display device for QMP screendump (default: auto std for --qmp-screenshot)')
     r.add_argument('--smp', type=int, choices=(1, 2, 4), default=1,
                    help='guest CPUs (vendor kernel NR_CPUS=4)')
