@@ -60,6 +60,21 @@ class StateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "flat storage"):
             launch.run("true", False, 5, state=self.state_dir, storage_mode="split")
 
+    def test_retained_overlays_only_counts_run_local_files(self) -> None:
+        run_dir = self.root / "run"
+        run_dir.mkdir()
+        inside = run_dir / "rootfs.qcow2"
+        inside.write_bytes(b"x")
+        outside = self.root / "state" / "rootfs.qcow2"
+        outside.parent.mkdir()
+        outside.write_bytes(b"x")
+        self.assertTrue(launch.retained_overlays(
+            run_dir, {"rootfs": {"path": str(inside)}}))
+        self.assertFalse(launch.retained_overlays(
+            run_dir, {"rootfs": {"path": str(outside)}}))
+        self.assertFalse(launch.retained_overlays(
+            run_dir, {"rootfs": {"path": str(run_dir / "gone.qcow2")}}))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,8 @@ SCENARIO_NAMES = ('boot', 'usb-discovery', 'dbus-ready', 'dmclient-events',
                   'entropy-ready', 'vendor-lifecycle', 'applauncher-sigstub',
                   'vendor-lifecycle-sigstub', 'ui-smoke', 'wifi-ui',
                   'can-smoke', 'recovery-reboot', 'recovery-no-space',
-                  'recovery-corrupt-media', 'recovery-usb-removal')
+                  'recovery-corrupt-media', 'recovery-usb-removal',
+                  'recovery-power-loss')
 
 
 def load_profile(name: str) -> dict:
@@ -114,6 +115,17 @@ fi
 umount -l /media/usb 2>/dev/null || true
 echo 'HARNESS_CHECK usb-cleanup PASS'
 echo 'HARNESS_CHECK recovery-usb-removal PASS'
+'''
+    if name == 'recovery-power-loss':
+        return r'''set -u
+printf 'POWER_LOSS_MARKER\n' > /tmp/power-loss-marker
+sync
+echo POWER_LOSS_READY
+i=0
+while [ "$i" -lt 1000000 ]; do
+    echo "POWER_LOSS_LINE_$i" >> /tmp/power-loss-fill
+    i=$((i+1))
+done
 '''
     if name == 'environment-audit':
         return audit_script()

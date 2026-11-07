@@ -96,6 +96,8 @@ class SigstubScenarioTests(unittest.TestCase):
         self.assertNotIn('profile forbids substitution: applauncher-sigstub', verdict['failures'])
 
 
+@unittest.skipUnless((PAYLOAD / 'scripts' / 'patch_applauncher.py').is_file(),
+                     'applauncher_sigstub fixture is not checked out beside the repo')
 class SigstubPatchTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

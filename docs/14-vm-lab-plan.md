@@ -512,11 +512,12 @@ items beyond that.
   Vendor run PASS; serial contains the full simulator log. 203 tests. This
   is a deterministic interface test, not real CAN timing/vehicle fidelity.
 - **2026-11-07 — P2-7 slices complete**: `recovery-reboot`,
-  `recovery-no-space`, `recovery-corrupt-media`, and
-  `recovery-usb-removal` (QMP `device_del`; guest sees I/O error and
-  lazy-unmounts). All real runs PASS. Power-loss and repeat-update remain.
-- **Remaining:** P2-3 wcap (client absent), P2-7 power-loss/repeat-update,
-  P2-8 stock boot. P3 deferred.
+  `recovery-no-space`, `recovery-corrupt-media`,
+  `recovery-usb-removal`, and `recovery-power-loss` (two-phase kill/reboot,
+  marker recovery). All real runs PASS. Repeat-update/update-engine crash
+  consistency remains.
+- **Remaining:** P2-3 wcap (client absent), P2-7 repeat-update/update-engine
+  crash consistency, P2-8 stock boot. P3 deferred.
 - **2026-11-07 — P2-9/P2-7 sync**: SCOURGE commit `253bf08` pushed with
   CAN smoke, forced-reboot recovery, tests and docs (127 files in
   `tools/vm/`). Policy audit clean. The no-space addition is pending the next
@@ -526,5 +527,8 @@ items beyond that.
   `tools/vm/`). Policy audit clean.
 - **2026-11-07 — corrupt-media sync**: SCOURGE commit `0d81299` pushed with
   `recovery-corrupt-media`, tests and docs (130 files in `tools/vm/`).
+- **2026-11-07 — USB-removal sync**: SCOURGE commit `8894274` pushed with
+  `recovery-usb-removal`, QMP detach helper, tests and docs (131 files in
+  `tools/vm/`). Policy audit clean.
 - **Remaining:** P2-3 wcap (client absent), P2-7 power-loss/repeat-update,
   P2-8 stock boot. P3 deferred.

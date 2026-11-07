@@ -50,9 +50,10 @@ class UiSmokeTests(unittest.TestCase):
 
     def test_committed_probe_frame_has_visible_pixels(self) -> None:
         image = VM / 'docs' / 'screenshots' / 'mode-c-probe.png'
-        pixels = nonblack_bbox(image)
-        if pixels is None:
-            self.skipTest('Pillow unavailable')
+        try:
+            pixels = nonblack_bbox(image)
+        except RuntimeError as exc:
+            self.skipTest(str(exc))
         self.assertTrue(pixels['bbox'])
         self.assertGreater(pixels['count'], 1000)
 

@@ -98,6 +98,15 @@ def extract_artifacts(serial_path: Path, output_dir: Path) -> list[dict]:
         name, size, payload_start = header
         payload_end = payload_start + size
         if payload_end > len(data):
+            # Truncated trailing frame: report it instead of silently dropping.
+            artifacts.append(
+                {
+                    "name": name,
+                    "error": "truncated",
+                    "expected_size": size,
+                    "received_size": len(data) - payload_start,
+                }
+            )
             break
         payload = data[payload_start:payload_end]
         destination = output_dir / name

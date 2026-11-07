@@ -8,11 +8,13 @@ from pathlib import Path
 
 
 def nonblack_bbox(path: Path) -> dict | None:
-    """Return the non-black bounding box, or None if Pillow is unavailable."""
+    """Return the non-black bounding box; raise if Pillow is unavailable."""
     try:
         from PIL import Image
-    except ImportError:
-        return None
+    except ImportError as exc:
+        raise RuntimeError(
+            "Pillow is required for screenshot pixel checks; install python-pillow"
+        ) from exc
     image = Image.open(path).convert("RGB")
     width, height = image.size
     pixels = image.load()

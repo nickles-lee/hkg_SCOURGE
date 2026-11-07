@@ -54,6 +54,8 @@ VM-validated (vendor kernel):
   by `MANIFEST.sha256` with an actionable failure marker
 - USB-removal recovery: QMP detaches the mounted update stick; the guest sees
   an I/O error and lazy-unmounts without hanging
+- power-loss recovery: kill QEMU mid-write, reboot the same state, require
+  the synced marker to survive (ext4 journal recovery)
 - synthetic micom CAN interface smoke (`can-smoke`): READY/CALL/ACK for
   fixed and bulk calls; contract only, not real CAN timing
 

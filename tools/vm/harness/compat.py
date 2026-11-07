@@ -83,7 +83,9 @@ def make_lock(kver: str | None = None, package: str = "linux-omarchy") -> dict:
         try:
             relative = resolved.relative_to(modules_root)
         except ValueError:
-            relative = Path(resolved.name)
+            # Out-of-tree module: keep the absolute path so verification
+            # resolves it instead of guessing under /usr/lib/modules.
+            relative = resolved
         modules[name] = {
             "path": str(relative),
             "sha256": sha256_file(path),

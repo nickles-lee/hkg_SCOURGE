@@ -234,6 +234,16 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(load_scenario('stock-update-stage')['blockers']['research'])
         self.assertTrue(load_scenario('stock-update-stage')['blockers']['conformance'])
 
+    def test_scenario_names_match_scenario_directory(self):
+        from harness.config import SCENARIO_NAMES
+        on_disk = {path.stem for path in (VM / 'scenarios').glob('*.json')}
+        self.assertEqual(set(SCENARIO_NAMES), on_disk)
+        self.assertEqual(len(SCENARIO_NAMES), len(on_disk))
+
+    def test_crypto_bypass_scenarios_block_conformance(self):
+        for name in ('applauncher-sigstub', 'vendor-lifecycle-sigstub'):
+            self.assertTrue(load_scenario(name)['blockers'].get('conformance'), name)
+
     def test_unknown_names_cannot_select_arbitrary_files(self):
         for loader in (load_profile, load_scenario):
             with self.assertRaises(ValueError):

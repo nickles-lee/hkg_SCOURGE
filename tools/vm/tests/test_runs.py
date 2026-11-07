@@ -61,6 +61,22 @@ class RunManagementTests(unittest.TestCase):
         self.assertTrue((self.runs / "run-3").is_dir())
         self.assertTrue((self.runs / "run-4").is_dir())
 
+    def test_prune_protects_daemon_and_resultless_dirs(self) -> None:
+        daemon_dir = self.runs / "daemon"
+        daemon_dir.mkdir()
+        (daemon_dir / "control.sock").write_text("")
+        regression = self.runs / "regression-123"
+        regression.mkdir()
+        (regression / "summary.json").write_text("{}")
+        os.utime(daemon_dir, (1, 1))
+        os.utime(regression, (1, 1))
+        report = runs.prune(self.root, keep=1, apply=True)
+        self.assertTrue(daemon_dir.is_dir())
+        self.assertTrue(regression.is_dir())
+        reasons = {item["run"]: item["reason"] for item in report["protected"]}
+        self.assertEqual(reasons.get("daemon"), "daemon")
+        self.assertEqual(reasons.get("regression-123"), "no-result")
+
     def test_extract_and_path_traversal(self) -> None:
         metadata = runs.extract(self.root, "run-3", "shot.png", self.root / "out.png")
         self.assertEqual((self.root / "out.png").read_bytes(), b"png")

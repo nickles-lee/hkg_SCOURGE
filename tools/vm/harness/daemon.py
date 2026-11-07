@@ -52,6 +52,23 @@ def pid_alive(pid: int | None) -> bool:
     return True
 
 
+def daemon_pid_matches(pid: int | None, daemon_dir: Path | None = None) -> bool:
+    """True only if `pid` is a live daemon _serve for this daemon directory."""
+    if not pid_alive(pid):
+        return False
+    try:
+        cmdline = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+    except OSError:
+        return False
+    if b"daemon" not in cmdline or b"_serve" not in cmdline:
+        return False
+    if daemon_dir is not None:
+        expected = str((Path(daemon_dir) / "config.json").resolve()).encode()
+        if expected not in cmdline:
+            return False
+    return True
+
+
 def request(daemon_dir: Path, payload: dict, timeout: float = 15.0) -> dict:
     path = Path(daemon_dir) / "control.sock"
     deadline = time.monotonic() + timeout
@@ -136,11 +153,21 @@ def stop(config_dir: Path, timeout: float = 20.0) -> dict:
         if pid and not pid_alive(pid):
             return current
         time.sleep(0.2)
-    if pid and pid_alive(pid):
+    if pid and daemon_pid_matches(pid, daemon_dir):
         try:
             os.kill(int(pid), signal.SIGTERM)
         except OSError:
             pass
+    elif pid and pid_alive(pid):
+        # Identity check failed (wrapper/renamed cmdline): never signal an
+        # unknown process, but still reap this daemon's QEMU so it cannot
+        # keep writing state overlays.
+        qemu_pid = status.get("qemu_pid")
+        if qemu_pid and pid_alive(qemu_pid):
+            try:
+                os.kill(int(qemu_pid), signal.SIGKILL)
+            except OSError:
+                pass
     return read_status(daemon_dir)
 
 
@@ -159,6 +186,12 @@ def _serve(config: dict) -> int:
     stop_event = threading.Event()
     guest_lock = threading.Lock()
 
+    def _term_handler(signum, frame):  # noqa: ARG001
+        stop_event.set()
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+
+    old_term = signal.signal(signal.SIGTERM, _term_handler)
     try:
         tools = Path(config["tools"]) if config.get("tools") else None
         usb = Path(config["usb"]) if config.get("usb") else None
@@ -204,7 +237,14 @@ def _serve(config: dict) -> int:
         (daemon_dir / "command.json").write_text(json.dumps(argv, indent=2) + "\n")
         proc = subprocess.Popen(argv, cwd=daemon_dir, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                start_new_session=True)
+                                start_new_session=True,
+                                preexec_fn=launch.pdeathsig)
+        if stop_event.is_set():
+            # SIGTERM arrived during setup; do not leave QEMU running.
+            proc.kill()
+            proc.wait(10)
+            status.update({"state": "stopped", "exit_code": proc.returncode})
+            return 0
         ser = launch.Serial(proc, daemon_dir / "serial.log")
         if kernel_target == "vendor":
             launch.patch_sdhci(daemon_dir, proc, 30)
@@ -251,12 +291,19 @@ def _serve(config: dict) -> int:
                         with guest_lock:
                             token, output, rc, seconds = launch.execute_guest(
                                 ser, cmd, float(message.get("timeout", 300)))
-                        (daemon_dir / "daemon-commands.log").open("a").write(
-                            f"=== {time.time()} rc={rc} ===\n{output}\n")
+                        with (daemon_dir / "daemon-commands.log").open("a") as log:
+                            log.write(f"=== {time.time()} rc={rc} ===\n{output}\n")
                         response = {"ok": True, "output": output, "rc": rc,
                                     "seconds": seconds}
                 elif action == "screenshot":
                     output = Path(message.get("output", daemon_dir / "screenshot.png"))
+                    output = output.resolve()
+                    root = daemon_dir.resolve()
+                    if output != root and root not in output.parents:
+                        response = {"ok": False,
+                                    "error": f"screenshot outside daemon dir: {output}"}
+                        handle.write((json.dumps(response) + "\n").encode())
+                        return
                     output.parent.mkdir(parents=True, exist_ok=True)
                     result = launch.qmp_screendump(qmp_socket, output)
                     response = {"ok": True, "screenshot": result}
@@ -317,6 +364,10 @@ def _serve(config: dict) -> int:
                 pass
         if state_lock is not None:
             state_lock.close()
+        try:
+            signal.signal(signal.SIGTERM, old_term)
+        except (ValueError, OSError):
+            pass
         status["stopped_at"] = time.time()
         write_status(daemon_dir, status)
     return 0 if status["state"] == "stopped" else 1

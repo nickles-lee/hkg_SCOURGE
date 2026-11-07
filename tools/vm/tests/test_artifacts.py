@@ -58,7 +58,10 @@ class ArtifactChannelTests(unittest.TestCase):
 
     def test_partial_payload_is_not_written(self) -> None:
         self.serial.write_bytes(b"HARNESS_ARTIFACT wayland-screenshot.png 100\nshort")
-        self.assertEqual(extract_artifacts(self.serial, self.root), [])
+        artifacts = extract_artifacts(self.serial, self.root)
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0]["error"], "truncated")
+        self.assertEqual(artifacts[0]["expected_size"], 100)
         self.assertFalse((self.root / "wayland-screenshot.png").exists())
 
     def test_oversize_header_is_ignored(self) -> None:

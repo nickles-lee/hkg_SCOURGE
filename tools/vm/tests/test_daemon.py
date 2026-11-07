@@ -30,6 +30,12 @@ class DaemonTests(unittest.TestCase):
         self.assertTrue(daemon.pid_alive(os.getpid()))
         self.assertFalse(daemon.pid_alive(99999999))
 
+    def test_pid_identity_guard(self) -> None:
+        # The test runner is alive but is not a `daemon _serve` process.
+        self.assertFalse(daemon.daemon_pid_matches(os.getpid()))
+        self.assertFalse(daemon.daemon_pid_matches(99999999))
+        self.assertFalse(daemon.daemon_pid_matches(None))
+
     def test_control_request_round_trip(self) -> None:
         path = self.root / "control.sock"
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

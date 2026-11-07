@@ -42,6 +42,15 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn('USB_REMOVAL_READY_', command)
         self.assertIn('usb-cleanup', command)
 
+    def test_power_loss_scenario_contract(self) -> None:
+        scenario = load_scenario('recovery-power-loss')
+        self.assertTrue(scenario['expect_qemu_exit'])
+        self.assertEqual(scenario['expect_qemu_exit_marker'], 'POWER_LOSS_READY')
+        self.assertEqual(scenario['power_loss']['marker'], 'POWER_LOSS_READY')
+        command = scenario_command(scenario, load_profile('conformance'))
+        self.assertIn('POWER_LOSS_MARKER', command)
+        self.assertIn('sync', command)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -78,7 +78,8 @@ def extract(vm_dir: Path, run: str, member: str, destination: Path) -> dict:
 
 
 def prune(vm_dir: Path, keep: int = 20, apply: bool = False,
-          label: str | None = None, scenario: str | None = None) -> dict:
+          label: str | None = None, scenario: str | None = None,
+          allow_no_result: bool = False) -> dict:
     if keep < 0:
         raise ValueError("keep must be >= 0")
     runs = filter_runs(collect_runs(vm_dir), label=label, scenario=scenario)
@@ -87,6 +88,13 @@ def prune(vm_dir: Path, keep: int = 20, apply: bool = False,
     for index, item in enumerate(runs):
         if index < keep:
             protected.append({**item, "reason": "keep-newest"})
+        elif item["run"] == "daemon":
+            # A live daemon owns overlays/sockets here; never prune it.
+            protected.append({**item, "reason": "daemon"})
+        elif item["result"] is None and not allow_no_result:
+            # No result.json: not a completed managed run (daemon dirs,
+            # regression bundles, interrupted runs). Explicit opt-in only.
+            protected.append({**item, "reason": "no-result"})
         elif item["keep_overlay"] or item["overlays_retained"]:
             protected.append({**item, "reason": "retained-overlays"})
         else:
@@ -115,6 +123,7 @@ def prune(vm_dir: Path, keep: int = 20, apply: bool = False,
     return {
         "keep": keep,
         "apply": apply,
+        "allow_no_result": allow_no_result,
         "candidates": [item["run"] for item in candidates],
         "deleted": deleted,
         "protected": protected,

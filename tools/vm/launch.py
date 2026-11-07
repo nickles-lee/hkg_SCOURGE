@@ -232,6 +232,22 @@ def image_identity(path: Path, verify: bool = False) -> dict:
             'fresh_digest': verify, 'trusted_reference_verified': False}
 
 
+def retained_overlays(run_dir: Path, overlays: dict) -> bool:
+    """True only for overlays still present *inside* the run directory.
+
+    Persistent `--state` overlays live in the state dir; they must not mark
+    the run dir as retained (that would protect it from pruning forever).
+    """
+    run_dir = Path(run_dir).resolve()
+    for item in overlays.values():
+        path = Path(item['path'])
+        if not path.exists():
+            continue
+        if run_dir in path.resolve().parents:
+            return True
+    return False
+
+
 def source_identities() -> dict:
     paths = [VM / 'launch.py', VM / 'patch_kernel.py']
     for directory, patterns in (
@@ -659,6 +675,10 @@ def run(cmd: str | None, interactive: bool, timeout: float,
                               'device_id': usb_removal.get('device_id', 'usbdev'),
                               'marker': usb_removal.get('marker', 'USB_REMOVAL_READY_')}
                              if usb_removal else None)
+    power_loss = scenario.get('power_loss') if scenario else None
+    result['power_loss'] = ({'requested': True,
+                             'marker': power_loss.get('marker', 'POWER_LOSS_READY')}
+                            if power_loss else None)
     result['harness_sources'] = source_identities()
     storage = {'mode': 'flat', 'volumes': {}}
     result['storage'] = storage
@@ -671,6 +691,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
     qmp_socket = None
     state_lock = None
     removal_thread = None
+    power_loss_thread = None
     t0 = time.monotonic()
     old_handlers = {}
 
@@ -863,12 +884,28 @@ def run(cmd: str | None, interactive: bool, timeout: float,
 
             removal_thread = threading.Thread(target=detach_usb, daemon=True)
             removal_thread.start()
+        if power_loss is not None:
+            marker = str(power_loss.get('marker', 'POWER_LOSS_READY')).encode()
+            delay = float(power_loss.get('delay', 0.2))
+
+            def lose_power():
+                deadline = time.monotonic() + 60
+                with ser.cond:
+                    while marker not in ser.log:
+                        if time.monotonic() > deadline:
+                            result['power_loss']['error'] = 'marker timeout'
+                            return
+                        ser.cond.wait(0.2)
+                result['power_loss']['marker_seen'] = True
+                time.sleep(delay)
+                if proc.poll() is None:
+                    proc.kill()
+                result['power_loss']['killed'] = True
+
+            power_loss_thread = threading.Thread(target=lose_power, daemon=True)
+            power_loss_thread.start()
         token, output, guest_rc, scenario_seconds = execute_guest(
             ser, cmd or 'uname -a; id; cat /proc/partitions', remaining())
-        if removal_thread is not None:
-            removal_thread.join(10)
-            if removal_thread.is_alive():
-                result['usb_removal']['error'] = 'detach thread did not finish'
         result['command_id'] = token
         (run_dir / 'guest-output.log').write_text(output + '\n')
         result.update(evaluate(output, guest_rc, scenario, profile,
@@ -913,18 +950,45 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         return result['rc']
     except Exception as exc:  # noqa: BLE001
         if (scenario and scenario.get('expect_qemu_exit') and ser is not None
-                and proc is not None
-                and b'HARNESS_CHECK reboot-marker PASS' in bytes(ser.log)):
-            try:
-                proc.wait(5)
-            except subprocess.TimeoutExpired:
-                pass
-            if proc.poll() is not None:
-                result.update(verdict='PASS', rc=0, error=None, guest_rc=0,
-                              checks={'reboot-marker': 'PASS'}, reboot_exit=True)
-                print(f"[vm] reboot marker observed; QEMU exited rc={proc.returncode}",
-                      flush=True)
-                return 0
+                and proc is not None):
+            exit_marker = str(scenario.get(
+                'expect_qemu_exit_marker', 'HARNESS_CHECK reboot-marker PASS')).encode()
+            exit_check = scenario.get('expect_qemu_exit_check', 'reboot-marker')
+            if exit_marker in bytes(ser.log):
+                try:
+                    proc.wait(5)
+                except subprocess.TimeoutExpired:
+                    pass
+                if proc.poll() is not None:
+                    # Evaluate only this command's serial window so boot-time
+                    # noise cannot fail the run. The exit check itself is
+                    # harness evidence (marker + exit), not a guest-emitted
+                    # HARNESS_CHECK line, so it is excluded from evaluation
+                    # and synthesized as PASS afterwards.
+                    captured = bytes(ser.log).decode(errors='replace')
+                    frame = captured.rfind('IONIQ_COMMAND_BEGIN ')
+                    window = captured[frame:] if frame >= 0 else captured
+                    scenario_for_eval = dict(scenario)
+                    scenario_for_eval['checks'] = [
+                        name for name in scenario.get('checks', [])
+                        if name != exit_check]
+                    evaluated = evaluate(window, 0, scenario_for_eval, profile,
+                                         {'storage': storage_mode})
+                    checks = dict(evaluated.get('checks') or {})
+                    checks[exit_check] = 'PASS'
+                    evaluated.update(checks=checks, missing_checks=[])
+                    result.update(evaluated)
+                    result.update(error=None, guest_rc=None, reboot_exit=True,
+                                  rc=0 if evaluated['verdict'] == 'PASS' else 1)
+                    if evaluated['verdict'] == 'PASS':
+                        print(f"[vm] expected exit marker observed; QEMU exited "
+                              f"rc={proc.returncode}", flush=True)
+                        return 0
+                    result['error'] = ('expected exit marker present but checks '
+                                       'failed: '
+                                       f"{evaluated.get('failures') or evaluated.get('missing_checks')}")
+                    print(f"ERROR: {result['error']}", file=sys.stderr)
+                    return 1
         result.update(verdict='FAIL', rc=1, error=f'{type(exc).__name__}: {exc}')
         print(f"ERROR: {result['error']}", file=sys.stderr)
         return 1
@@ -945,13 +1009,18 @@ def run(cmd: str | None, interactive: bool, timeout: float,
             from harness.screenshots import nonblack_bbox
             qmp = result['screenshot'].get('qmp')
             if qmp:
-                pixels = nonblack_bbox(Path(qmp['path']))
+                try:
+                    pixels = nonblack_bbox(Path(qmp['path']))
+                except RuntimeError as exc:
+                    pixels = None
+                    result['screenshot']['pixel_error'] = str(exc)
                 result['screenshot']['qmp_pixels'] = pixels
                 if not pixels or not pixels.get('bbox'):
                     result['verdict'] = 'FAIL'
                     result['rc'] = 1
-                    result.setdefault('failures', []).append(
-                        'visible frame required: QMP screenshot is blank')
+                    reason = (result['screenshot'].get('pixel_error')
+                              or 'visible frame required: QMP screenshot is blank')
+                    result.setdefault('failures', []).append(reason)
             else:
                 result['verdict'] = 'FAIL'
                 result['rc'] = 1
@@ -1002,8 +1071,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
                 cleanup_overlays(run_dir, overlays)
             except Exception as exc:
                 cleanup_errors.append(f'overlay cleanup: {exc}')
-        result['overlays_retained'] = (state is not None or
-            any(Path(item['path']).exists() for item in overlays.values()))
+        result['overlays_retained'] = retained_overlays(run_dir, overlays)
         if state is None and not keep_overlay and stopped and not result['overlays_retained']:
             try:
                 cleanup_storage(run_dir, storage)
@@ -1016,7 +1084,8 @@ def run(cmd: str | None, interactive: bool, timeout: float,
                 artifacts = extract_artifacts(artifact_serial, run_dir)
                 result['screenshot']['artifacts'] = artifacts
                 result['screenshot']['ok'] = any(
-                    item['name'] == 'wayland-screenshot.png' for item in artifacts)
+                    item.get('name') == 'wayland-screenshot.png' and 'sha256' in item
+                    for item in artifacts)
                 if not result['screenshot']['ok']:
                     result['screenshot']['error'] = 'no wayland-screenshot.png artifact'
             except Exception as exc:  # noqa: BLE001
@@ -1024,6 +1093,29 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         if qmp_screenshot:
             result['screenshot']['ok'] = bool(
                 result['screenshot'].get('qmp') or result['screenshot'].get('ok'))
+        # Join host-side recovery threads before serializing result.json so
+        # they can never mutate it mid-write, and make their errors part of
+        # the verdict on every path (success, failure and early exit).
+        for thread, key, label in (
+                (removal_thread, 'usb_removal', 'usb removal'),
+                (power_loss_thread, 'power_loss', 'power loss')):
+            if thread is None:
+                continue
+            if thread.is_alive():
+                thread.join(5)
+            info = result.get(key)
+            if not isinstance(info, dict):
+                continue
+            if thread.is_alive() and not info.get('error'):
+                info['error'] = 'thread did not finish'
+            error = info.get('error')
+            if error and result.get('verdict') != 'BLOCKED':
+                result['verdict'] = 'FAIL'
+                result['rc'] = 1
+                failures = result.setdefault('failures', [])
+                message = f'{label}: {error}'
+                if message not in failures:
+                    failures.append(message)
         if cleanup_errors:
             result.update(verdict='FAIL', rc=1, cleanup_errors=cleanup_errors)
         result['total_seconds'] = round(time.monotonic() - t0, 3)
@@ -1172,11 +1264,15 @@ def main() -> int:
     graft.add_argument('--apply', action='store_true')
     graft.add_argument('--label', default=None)
     graft.add_argument('--scenario', default=None)
+    graft.add_argument('--allow-no-result', action='store_true',
+                       help='also prune dirs without result.json (regression bundles, interrupted runs)')
     gc = sub.add_parser('gc', help='prune with a larger default keep set')
     gc.add_argument('--keep', type=int, default=50)
     gc.add_argument('--apply', action='store_true')
     gc.add_argument('--label', default=None)
     gc.add_argument('--scenario', default=None)
+    gc.add_argument('--allow-no-result', action='store_true',
+                    help='also prune dirs without result.json (regression bundles, interrupted runs)')
     vis = sub.add_parser('visual', help='screenshot baselines and pixel diffs')
     vsub = vis.add_subparsers(dest='visual_action', required=True)
     vb = vsub.add_parser('baseline')
@@ -1228,6 +1324,10 @@ def main() -> int:
         if name == 'console':
             p.add_argument('--lines', type=int, default=200)
             p.add_argument('--follow', action='store_true')
+    rp = sub.add_parser('recovery-power-loss', help='two-phase power-loss recovery check')
+    rp.add_argument('--state', type=Path, default=VM / 'states' / 'recovery-power-loss')
+    rp.add_argument('--reset', action='store_true')
+    rp.add_argument('--timeout', type=float, default=180)
     r = sub.add_parser("run")
     r.add_argument("--cmd", default=None)
     r.add_argument('--label', default='', help='searchable run label')
@@ -1301,6 +1401,48 @@ def main() -> int:
             item = load_scenario(name)
             print(f"{name}: {item['description']}")
         return 0
+    if args.action == 'recovery-power-loss':
+        state = args.state.resolve()
+        phase1 = [sys.executable, '-B', str(VM / 'launch.py'), 'run',
+                  '--profile', 'conformance', '--scenario', 'recovery-power-loss',
+                  '--state', str(state), '--timeout', str(args.timeout)]
+        if args.reset:
+            phase1.append('--reset')
+        first = subprocess.run(phase1, capture_output=True, text=True)
+        print(first.stdout, end='')
+        if first.stderr:
+            print(first.stderr, file=sys.stderr, end='')
+        match = re.search(r'result=(\S+)', first.stdout)
+        if first.returncode != 0 or not match:
+            return first.returncode or 1
+        result1 = json.loads(Path(match.group(1)).read_text())
+        if result1.get('verdict') != 'PASS':
+            print(json.dumps(result1, indent=2))
+            return 1
+        verify = ("test -f /tmp/power-loss-marker && echo POWER_LOSS_RECOVERED || "
+                  "{ echo POWER_LOSS_ABSENT; exit 1; }")
+        phase2 = [sys.executable, '-B', str(VM / 'launch.py'), 'run',
+                  '--profile', 'research', '--cmd', verify,
+                  '--state', str(state), '--timeout', str(args.timeout)]
+        second = subprocess.run(phase2, capture_output=True, text=True)
+        print(second.stdout, end='')
+        if second.stderr:
+            print(second.stderr, file=sys.stderr, end='')
+        match = re.search(r'result=(\S+)', second.stdout)
+        if second.returncode != 0 or not match:
+            return second.returncode or 1
+        result2 = json.loads(Path(match.group(1)).read_text())
+        output = (Path(result2['run_dir']) / 'guest-output.log').read_text()
+        summary = {
+            'ok': result2.get('verdict') == 'PASS' and 'POWER_LOSS_RECOVERED' in output,
+            'phase1': {'verdict': result1.get('verdict'),
+                       'power_loss': result1.get('power_loss')},
+            'phase2': {'verdict': result2.get('verdict'),
+                       'recovered_marker': 'POWER_LOSS_RECOVERED' in output},
+            'state': str(state),
+        }
+        print(json.dumps(summary, indent=2))
+        return 0 if summary['ok'] else 1
     if args.action == 'daemon':
         if args.daemon_action == '_serve':
             config = json.loads(args.config.read_text())
@@ -1382,16 +1524,21 @@ def main() -> int:
             print(response.get('output', ''))
             return int(response.get('rc', 1))
         if args.daemon_action == 'screenshot':
-            output = args.output or (daemon_dir / 'screenshot.png')
-            output = output.resolve()
+            requested = args.output.resolve() if args.output else None
+            capture = daemon_dir / f'screenshot-{time.time_ns()}.png'
             try:
                 response = daemon_mod.request(
-                    daemon_dir, {'action': 'screenshot', 'output': str(output)},
+                    daemon_dir, {'action': 'screenshot', 'output': str(capture)},
                     timeout=30)
             except (OSError, RuntimeError, TimeoutError) as exc:
                 ap.error(str(exc))
             if not response.get('ok'):
                 ap.error(response.get('error', 'daemon screenshot failed'))
+            if requested is not None:
+                shutil.copy2(capture, requested)
+                response['copied_to'] = str(requested)
+                # The daemon dir is never pruned; keep only the copy.
+                capture.unlink(missing_ok=True)
             print(json.dumps(response, indent=2))
             return 0
         if args.daemon_action == 'console':
@@ -1440,7 +1587,8 @@ def main() -> int:
     if args.action in ('prune', 'gc'):
         try:
             print(json.dumps(prune_runs(VM, args.keep, args.apply,
-                                        args.label, args.scenario), indent=2))
+                                        args.label, args.scenario,
+                                        args.allow_no_result), indent=2))
         except (ValueError, OSError) as exc:
             ap.error(str(exc))
         return 0

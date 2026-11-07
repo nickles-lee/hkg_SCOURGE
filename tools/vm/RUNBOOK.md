@@ -110,7 +110,12 @@ python3 -B launch.py show <run-id>
 python3 -B launch.py extract <run-id> qmp-screenshot.png /tmp/shot.png
 python3 -B launch.py prune --keep 800        # dry-run
 python3 -B launch.py gc --apply              # destructive, explicit
+python3 -B launch.py gc --apply --allow-no-result   # also regression/interrupted dirs
 ```
+
+`prune`/`gc` never delete `runs/daemon` (a live daemon owns sockets and
+overlays there) and, by default, skip any directory without `result.json`
+(regression bundles, interrupted runs). `--allow-no-result` opts those in.
 
 State reuse:
 
@@ -268,6 +273,18 @@ python3 -B launch.py run --profile conformance \
 
 The guest must see an I/O error/removed device (not a hang), then lazy-unmount
 and pass. QEMU `device_del` models USB detachment, not a physical hot-unplug.
+
+Power-loss recovery is a two-phase command:
+
+```sh
+python3 -B launch.py recovery-power-loss \
+  --state states/power-loss --reset --timeout 180
+```
+
+Phase 1 writes a marker, syncs it, signals `POWER_LOSS_READY`, then starts a
+write loop; the host kills QEMU. Phase 2 boots the same state and must print
+`POWER_LOSS_RECOVERED`, proving the ext4 journal recovered the marker. This is
+one crash-consistency slice, not update-engine crash safety.
 
 ## Troubleshooting
 
