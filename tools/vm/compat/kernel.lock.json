@@ -2,7 +2,7 @@
   "initramfs": {
     "builder": "compat/build-initramfs.sh",
     "config": "compat/mkinitcpio.conf",
-    "config_sha256": "1d7dc084a9ad5751d4d313a69d80157a69c5777d53b01c256ab347e667241668",
+    "config_sha256": "a286484effa71778d61efb02b683cbe44034e2138c54e728dd5b96aa14ed51e2",
     "image": "compat/initramfs-linux.img"
   },
   "kernel": {
@@ -25,6 +25,18 @@
     "bochs": {
       "path": "kernel/drivers/gpu/drm/tiny/bochs.ko.zst",
       "sha256": "3a39ece51a810358b07e215821f307ff807b2cfaa8b44b5ac7baae284d9ec0d8"
+    },
+    "snd_hda_codec_generic": {
+      "path": "kernel/sound/hda/codecs/snd-hda-codec-generic.ko.zst",
+      "sha256": "c7a10f460db5d655606592101579a2b94a107a55371d63c2329ff9382df66f1f"
+    },
+    "snd_hda_codec_hdmi": {
+      "path": "kernel/sound/hda/codecs/hdmi/snd-hda-codec-hdmi.ko.zst",
+      "sha256": "f01808931f0cda09d194a9c3caeadb26a5712aad871b0ebc872512fd3dd9acf5"
+    },
+    "snd_hda_intel": {
+      "path": "kernel/sound/hda/controllers/snd-hda-intel.ko.zst",
+      "sha256": "24f3aaa61c0eb630b83a8fd4f9e13920671d57c424786ab7843b1d661bc24515"
     },
     "usb_storage": {
       "path": "kernel/drivers/usb/storage/usb-storage.ko.zst",

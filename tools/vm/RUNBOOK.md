@@ -127,6 +127,33 @@ python3 -B launch.py input --qmp <run>/qmp.sock --click 640,360
 python3 -B launch.py input --qmp <run>/qmp.sock --key ret
 ```
 
+## Audio (Mode C)
+
+```sh
+python3 -B launch.py run --kernel compat --audio \
+  --cmd 'cat /proc/asound/cards; aplay -l; \
+         aplay -D hw:0,0 -d 1 -f S16_LE -r 48000 -c 2 /dev/zero'
+```
+
+`--audio` adds `intel-hda` + `hda-duplex` with a null host backend; no host
+sound server is needed. The vendor rootfs default `dmix` slave is absent, so
+use `-D hw:0,0` (or configure a simple PCM) for a test tone.
+
+## Visual regression
+
+```sh
+python3 -B launch.py visual baseline <run-id> qmp-screenshot.png ui-smoke
+python3 -B launch.py visual compare <run-id> qmp-screenshot.png ui-smoke
+python3 -B launch.py visual compare <run-id> qmp-screenshot.png ui-smoke \
+  --threshold 0.01 --tolerance 8 --diff /tmp/ui.diff.png
+python3 -B launch.py visual list
+```
+
+Baselines live in `baselines/` (gitignored); `compare` writes a diff PNG and
+reports changed pixels/ratio. A deliberate UI change is rebaselined by
+running the `baseline` command against the reviewed frame. Baselines are
+workspace-local, so each agent can choose the frames it guards.
+
 ## Troubleshooting
 
 | Symptom | Action |

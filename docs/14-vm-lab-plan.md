@@ -462,4 +462,18 @@ items beyond that.
   quickstarts, capability matrix, screenshots, daily workflow, troubleshooting
   and safety; README/DEVELOPMENT/README.local route to it and stale wording is
   removed. 186 tests unchanged.
-- **Next:** P1-13 (first full SCOURGE sync via the policy-checked script).
+- **2026-11-07 — P1-13 complete**: first full SCOURGE sync via
+  `sync-to-scourge.sh --apply`; 113 files (700 KB) in `tools/vm/`, updated
+  `docs/14-vm-lab.md` and the progress mirror. Policy audit clean (no
+  OEM/binaries/exec bits/local paths/credentials; SPDX on code; pins for
+  third-party). SCOURGE commit `a9d9351` pushed to `main`.
+- **2026-11-07 — P2-1 complete**: `launch.py visual baseline|compare|list`
+  writes/uses workspace-local baselines, reports changed pixels/ratio with a
+  threshold and tolerance, and writes a diff PNG. Verified identical → 0;
+  different frame → 22,115 pixels (2.4%) over 1%. 189 tests.
+- **2026-11-07 — P2-5 complete**: compat-only `--audio` adds
+  `intel-hda` + `hda-duplex` with a null host backend. Guest sees card 0 /
+  Generic Analog; `aplay -D hw:0,0` playback returns 0. `dmix` default is
+  absent; direct device documented. Pin includes HDA modules. 191 tests.
+- **Next:** P2-2 (daemon), P2-3 (wcap), P2-4 (virgl), P2-6 (USB passthrough),
+  P2-7/P2-8 (recovery/stock boot), P2-9/P2-10/P2-11.

@@ -55,6 +55,9 @@ from harness.runs import collect_runs, extract as extract_run, filter_runs, prun
 from harness.share import MOUNTPOINT, mount_script as share_mount_script
 from harness.share import qemu_option as share_qemu_option
 from harness.state import StateBusy, create_state_overlays
+from harness.visual import baseline as visual_baseline
+from harness.visual import compare as visual_compare
+from harness.visual import list_baselines
 from harness.results import evaluate, phase_summary
 from harness.storage import VOLUMES, cleanup_storage, create_storage, mount_script, parse_sizes
 from harness.tools import check_tools
@@ -300,7 +303,8 @@ def qemu_argv(run_dir: Path, usb: Path | None = None,
               share: Path | None = None,
               display: str = "none",
               vnc_display: str = ":1",
-              network: bool = False) -> list[str]:
+              network: bool = False,
+              audio: bool = False) -> list[str]:
     kvm = os.path.exists("/dev/kvm") and os.access("/dev/kvm", os.R_OK | os.W_OK)
     if kvm:
         accel, cpu = "kvm", "host"
@@ -347,6 +351,12 @@ def qemu_argv(run_dir: Path, usb: Path | None = None,
         argv += [
             "-netdev", "user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:2222-:22",
             "-device", "virtio-net-pci,netdev=net0",
+        ]
+    if audio:
+        argv += [
+            "-audiodev", "none,id=audio0",
+            "-device", "intel-hda",
+            "-device", "hda-duplex,audiodev=audio0",
         ]
     if kernel_target == "compat":
         argv += [
@@ -517,7 +527,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         allow_kernel_mismatch: bool = False, share: Path | None = None,
         display: str = "none", vnc_display: str = ":1",
         label: str = "", state: Path | None = None, reset: bool = False,
-        network: bool = False) -> int:
+        network: bool = False, audio: bool = False) -> int:
     profile = load_profile(profile_name)
     scenario = load_scenario(scenario_name) if scenario_name else None
     if profile_name == 'conformance' and (scenario is None or interactive):
@@ -567,6 +577,8 @@ def run(cmd: str | None, interactive: bool, timeout: float,
             raise ValueError('--network requires --kernel compat (Mode C first)')
         if profile_name == 'conformance':
             raise ValueError('--network is forbidden by the conformance profile')
+    if audio and kernel_target != 'compat':
+        raise ValueError('--audio requires --kernel compat')
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError('timeout must be finite and positive')
     if storage_mode not in ('flat', 'split') or storage_mode == 'flat' and storage_sizes:
@@ -598,6 +610,8 @@ def run(cmd: str | None, interactive: bool, timeout: float,
     result['state'] = ({'path': str(state), 'reset': reset} if state is not None else None)
     result['network'] = ({'enabled': True, 'mode': 'user-restrict',
                           'hostfwd': 'tcp:127.0.0.1:2222-:22'} if network else None)
+    result['audio'] = ({'enabled': True, 'device': 'intel-hda/hda-duplex',
+                        'host_backend': 'none'} if audio else None)
     result['tools_manifest'] = None
     result['display_device'] = display_device
     result['display'] = display
@@ -722,7 +736,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         argv = qemu_argv(run_dir, usb, tools, patched, inputs.get('payload'), overlays,
                          artifact_serial, qmp_socket, display_device,
                          smp, memory_mb, not apic, kernel_target, share,
-                         display, vnc_display, network)
+                         display, vnc_display, network, audio)
         (run_dir / 'command.json').write_text(json.dumps(argv, indent=2) + '\n')
         if kernel_target == 'compat':
             result['kernel_mode'] = 'compat'
@@ -1082,6 +1096,20 @@ def main() -> int:
     gc.add_argument('--apply', action='store_true')
     gc.add_argument('--label', default=None)
     gc.add_argument('--scenario', default=None)
+    vis = sub.add_parser('visual', help='screenshot baselines and pixel diffs')
+    vsub = vis.add_subparsers(dest='visual_action', required=True)
+    vb = vsub.add_parser('baseline')
+    vb.add_argument('run')
+    vb.add_argument('member')
+    vb.add_argument('name')
+    vc = vsub.add_parser('compare')
+    vc.add_argument('run')
+    vc.add_argument('member')
+    vc.add_argument('name')
+    vc.add_argument('--threshold', type=float, default=0.01)
+    vc.add_argument('--tolerance', type=int, default=8)
+    vc.add_argument('--diff', type=Path, default=None)
+    vsub.add_parser('list')
     r = sub.add_parser("run")
     r.add_argument("--cmd", default=None)
     r.add_argument('--label', default='', help='searchable run label')
@@ -1114,6 +1142,8 @@ def main() -> int:
                    help='with --state, discard and recreate the persistent overlays')
     r.add_argument('--network', action='store_true',
                    help='compat research only: user-mode net, restrict=on, hostfwd 2222->22')
+    r.add_argument('--audio', action='store_true',
+                   help='compat only: intel-hda + hda-duplex with a null host backend')
     r.add_argument('--allow-stale-tools', action='store_true',
                    help='research only: boot a stale/unmanifested tools image with a warning')
     r.add_argument('--allow-kernel-mismatch', action='store_true',
@@ -1193,6 +1223,26 @@ def main() -> int:
         except (ValueError, OSError) as exc:
             ap.error(str(exc))
         return 0
+    if args.action == 'visual':
+        baselines = VM / 'baselines'
+        if args.visual_action == 'list':
+            print(json.dumps(list_baselines(baselines), indent=2))
+            return 0
+        root = (VM / 'runs').resolve()
+        source = (root / args.run / args.member).resolve()
+        if root not in source.parents or not source.is_file():
+            ap.error(f'run member not found or unsafe: {args.run}/{args.member}')
+        try:
+            if args.visual_action == 'baseline':
+                print(json.dumps(visual_baseline(source, args.name, baselines,
+                                                 args.run), indent=2))
+                return 0
+            status = visual_compare(source, args.name, baselines,
+                                    args.threshold, args.tolerance, args.diff)
+        except (ValueError, OSError, RuntimeError) as exc:
+            ap.error(str(exc))
+        print(json.dumps(status, indent=2))
+        return 0 if status.get('ok') else 1
     if args.scenario and (args.cmd is not None or args.interactive):
         ap.error('--scenario cannot be combined with --cmd or --interactive')
     if args.kernel == 'compat':
@@ -1209,7 +1259,7 @@ def main() -> int:
                args.display_device, args.smp, args.memory, args.apic,
                args.failure_bundle, kernel_target, args.allow_kernel_mismatch,
                args.share, args.display, args.vnc_display, args.label,
-               args.state, args.reset, args.network)
+               args.state, args.reset, args.network, args.audio)
 
 
 if __name__ == "__main__":

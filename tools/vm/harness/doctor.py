@@ -21,6 +21,9 @@ REQUIRED_COMPAT_MODULES = (
     "kernel/drivers/gpu/drm/tiny/bochs.ko",
     "kernel/drivers/virtio/virtio_input.ko",
     "kernel/drivers/net/virtio_net.ko",
+    "kernel/sound/hda/controllers/snd-hda-intel.ko",
+    "kernel/sound/hda/codecs/snd-hda-codec-generic.ko",
+    "kernel/sound/hda/codecs/hdmi/snd-hda-codec-hdmi.ko",
 )
 
 

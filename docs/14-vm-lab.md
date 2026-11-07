@@ -54,6 +54,9 @@ VM-validated (compat kernel):
 - Weston 1.10 DRM/pixman; visible Wayland probe; 1280×720 QMP screenshots
 - QML engine evaluation (`qmlscene`) and WiFi-payload QML-error capture
 - 9p host share, persistent state, VNC display, QMP click/key injection
+- HDA audio card + direct `hw:0,0` playback; opt-in restricted user net
+- visual-regression baselines/diffs and run management (list/show/extract/
+  prune/gc)
 
 Car-only (never VM claims):
 
