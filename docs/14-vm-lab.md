@@ -57,6 +57,10 @@ VM-validated (compat kernel):
 - HDA audio card + direct `hw:0,0` playback; opt-in restricted user net
 - visual-regression baselines/diffs and run management (list/show/extract/
   prune/gc)
+- persistent VM daemon (`daemon start/exec/screenshot/console/status/stop`)
+  with state surviving restarts
+- a whole-suite lock for parallel regression runs and explicit qcow2 cache
+  modes (writeback default; persistent state forces writethrough)
 - opt-in USB passthrough plumbing (`--usb-host VENDOR:PRODUCT`); the host
   USB node must grant QEMU access, so hardware verification is host-gated
 

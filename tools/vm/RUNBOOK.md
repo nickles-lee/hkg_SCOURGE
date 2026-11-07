@@ -145,6 +145,32 @@ python3 -B launch.py run --kernel compat --audio \
 sound server is needed. The vendor rootfs default `dmix` slave is absent, so
 use `-D hw:0,0` (or configure a simple PCM) for a test tone.
 
+## Persistent VM daemon
+
+Boot once and iterate without cold boots:
+
+```sh
+python3 -B launch.py daemon start --kernel compat --state states/daemon \
+  --label daily
+python3 -B launch.py daemon status
+python3 -B launch.py daemon exec --cmd 'uname -r; ls /media/host'
+python3 -B launch.py daemon screenshot --output /tmp/daemon.png
+python3 -B launch.py daemon console --lines 80
+python3 -B launch.py daemon console --follow        # Ctrl-C to detach
+python3 -B launch.py daemon stop
+```
+
+The daemon keeps the QEMU process, serial reader, QMP socket and state lock
+alive; `exec`/`screenshot` use a control socket in `runs/daemon/`. State
+overlays survive `stop` and are reused by the next `daemon start`; the
+default daemon directory is `runs/daemon` (`--daemon-dir` overrides it).
+Stop flushes the guest with `sync` before killing QEMU. A stale/dead daemon
+is reported by `status` instead of silently reusing it.
+
+`--cache` selects the non-persistent qcow2 mode (`writeback` default;
+`directsync` is pathological on this host). Persistent state always forces
+`writethrough`; see `docs/perf-smp-memory.md`.
+
 ## Visual regression
 
 ```sh
@@ -159,6 +185,19 @@ Baselines live in `baselines/` (gitignored); `compare` writes a diff PNG and
 reports changed pixels/ratio. A deliberate UI change is rebaselined by
 running the `baseline` command against the reviewed frame. Baselines are
 workspace-local, so each agent can choose the frames it guards.
+
+## Parallel suites
+
+`regress.py` takes an exclusive lock at `runs/.vm-lab.lock` for the whole
+suite. A second suite waits for `--lock-timeout` (default 600 s) instead of
+racing the first on EHCI/QEMU resources:
+
+```sh
+python3 -B regress.py --profile conformance --scenario boot
+python3 -B regress.py --no-lock ...      # only for controlled, non-booting work
+```
+
+`summary.json` records `locked: true`. `--no-lock` is an explicit opt-out.
 
 ## Troubleshooting
 

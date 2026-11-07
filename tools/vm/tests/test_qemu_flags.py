@@ -46,6 +46,16 @@ class DeterministicQemuTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("-smp") + 1], "4")
         self.assertIn("noapic", argv[argv.index("-append") + 1])
 
+    def test_cache_mode_and_persistent_override(self) -> None:
+        argv = launch.qemu_argv(self.root, overlays=self.overlays, cache="directsync")
+        drive = next(item for item in argv if "rootfs.qcow2" in item)
+        self.assertIn("cache=directsync", drive)
+        persistent = {"rootfs": {"path": str(self.root / "rootfs.qcow2"),
+                                 "persistent": True}}
+        argv = launch.qemu_argv(self.root, overlays=persistent, cache="unsafe")
+        drive = next(item for item in argv if "rootfs.qcow2" in item)
+        self.assertIn("cache=writethrough", drive)
+
     def test_invalid_smp_and_memory_are_rejected_before_boot(self) -> None:
         with self.assertRaises(ValueError):
             launch.run("true", False, 5, smp=3)

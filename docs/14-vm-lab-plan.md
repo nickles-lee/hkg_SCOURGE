@@ -483,5 +483,20 @@ items beyond that.
   repeatable `--usb-host VENDOR:PRODUCT` with EHCI pinning and result
   metadata; security boundary documented. Host USB nodes are root-only, so
   in-guest visibility is not validated; argv/refusal tests pass. 193 tests.
-- **Next:** P2-2 (daemon), P2-3 (wcap), P2-4 (virgl), P2-7/P2-8
-  (recovery/stock boot), P2-9/P2-10/P2-11.
+- **2026-11-07 — P2-6 sync**: SCOURGE commit `1f09222` pushed with USB
+  passthrough plumbing, test, RUNBOOK/security note and docs/14 update.
+  Policy audit clean.
+- **2026-11-07 — P2-2 complete**: persistent daemon
+  `start/status/exec/console/screenshot/stop`, control/QMP/serial sockets,
+  state lock and guest `sync` on stop. Evidence: boot 3.53 s, exec,
+  1280×720 screenshot, console, state surviving stop/restart. 196 tests.
+- **2026-11-07 — P2-10 complete**: `harness/governor.py` serializes whole
+  regression suites on `runs/.vm-lab.lock` with a 600 s default wait and
+  `--no-lock` opt-out; summary records `locked`. Two parallel boot suites
+  both passed without EHCI contention. 198 tests.
+- **2026-11-07 — P2-11 complete**: `--cache` on runs/daemon; persistent
+  state forces `writethrough`. Boot benchmark: writeback 5.92/6.15 s,
+  writethrough 7.23/5.77 s, directsync 46.26/44.93 s; keep writeback.
+  199 tests.
+- **Remaining P2:** P2-3 wcap, P2-4 virgl, P2-7/P2-8 recovery/stock boot,
+  P2-9 CAN expansion. P3 stays deferred.

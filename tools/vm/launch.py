@@ -39,6 +39,7 @@ from pathlib import Path
 from patch_kernel import COMPAT, TABLE_ENTRY, vaddr_to_offset
 from harness.audit import audit_script, parse_audit
 from harness.artifacts import extract_artifacts, wrap_command
+from harness import daemon as daemon_mod
 from harness.compat import verify_kernel_pin
 from harness.config import SCENARIO_NAMES, load_profile, load_scenario, scenario_command
 from harness.doctor import (MIN_QEMU, REQUIRED_DEVICES, compat_state, qemu_devices,
@@ -314,7 +315,8 @@ def qemu_argv(run_dir: Path, usb: Path | None = None,
               vnc_display: str = ":1",
               network: bool = False,
               audio: bool = False,
-              usb_host: list[str] | None = None) -> list[str]:
+              usb_host: list[str] | None = None,
+              cache: str = "writeback") -> list[str]:
     kvm = os.path.exists("/dev/kvm") and os.access("/dev/kvm", os.R_OK | os.W_OK)
     if kvm:
         accel, cpu = "kvm", "host"
@@ -332,9 +334,9 @@ def qemu_argv(run_dir: Path, usb: Path | None = None,
     def drive(name: str, source: Path) -> str:
         if overlays is None or name not in overlays:
             raise ValueError(f"missing explicit overlay: {name}")
-        cache = ",cache=writethrough" if overlays[name].get('persistent') else ""
+        cache_mode = "writethrough" if overlays[name].get('persistent') else cache
         return (f"if=none,id={name},format=qcow2,"
-                f"file={drive_path(Path(overlays[name]['path']))}{cache}")
+                f"file={drive_path(Path(overlays[name]['path']))},cache={cache_mode}")
 
     argv = [
         "qemu-system-x86_64",
@@ -541,7 +543,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         display: str = "none", vnc_display: str = ":1",
         label: str = "", state: Path | None = None, reset: bool = False,
         network: bool = False, audio: bool = False,
-        usb_host: list[str] | None = None) -> int:
+        usb_host: list[str] | None = None, cache: str = "writeback") -> int:
     profile = load_profile(profile_name)
     scenario = load_scenario(scenario_name) if scenario_name else None
     if profile_name == 'conformance' and (scenario is None or interactive):
@@ -560,6 +562,8 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         raise ValueError('smp must be 1, 2 or 4 (vendor NR_CPUS=4)')
     if not 1024 <= memory_mb <= 8192:
         raise ValueError('memory_mb must be between 1024 and 8192')
+    if cache not in ('writeback', 'writethrough', 'directsync', 'unsafe', 'none'):
+        raise ValueError(f'unknown cache mode: {cache}')
     if kernel_target not in ('vendor', 'compat'):
         raise ValueError(f'unknown kernel target: {kernel_target}')
     if kernel_target == 'compat':
@@ -632,6 +636,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
     result['audio'] = ({'enabled': True, 'device': 'intel-hda/hda-duplex',
                         'host_backend': 'none'} if audio else None)
     result['usb_host'] = list(usb_host) if usb_host else None
+    result['cache'] = cache
     result['tools_manifest'] = None
     result['display_device'] = display_device
     result['display'] = display
@@ -756,7 +761,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         argv = qemu_argv(run_dir, usb, tools, patched, inputs.get('payload'), overlays,
                          artifact_serial, qmp_socket, display_device,
                          smp, memory_mb, not apic, kernel_target, share,
-                         display, vnc_display, network, audio, usb_host)
+                         display, vnc_display, network, audio, usb_host, cache)
         (run_dir / 'command.json').write_text(json.dumps(argv, indent=2) + '\n')
         if kernel_target == 'compat':
             result['kernel_mode'] = 'compat'
@@ -1130,6 +1135,43 @@ def main() -> int:
     vc.add_argument('--tolerance', type=int, default=8)
     vc.add_argument('--diff', type=Path, default=None)
     vsub.add_parser('list')
+    dae = sub.add_parser('daemon', help='persistent VM: start/status/exec/console/screenshot/stop')
+    dsub = dae.add_subparsers(dest='daemon_action', required=True)
+    ds = dsub.add_parser('start')
+    ds.add_argument('--daemon-dir', type=Path, default=VM / 'runs' / 'daemon')
+    ds.add_argument('--kernel', choices=('vendor', 'compat'), default='vendor')
+    ds.add_argument('--state', type=Path, default=None)
+    ds.add_argument('--reset', action='store_true')
+    ds.add_argument('--tools', type=Path, default=None)
+    ds.add_argument('--usb', type=Path, default=None)
+    ds.add_argument('--payload', type=Path, default=None)
+    ds.add_argument('--share', type=Path, default=None)
+    ds.add_argument('--display', choices=('none', 'gtk', 'vnc'), default='none')
+    ds.add_argument('--vnc-display', default=':1')
+    ds.add_argument('--display-device', choices=('none', 'std', 'virtio-vga'), default='none')
+    ds.add_argument('--network', action='store_true')
+    ds.add_argument('--audio', action='store_true')
+    ds.add_argument('--usb-host', action='append', default=[], metavar='VENDOR:PRODUCT')
+    ds.add_argument('--smp', type=int, choices=(1, 2, 4), default=1)
+    ds.add_argument('--memory', type=int, default=4096)
+    ds.add_argument('--apic', action='store_true')
+    ds.add_argument('--label', default='')
+    ds.add_argument('--cache', choices=('writeback', 'writethrough', 'directsync',
+                                       'unsafe', 'none'), default='writeback')
+    ds.add_argument('--ready-timeout', type=float, default=180)
+    dserve = dsub.add_parser('_serve')
+    dserve.add_argument('--config', type=Path, required=True)
+    for name in ('status', 'stop', 'screenshot', 'console', 'exec'):
+        p = dsub.add_parser(name)
+        p.add_argument('--daemon-dir', type=Path, default=VM / 'runs' / 'daemon')
+        if name == 'exec':
+            p.add_argument('--cmd', required=True)
+            p.add_argument('--timeout', type=float, default=300)
+        if name == 'screenshot':
+            p.add_argument('--output', type=Path, default=None)
+        if name == 'console':
+            p.add_argument('--lines', type=int, default=200)
+            p.add_argument('--follow', action='store_true')
     r = sub.add_parser("run")
     r.add_argument("--cmd", default=None)
     r.add_argument('--label', default='', help='searchable run label')
@@ -1166,6 +1208,9 @@ def main() -> int:
                    help='compat only: intel-hda + hda-duplex with a null host backend')
     r.add_argument('--usb-host', action='append', default=[], metavar='VENDOR:PRODUCT',
                    help='compat only: passthrough a host USB device by hex IDs (repeatable)')
+    r.add_argument('--cache', choices=('writeback', 'writethrough', 'directsync',
+                                      'unsafe', 'none'), default='writeback',
+                   help='qcow2 cache mode for non-persistent drives')
     r.add_argument('--allow-stale-tools', action='store_true',
                    help='research only: boot a stale/unmanifested tools image with a warning')
     r.add_argument('--allow-kernel-mismatch', action='store_true',
@@ -1200,6 +1245,104 @@ def main() -> int:
             item = load_scenario(name)
             print(f"{name}: {item['description']}")
         return 0
+    if args.action == 'daemon':
+        if args.daemon_action == '_serve':
+            config = json.loads(args.config.read_text())
+            return daemon_mod._serve(config)
+        daemon_dir = args.daemon_dir.resolve()
+        if args.daemon_action == 'start':
+            if args.reset and args.state is None:
+                ap.error('--reset requires --state')
+            if args.kernel == 'compat':
+                pin = verify_kernel_pin()
+                if not pin['ok']:
+                    ap.error('compat kernel pin mismatch: ' + '; '.join(pin.get('problems', [])))
+                if not COMPAT_INITRAMFS.is_file():
+                    ap.error('compat initramfs missing; run sh compat/build-initramfs.sh')
+            if args.share is not None and args.kernel != 'compat':
+                ap.error('--share requires --kernel compat')
+            if args.network and args.kernel != 'compat':
+                ap.error('--network requires --kernel compat')
+            if args.audio and args.kernel != 'compat':
+                ap.error('--audio requires --kernel compat')
+            if args.usb_host and args.kernel != 'compat':
+                ap.error('--usb-host requires --kernel compat')
+            config = {
+                'daemon_dir': str(daemon_dir),
+                'kernel_target': args.kernel,
+                'state': str(args.state.resolve()) if args.state else None,
+                'reset': args.reset,
+                'tools': str(args.tools.resolve()) if args.tools else None,
+                'usb': str(args.usb.resolve()) if args.usb else None,
+                'payload': str(args.payload.resolve()) if args.payload else None,
+                'share': str(args.share.resolve()) if args.share else None,
+                'display': args.display,
+                'vnc_display': args.vnc_display,
+                'display_device': args.display_device,
+                'network': args.network,
+                'audio': args.audio,
+                'usb_host': args.usb_host,
+                'smp': args.smp,
+                'memory_mb': args.memory,
+                'apic': args.apic,
+                'label': args.label,
+                'cache': args.cache,
+                'ready_timeout': args.ready_timeout,
+            }
+            try:
+                status = daemon_mod.start(config, VM / 'launch.py', args.ready_timeout + 30)
+            except (RuntimeError, TimeoutError, OSError) as exc:
+                ap.error(str(exc))
+            print(json.dumps(status, indent=2))
+            return 0
+        if args.daemon_action == 'status':
+            status = daemon_mod.read_status(daemon_dir)
+            try:
+                response = daemon_mod.request(daemon_dir, {'action': 'status'}, timeout=5)
+                if response.get('ok'):
+                    status = response['status']
+                else:
+                    status['reachable'] = False
+                    status['error'] = response.get('error')
+            except (OSError, RuntimeError, TimeoutError) as exc:
+                status['reachable'] = False
+                status['reachable_error'] = str(exc)
+            print(json.dumps(status, indent=2))
+            return 0 if status.get('state') == 'ready' else 1
+        if args.daemon_action == 'stop':
+            status = daemon_mod.stop(daemon_dir)
+            print(json.dumps(status, indent=2))
+            return 0 if status.get('state') == 'stopped' else 1
+        if args.daemon_action == 'exec':
+            try:
+                response = daemon_mod.request(
+                    daemon_dir, {'action': 'exec', 'cmd': args.cmd,
+                                 'timeout': args.timeout},
+                    timeout=args.timeout + 30)
+            except (OSError, RuntimeError, TimeoutError) as exc:
+                ap.error(str(exc))
+            if not response.get('ok'):
+                ap.error(response.get('error', 'daemon exec failed'))
+            print(response.get('output', ''))
+            return int(response.get('rc', 1))
+        if args.daemon_action == 'screenshot':
+            output = args.output or (daemon_dir / 'screenshot.png')
+            output = output.resolve()
+            try:
+                response = daemon_mod.request(
+                    daemon_dir, {'action': 'screenshot', 'output': str(output)},
+                    timeout=30)
+            except (OSError, RuntimeError, TimeoutError) as exc:
+                ap.error(str(exc))
+            if not response.get('ok'):
+                ap.error(response.get('error', 'daemon screenshot failed'))
+            print(json.dumps(response, indent=2))
+            return 0
+        if args.daemon_action == 'console':
+            try:
+                return daemon_mod.console(daemon_dir, args.lines, args.follow)
+            except (OSError, RuntimeError) as exc:
+                ap.error(str(exc))
     if args.action == 'input':
         if bool(args.click) == bool(args.key):
             ap.error('input requires exactly one of --click X,Y or --key QCODE')
@@ -1281,7 +1424,8 @@ def main() -> int:
                args.display_device, args.smp, args.memory, args.apic,
                args.failure_bundle, kernel_target, args.allow_kernel_mismatch,
                args.share, args.display, args.vnc_display, args.label,
-               args.state, args.reset, args.network, args.audio, args.usb_host)
+               args.state, args.reset, args.network, args.audio, args.usb_host,
+               args.cache)
 
 
 if __name__ == "__main__":
