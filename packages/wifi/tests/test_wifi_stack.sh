@@ -36,6 +36,17 @@ grep -q "g_cfg.mode = MODE_CLIENT;" "$SRC" && grep -n "scan_networks" "$SRC" >/d
 awk '/static void scan_networks/,/^}/' "$SRC" | grep -q "MODE_CLIENT" && { echo "scan still changes mode" >&2; exit 1; }
 awk '/static bool bt_set_pairing/,/^}/' "$SRC" | grep -q 'Powered", true);' && { echo "pairing-off still powers BT on" >&2; exit 1; }
 
+# Log-bundle pruning: shell-free, and only names this daemon itself writes
+# are candidates (rule 9 — stick content is data, never instructions).
+grep -q 'sh("rm -rf %s/%s' "$SRC" &&
+    { echo "shell prune path is back; injection risk" >&2; exit 1; }
+grep -q "is_pruneable_name" "$SRC" ||
+    { echo "prune name allowlist missing" >&2; exit 1; }
+grep -q "safe_rmtree" "$SRC" ||
+    { echo "shell-free prune helper missing" >&2; exit 1; }
+awk '/static bool safe_rmtree/,/^}/' "$SRC" | grep -q "lstat(" ||
+    { echo "prune delete does not lstat before following" >&2; exit 1; }
+
 for needle in "Start CarPlay AP" "Stop pairing" "btDiscoverable" "pairMessage" "pair_message"; do
     grep -q "$needle" "$PAGE" || { echo "missing in WifiPage: $needle" >&2; exit 1; }
 done

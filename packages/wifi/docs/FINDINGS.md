@@ -340,6 +340,20 @@ never modified.
   the exFAT stick as `texfat` (exact car fstype string) and
   `--dump-logs` writes a complete bundle (daemon/wpa/ssh logs, redacted
   config, home.json, state.txt with SMACK labels and mask state).
+- **Log-bundle prune hardened (2026-11-07, offline-tested; VM and car
+  retest pending)**: `prune_old_dumps()` treats a stick entry as a prune
+  candidate only when it is exactly `wifi_logs_` + a 14-digit
+  `%Y%m%d%H%M%S` stamp — anything else, however named, is data and is
+  left untouched. Deletion is shell-free (`safe_rmtree`: `lstat` first so
+  symlinks are unlinked never followed, depth-capped at 12), replacing
+  `sh("rm -rf %s/%s")`. `tests/test_prune.sh` drives the real binary
+  through the real prune path and proves injection payloads do not
+  execute while decoys survive; `tests/test_wifi_stack.sh` keeps static
+  guards against the shell form returning. The adjacent
+  `mount -o remount,rw %s` interpolation in `dump_logs_to_usb()` uses a
+  `/proc/mounts` mountpoint; it is believed automounter-chosen rather than
+  stick-controlled, but the mountpoint scheme should be verified during
+  VM/car retest. Not changed here.
 
 **Tier 3 — installer end-to-end on the real QML tree**
 
