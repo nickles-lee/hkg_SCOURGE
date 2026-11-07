@@ -145,7 +145,7 @@ available in Mode C; the vendor kernel stays input-free.
 - `updater-launch` waits up to 240 s for an updater log line; use
   `--timeout 540` or `600`.
 - `update-graphics` is expected-fail: the Qt shutdown hang is not a display
-  regression (`probes/qt-shutdown.md`).
+  regression (see the scenario's `known_issue`).
 - `wifi-ui` currently captures missing AppHomeScreen imports
   (`HMIEVENTS`, `AppHome_Enum`); rendering the page needs the runtime.
 - Mode C SMACK (`lsm=smack`) approximates but does not reproduce 4.1.27

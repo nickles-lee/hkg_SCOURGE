@@ -1,0 +1,10 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# SCOURGE pre-commit: repo policy gate over the staged set (AGENTS.md,
+# Enforcement). `git commit --no-verify` skips it — use that consciously.
+
+set -e
+REPO=$(git rev-parse --show-toplevel)
+
+python3 "$REPO/scripts/policy_check.py" all --staged

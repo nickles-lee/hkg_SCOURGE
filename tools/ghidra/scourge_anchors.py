@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
 # scourge_anchors.py — Ghidra headless post-script for updater re-derivation.
 #
 # OPTIONAL PORTING AID (docs/10-ghidra-patch-derivation.md). The SCOURGE

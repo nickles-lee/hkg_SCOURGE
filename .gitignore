@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
 # --- secrets & local configuration -------------------------------------------
 config/key.local
 config/paths.local.env
@@ -6,6 +8,14 @@ config/paths.local.env
 
 # --- fetched third-party dependencies (pinned, never committed) --------------
 third_party/
+
+# --- owner stock QML bases (read by build_artifacts.py at build time; -------
+# --- OEM-derived, never committed) -------------------------------------------
+packages/*/base/
+
+# --- VM-lab run outputs (serial logs, screenshots, result.json; -------------
+# --- runtime artifacts, never committed) --------------------------------------
+tools/vm/runs/
 
 # --- firmware inputs & build outputs ------------------------------------------
 # The official firmware package, decrypted plaintexts, and all built artifacts

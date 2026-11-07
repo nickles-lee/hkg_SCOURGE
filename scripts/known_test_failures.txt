@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# Reviewed known failures of the tools/vm unit-test suite
+# (python3 -m unittest discover -s tests -q, CWD=tools/vm).
+# The pre-push gate (scripts/githooks/pre-push) blocks NEW failures only;
+# entries here do not block, and entries that start passing print a stale
+# warning so this list cannot rot. Keep every entry reviewed with a reason.
+#
+# Format: full.unittest.Id :: reason (one line per id)
+#
+# All current entries are environment-dependent reds: they assert against
+# build outputs (pinned compat kernel/initramfs, share trees, probe frames)
+# that exist on the author's machine but not in a clean checkout. They are
+# expected to go green wherever the tools/vm build has been run.
+test_compat_mode.CompatModeTests.test_compat_refuses_kernel_pin_mismatch :: needs the locally pinned compat kernel artifacts; clean-checkout red, passes after compat/pin-kernel.sh
+test_network.NetworkTests.test_conformance_rejects_network :: error ordering depends on the built share/compat artifacts; clean-checkout red
+test_share.ShareTests.test_missing_share_directory_is_rejected :: error ordering depends on the built share/compat artifacts; clean-checkout red
+test_usb_passthrough.UsbPassthroughTests.test_invalid_id_and_vendor_mode :: error ordering depends on the built share/compat artifacts; clean-checkout red
+test_ui_smoke.UiSmokeTests.test_committed_probe_frame_has_visible_pixels :: needs the committed/built probe-frame fixture; clean-checkout red
+test_wifi_ui.WifiUiTests.test_requires_compat_mode_and_share :: needs compat kernel + share build outputs; clean-checkout red

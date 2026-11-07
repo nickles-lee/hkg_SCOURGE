@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
 Battery app for Ioniq 5 Gen5W (firmware 260128)
 ================================================
 

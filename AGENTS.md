@@ -56,6 +56,22 @@ repo.
    stop and report it.
 10. **Status honesty.** Mark what is car-validated vs offline-validated
     vs WIP everywhere. Never imply more validation than exists.
+11. **Unattended commits and merges get a second opinion.** This applies
+    whenever work lands without a human reading the diff first — an agent
+    committing, merging, rebasing, or force-pushing on the owner's behalf.
+    The committer must self-review the full diff against these rules and
+    the task's requirements, then a **distinct** second agent (a different
+    session and/or model from the committer) must independently double-check
+    the same diff. Record the verdict in the commit message as
+    `Second-Opinion: <agent/model> — PASS`. A FAIL is a stop: fix it or
+    ask the human; never land a FAIL-reviewed change. Ask the human at the
+    **start** of the task which agent/model should review (store it in
+    gitignored `config/reviewer.local`, copied from
+    `config/reviewer.local.example`); if no pick is stored and the human
+    is unreachable, use a distinct available agent and record both the
+    agent/model and the fallback fact in the trailer. The pre-push hook
+    warns, but cannot verify, that the trailer exists — the real check is
+    the recorded review.
 
 ## Task routing
 
@@ -78,6 +94,10 @@ repo.
 - The TE2 key if `00_fetch_third_party.sh` could not fetch it.
 - The Pi host/user for rig deployment.
 - Which packages to put on a combo stick (`packages/compose.sh` prompts).
+- Which agent/model gives the rule-11 second opinion for unattended
+  commits/merges (or whether to prompt for it every task). Store the pick
+  in gitignored `config/reviewer.local`; the committed example is
+  `config/reviewer.local.example`.
 - Confirmation before `14_format_usb.sh`, Pi deployment, and every car step.
 
 ## Environment
@@ -109,9 +129,60 @@ repo.
   - Exceptions (no header, never add one): `payload/rootfs/**` (bytes are
     pinned by the known-good hash table), `config/message.txt` (its bytes
     are the payload), `packages/wifi/wifi.txt.sample` (imported content),
-    `LICENSE`, and files under `docs/` (covered by the project-level
-    notice). Third-party/fetched material never gets our header.
+    `LICENSE`, files under `docs/`, and — codified with the enforcement
+    gate — all markdown (the project-level notice covers it, including
+    package README/SPEC), all JSON (no comment syntax), binary/image
+    assets, and `tools/vm/payload/PAYLOAD` (marker bytes, like
+    `config/message.txt`). Third-party/fetched material never gets our
+    header.
 - Package installers follow the docs/06 house rules (manifest, stock-hash
   guards, backups, idempotency, explicit status lines).
 - Docs are numbered `docs/01–14`; UI research lives in `docs/ui/`.
-- Scripts are run with `sh`/`bash`/`python3` (do not rely on +x bits).
+- Scripts are run with `sh`/`bash`/`python3` (do not rely on +x bits) —
+  except the hooks under `scripts/githooks/`, which git itself executes
+  and therefore must stay executable (`scripts/install_hooks.sh` restores
+  the bits).
+
+## Enforcement (gates)
+
+`scripts/policy_check.py` is the single gate for the mechanically
+checkable rules above; `sh scripts/install_hooks.sh` wires it into git
+per clone via `core.hooksPath scripts/githooks`:
+
+- **pre-commit** — `leaks`, `spdx`, `oem`, `refs`, `ignore` over the
+  staged set.
+- **pre-push** — the same checks over `origin/<branch>..HEAD`, then the
+  VM unit-test gate: the `tools/vm` suite must run (with CWD `tools/vm`;
+  half its modules import `harness.*` with no path fixup), failures
+  listed in `scripts/known_test_failures.txt` (reviewed,
+  environment-dependent reds) do not block, **new failures block**, and
+  stale entries print a warning so the list cannot rot.
+- **second opinion (rule 11)** — pre-push also warns (does not block) for
+  pushed commits with no `Second-Opinion:` trailer. The hook cannot
+  verify a real review happened, so this is a reminder; the recorded
+  verdict is the actual control.
+
+The checks:
+
+- **`leaks`** — no personal data: absolute host paths, usernames, LAN
+  details, key material. **Deliberate product defaults are not secrets:**
+  the `car`/`electric` SSH credential and the fixed UIDs (`car` = UID 0)
+  are intended defaults — never remove them. QEMU gateway addresses
+  (`10.0.2.x`), loopback, and the `config/paths.env.example` fill-in
+  placeholders are allowed; target-device paths (`/home/root`,
+  `/home/car`) and image-URI internals are fixtures, not leaks.
+- **`spdx`** — the header on every new in-scope file, per the exception
+  list above; `policy_check.py spdx --staged --fix` offers to prepend it.
+- **`oem`** — no OEM-derived file added (path rules plus a sha256 match
+  against the local `input/` tree when it exists). Added QML/image
+  artifacts under `packages/` warn instead of blocking: the pre-existing
+  `packages/battery` stock-QML artifacts are grandfathered pending an
+  un-publish decision.
+- **`refs`** — path-like values inside `tools/vm` scenario/profile JSON
+  must resolve in-tree; dangling `NOTES.md`-style pointers block.
+- **`ignore`** — the ignore rules promised above (including
+  `packages/*/base/`) actually ignore, and nothing tracked is ignored.
+
+Escape hatches: `git commit --no-verify` / `git push --no-verify` skip the
+gates, and `SCOURGE_SKIP_TEST_GATE=1` skips only the test gate. Use them
+consciously — never to silence an unexplained failure.

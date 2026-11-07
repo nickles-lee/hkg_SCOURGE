@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# Reviewer selection for AGENTS.md rule 11: the distinct second agent that
+# double-checks unattended commits and merges.
+#
+# Copy this file to config/reviewer.local (gitignored) and set your values.
+# REVIEWER_MODEL may include a variant as `provider/model#variant`; omit the
+# variant to use the provider's default effort.
+# Set REVIEWER_AGENT=prompt to ask at the start of every task instead of
+# reusing a stored pick.
+REVIEWER_AGENT=general
+REVIEWER_MODEL=opencode-go/glm-5.3
