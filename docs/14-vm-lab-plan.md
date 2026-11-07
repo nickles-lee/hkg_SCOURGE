@@ -475,5 +475,13 @@ items beyond that.
   `intel-hda` + `hda-duplex` with a null host backend. Guest sees card 0 /
   Generic Analog; `aplay -D hw:0,0` playback returns 0. `dmix` default is
   absent; direct device documented. Pin includes HDA modules. 191 tests.
-- **Next:** P2-2 (daemon), P2-3 (wcap), P2-4 (virgl), P2-6 (USB passthrough),
-  P2-7/P2-8 (recovery/stock boot), P2-9/P2-10/P2-11.
+- **2026-11-07 — P2 milestone sync**: incremental SCOURGE commit `e7c45a3`
+  pushed (116 files in `tools/vm/`) with visual regression, audio,
+  state/runs/share, network/display/input/failure/provenance updates and the
+  P2 runbook. Policy audit clean.
+- **2026-11-07 — P2-6 plumbing complete, hardware blocked**: compat-only
+  repeatable `--usb-host VENDOR:PRODUCT` with EHCI pinning and result
+  metadata; security boundary documented. Host USB nodes are root-only, so
+  in-guest visibility is not validated; argv/refusal tests pass. 193 tests.
+- **Next:** P2-2 (daemon), P2-3 (wcap), P2-4 (virgl), P2-7/P2-8
+  (recovery/stock boot), P2-9/P2-10/P2-11.

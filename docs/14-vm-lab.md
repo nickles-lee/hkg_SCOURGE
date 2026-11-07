@@ -57,6 +57,8 @@ VM-validated (compat kernel):
 - HDA audio card + direct `hw:0,0` playback; opt-in restricted user net
 - visual-regression baselines/diffs and run management (list/show/extract/
   prune/gc)
+- opt-in USB passthrough plumbing (`--usb-host VENDOR:PRODUCT`); the host
+  USB node must grant QEMU access, so hardware verification is host-gated
 
 Car-only (never VM claims):
 

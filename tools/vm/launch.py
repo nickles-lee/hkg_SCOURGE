@@ -289,6 +289,15 @@ def compat_kernel_path() -> Path:
     return COMPAT_KERNEL if COMPAT_KERNEL.is_file() else HOST_KERNEL
 
 
+def usb_host_option(value: str) -> str:
+    match = re.fullmatch(r'([0-9a-fA-F]{1,4}):([0-9a-fA-F]{1,4})', value)
+    if not match:
+        raise ValueError(f"invalid USB host id: {value}; use VENDOR:PRODUCT hex")
+    vendor, product = match.groups()
+    return (f"usb-host,vendorid=0x{int(vendor, 16):04x},"
+            f"productid=0x{int(product, 16):04x},bus=ehci0.0")
+
+
 def qemu_argv(run_dir: Path, usb: Path | None = None,
               tools: Path | None = None,
               patched_kernel: bool = False,
@@ -304,7 +313,8 @@ def qemu_argv(run_dir: Path, usb: Path | None = None,
               display: str = "none",
               vnc_display: str = ":1",
               network: bool = False,
-              audio: bool = False) -> list[str]:
+              audio: bool = False,
+              usb_host: list[str] | None = None) -> list[str]:
     kvm = os.path.exists("/dev/kvm") and os.access("/dev/kvm", os.R_OK | os.W_OK)
     if kvm:
         accel, cpu = "kvm", "host"
@@ -396,7 +406,8 @@ def qemu_argv(run_dir: Path, usb: Path | None = None,
     if kernel_target == "vendor" and not patched_kernel:
         argv += ["-gdb", "unix:gdb.sock,server=on,wait=off", "-S"]
     storage_names = [f'storage_{name}' for name in VOLUMES if f'storage_{name}' in (overlays or {})]
-    if usb is not None or tools is not None or payload is not None or storage_names:
+    if (usb is not None or tools is not None or payload is not None
+            or storage_names or usb_host):
         argv += ["-device", "ich9-usb-ehci1,id=ehci0"]
     if usb is not None:
         argv += [
@@ -413,6 +424,8 @@ def qemu_argv(run_dir: Path, usb: Path | None = None,
             "-drive", drive('payload', payload),
             "-device", "usb-storage,drive=payload,bus=ehci0.0",
         ]
+    for value in usb_host or []:
+        argv += ["-device", usb_host_option(value)]
     for name in storage_names:
         argv += ['-drive', drive(name, Path(overlays[name]['backing'])),
                  '-device', f'usb-storage,drive={name},bus=ehci0.0,serial=hns-{name}']
@@ -527,7 +540,8 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         allow_kernel_mismatch: bool = False, share: Path | None = None,
         display: str = "none", vnc_display: str = ":1",
         label: str = "", state: Path | None = None, reset: bool = False,
-        network: bool = False, audio: bool = False) -> int:
+        network: bool = False, audio: bool = False,
+        usb_host: list[str] | None = None) -> int:
     profile = load_profile(profile_name)
     scenario = load_scenario(scenario_name) if scenario_name else None
     if profile_name == 'conformance' and (scenario is None or interactive):
@@ -579,6 +593,11 @@ def run(cmd: str | None, interactive: bool, timeout: float,
             raise ValueError('--network is forbidden by the conformance profile')
     if audio and kernel_target != 'compat':
         raise ValueError('--audio requires --kernel compat')
+    if usb_host:
+        if kernel_target != 'compat':
+            raise ValueError('--usb-host requires --kernel compat')
+        for value in usb_host:
+            usb_host_option(value)  # validate early
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError('timeout must be finite and positive')
     if storage_mode not in ('flat', 'split') or storage_mode == 'flat' and storage_sizes:
@@ -612,6 +631,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
                           'hostfwd': 'tcp:127.0.0.1:2222-:22'} if network else None)
     result['audio'] = ({'enabled': True, 'device': 'intel-hda/hda-duplex',
                         'host_backend': 'none'} if audio else None)
+    result['usb_host'] = list(usb_host) if usb_host else None
     result['tools_manifest'] = None
     result['display_device'] = display_device
     result['display'] = display
@@ -736,7 +756,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         argv = qemu_argv(run_dir, usb, tools, patched, inputs.get('payload'), overlays,
                          artifact_serial, qmp_socket, display_device,
                          smp, memory_mb, not apic, kernel_target, share,
-                         display, vnc_display, network, audio)
+                         display, vnc_display, network, audio, usb_host)
         (run_dir / 'command.json').write_text(json.dumps(argv, indent=2) + '\n')
         if kernel_target == 'compat':
             result['kernel_mode'] = 'compat'
@@ -1144,6 +1164,8 @@ def main() -> int:
                    help='compat research only: user-mode net, restrict=on, hostfwd 2222->22')
     r.add_argument('--audio', action='store_true',
                    help='compat only: intel-hda + hda-duplex with a null host backend')
+    r.add_argument('--usb-host', action='append', default=[], metavar='VENDOR:PRODUCT',
+                   help='compat only: passthrough a host USB device by hex IDs (repeatable)')
     r.add_argument('--allow-stale-tools', action='store_true',
                    help='research only: boot a stale/unmanifested tools image with a warning')
     r.add_argument('--allow-kernel-mismatch', action='store_true',
@@ -1259,7 +1281,7 @@ def main() -> int:
                args.display_device, args.smp, args.memory, args.apic,
                args.failure_bundle, kernel_target, args.allow_kernel_mismatch,
                args.share, args.display, args.vnc_display, args.label,
-               args.state, args.reset, args.network, args.audio)
+               args.state, args.reset, args.network, args.audio, args.usb_host)
 
 
 if __name__ == "__main__":

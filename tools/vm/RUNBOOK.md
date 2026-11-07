@@ -119,13 +119,19 @@ python3 -B launch.py run --kernel compat --state states/compat --cmd '...'
 python3 -B launch.py run --kernel compat --state states/compat --reset --cmd '...'
 ```
 
-Optional share/display/input/network:
+Optional share/display/input/network/audio:
 
 ```sh
---share DIR --display vnc --vnc-display :7 --network
+--share DIR --display vnc --vnc-display :7 --network --audio
+--usb-host 058f:6366
 python3 -B launch.py input --qmp <run>/qmp.sock --click 640,360
 python3 -B launch.py input --qmp <run>/qmp.sock --key ret
 ```
+
+`--usb-host VENDOR:PRODUCT` is compat-only and opt-in. QEMU must be able to
+open the host device (typically a udev ACL or root); the device is handed to
+the guest exclusively. This is a security boundary: only pass through devices
+you intend the guest to own.
 
 ## Audio (Mode C)
 
