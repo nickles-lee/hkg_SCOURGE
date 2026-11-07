@@ -10,6 +10,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 
@@ -138,6 +139,27 @@ class VMIntegrationTests(unittest.TestCase):
         for item in result['storage']['volumes'].values():
             self.assertTrue(Path(item['backing']).is_file())
             self.assertTrue(Path(result['overlays'][item['overlay_name']]['path']).is_file())
+
+    def test_daemon_pin_cpu_is_applied(self):
+        cpu = sorted(os.sched_getaffinity(0))[0]
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-pin-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+            start = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', 'start',
+                 '--daemon-dir', str(daemon_dir), '--pin-cpu', str(cpu),
+                 '--ready-timeout', '60', '--lock-timeout', '100'],
+                cwd=VM, capture_output=True, text=True, timeout=120)
+            self.assertEqual(start.returncode, 0, start.stdout + start.stderr)
+            try:
+                status = json.loads((daemon_dir / 'status.json').read_text())
+                self.assertEqual(status['pin_cpu'], cpu)
+                limits = Path(f"/proc/{status['qemu_pid']}/status").read_text()
+                self.assertIn(f"Cpus_allowed_list:\t{cpu}", limits)
+            finally:
+                subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', 'stop',
+                     '--daemon-dir', str(daemon_dir)],
+                    cwd=VM, capture_output=True, text=True, timeout=60)
 
     def test_launcher_sigterm_cleans_owned_qemu(self):
         process = subprocess.Popen([sys.executable, '-B', str(VM / 'launch.py'), 'run',

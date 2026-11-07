@@ -174,7 +174,11 @@ is reported by `status` instead of silently reusing it.
 
 `--cache` selects the non-persistent qcow2 mode (`writeback` default;
 `directsync` is pathological on this host). Persistent state always forces
-`writethrough`; see `docs/perf-smp-memory.md`.
+`writethrough`; see `docs/perf-smp-memory.md`. `--pin-cpu N` pins all QEMU
+threads to an allowed host CPU for experiments (`run` and `daemon start`);
+it is not a default because the measured ~1.5% gain at n=3 is too small to
+justify one. Avoid CPU 0 for isolation experiments and expect `--smp >1` to
+slow down when all vCPUs share one host CPU.
 
 ## CAN/micom smoke
 

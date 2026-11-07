@@ -102,6 +102,24 @@ def pdeathsig() -> None:
     _LIBC.prctl(1, 9, 0, 0, 0)  # PR_SET_PDEATHSIG, SIGKILL
 
 
+def validate_pin_cpu(cpu: int | None) -> int | None:
+    if cpu is None:
+        return None
+    allowed = os.sched_getaffinity(0)
+    if cpu not in allowed:
+        raise ValueError(f'pin cpu {cpu} is not available; allowed: {sorted(allowed)}')
+    return cpu
+
+
+def qemu_preexec(pin_cpu: int | None = None):
+    """Child-side setup: parent-death signal plus optional host CPU pinning."""
+    def _preexec() -> None:
+        pdeathsig()
+        if pin_cpu is not None:
+            os.sched_setaffinity(0, {pin_cpu})
+    return _preexec
+
+
 class RSP:
     def __init__(self, sock: socket.socket, deadline: float | None = None):
         self.sock = sock
@@ -575,7 +593,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         label: str = "", state: Path | None = None, reset: bool = False,
         network: bool = False, audio: bool = False,
         usb_host: list[str] | None = None, cache: str = "writeback",
-        lock_info: dict | None = None) -> int:
+        pin_cpu: int | None = None, lock_info: dict | None = None) -> int:
     profile = load_profile(profile_name)
     scenario = load_scenario(scenario_name) if scenario_name else None
     if profile_name == 'conformance' and (scenario is None or interactive):
@@ -598,6 +616,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         raise ValueError('memory_mb must be between 1024 and 8192')
     if cache not in ('writeback', 'writethrough', 'directsync', 'unsafe', 'none'):
         raise ValueError(f'unknown cache mode: {cache}')
+    pin_cpu = validate_pin_cpu(pin_cpu)
     if kernel_target not in ('vendor', 'compat'):
         raise ValueError(f'unknown kernel target: {kernel_target}')
     if kernel_target == 'compat':
@@ -655,6 +674,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
               'applied_substitutions': [], 'output_streams': 'stdout/stderr merged on serial'}
     if lock_info is not None:
         result['lock'] = lock_info
+    result['pin_cpu'] = pin_cpu
     result['graphics_mode'] = graphics
     result['mode'] = kernel_target
     result['kernel_target'] = kernel_target
@@ -834,7 +854,8 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         boot_start = time.monotonic()
         proc = subprocess.Popen(argv, cwd=run_dir, env={**os.environ, 'TMPDIR': str(run_dir)},
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, preexec_fn=pdeathsig)
+                                stderr=subprocess.STDOUT,
+                                preexec_fn=qemu_preexec(pin_cpu))
         result['qemu_pid'] = proc.pid
         ser = Serial(proc, run_dir / 'serial.log')
         if kernel_target == 'compat':
@@ -1480,6 +1501,8 @@ def main() -> int:
     ds.add_argument('--ready-timeout', type=float, default=180)
     ds.add_argument('--lock-timeout', type=float, default=180,
                     help='lock queue wait, capped at --ready-timeout')
+    ds.add_argument('--pin-cpu', type=int, default=None, metavar='N',
+                    help='pin all QEMU threads to host CPU N (performance experiment)')
     dserve = dsub.add_parser('_serve')
     dserve.add_argument('--config', type=Path, required=True)
     for name in ('status', 'stop', 'screenshot', 'console', 'exec'):
@@ -1567,6 +1590,8 @@ def main() -> int:
                    help='do not serialize this boot against other VM runs (unsafe)')
     r.add_argument('--lock-timeout', type=float, default=600,
                    help='seconds to wait for the VM boot lock (default 600)')
+    r.add_argument('--pin-cpu', type=int, default=None, metavar='N',
+                   help='pin all QEMU threads to host CPU N (performance experiment)')
     args = ap.parse_args()
     if args.action == "prepare":
         prepare()
@@ -1595,6 +1620,11 @@ def main() -> int:
         if args.daemon_action == 'start':
             if args.reset and args.state is None:
                 ap.error('--reset requires --state')
+            if args.pin_cpu is not None:
+                try:
+                    validate_pin_cpu(args.pin_cpu)
+                except ValueError as exc:
+                    ap.error(str(exc))
             if args.kernel == 'compat':
                 pin = verify_kernel_pin()
                 if not pin['ok']:
@@ -1631,6 +1661,7 @@ def main() -> int:
                 'cache': args.cache,
                 'ready_timeout': args.ready_timeout,
                 'lock_timeout': args.lock_timeout,
+                'pin_cpu': args.pin_cpu,
             }
             try:
                 status = daemon_mod.start(config, VM / 'launch.py', args.ready_timeout + 30)
@@ -1765,6 +1796,8 @@ def main() -> int:
         kernel_target, vendor_mode = 'vendor', 'auto'
     else:
         kernel_target, vendor_mode = 'vendor', args.kernel
+    if args.pin_cpu is not None:
+        validate_pin_cpu(args.pin_cpu)
     lock = (nullcontext({'held': False}) if args.no_lock
             else run_lock(VM, args.lock_timeout))
     try:
@@ -1778,7 +1811,7 @@ def main() -> int:
                        args.failure_bundle, kernel_target, args.allow_kernel_mismatch,
                        args.share, args.display, args.vnc_display, args.label,
                        args.state, args.reset, args.network, args.audio, args.usb_host,
-                       args.cache, lock_info=lock_info)
+                       args.cache, pin_cpu=args.pin_cpu, lock_info=lock_info)
     except LockTimeout as exc:
         print(f'ERROR: {exc}', file=sys.stderr)
         return 1

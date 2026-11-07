@@ -228,7 +228,8 @@ def _serve(config: dict) -> int:
                            float(config.get("ready_timeout", 180)))
         lock_stack = ExitStack()
         lock_info = lock_stack.enter_context(run_lock(launch.VM, lock_timeout))
-        status["lock"] = lock_info
+        pin_cpu = launch.validate_pin_cpu(config.get("pin_cpu"))
+        status.update({"lock": lock_info, "pin_cpu": pin_cpu})
         write_status(daemon_dir, status)
         tools = Path(config["tools"]) if config.get("tools") else None
         usb = Path(config["usb"]) if config.get("usb") else None
@@ -275,7 +276,7 @@ def _serve(config: dict) -> int:
         proc = subprocess.Popen(argv, cwd=daemon_dir, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 start_new_session=True,
-                                preexec_fn=launch.pdeathsig)
+                                preexec_fn=launch.qemu_preexec(pin_cpu))
         if stop_event.is_set():
             # SIGTERM arrived during setup; do not leave QEMU running.
             proc.kill()

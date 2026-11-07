@@ -559,7 +559,12 @@ items beyond that.
   concurrent starts of one daemon dir. Live evidence: second run refused,
   concurrent daemon start refused, lock-holding run PASS, regress PASS with
   `locked: true`/`suite_lock`, daemon start/exec/stop. 233 tests.
+- **2026-11-07 — P2-11 extension (CPU pinning)**: `--pin-cpu N` on one-shot
+  runs and `daemon start`, affinity-mask validated and recorded. Benchmark:
+  unpinned mean 4.240 s vs pinned 4.176 s over three warm boots — a small
+  consistent gain at n=3, too small for a default, so opt-in only.
+  `docs/perf-smp-memory.md` updated. 239 tests.
 - **Remaining:** P2-3 wcap (client absent), P2-7 AppUpgrade-engine repeat
   behaviour (credential-gated), P2-8 deeper stock/esinit fidelity (needs the
   vendor boot chain), P2-9 further signals/real DBC mapping (lab model
-  landed), P2-11 performance benchmarks (baseline landed). P3 deferred.
+  landed). P2-11 pinning landed as an opt-in no-win; P3 deferred.
