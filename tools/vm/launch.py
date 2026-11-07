@@ -875,6 +875,19 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         print(output)
         return result['rc']
     except Exception as exc:  # noqa: BLE001
+        if (scenario and scenario.get('expect_qemu_exit') and ser is not None
+                and proc is not None
+                and b'HARNESS_CHECK reboot-marker PASS' in bytes(ser.log)):
+            try:
+                proc.wait(5)
+            except subprocess.TimeoutExpired:
+                pass
+            if proc.poll() is not None:
+                result.update(verdict='PASS', rc=0, error=None, guest_rc=0,
+                              checks={'reboot-marker': 'PASS'}, reboot_exit=True)
+                print(f"[vm] reboot marker observed; QEMU exited rc={proc.returncode}",
+                      flush=True)
+                return 0
         result.update(verdict='FAIL', rc=1, error=f'{type(exc).__name__}: {exc}')
         print(f"ERROR: {result['error']}", file=sys.stderr)
         return 1

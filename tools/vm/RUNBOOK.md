@@ -171,6 +171,19 @@ is reported by `status` instead of silently reusing it.
 `directsync` is pathological on this host). Persistent state always forces
 `writethrough`; see `docs/perf-smp-memory.md`.
 
+## CAN/micom smoke
+
+```sh
+python3 -B launch.py run --profile research --scenario can-smoke \
+  --payload payload/tweaks-vm --timeout 180
+```
+
+Starts the system bus and the synthetic `tweaks-micom-can-sim`, then calls
+`SetCANFixedMicomRecv` (canid 06 3f, start 26, size 2, data 2) and
+`SetCANMicomRecv` (06 3f). Pass requires READY, both CALL/ACK markers and
+method returns. It is an interface/contract test, not real CAN timing or
+vehicle-state fidelity.
+
 ## Visual regression
 
 ```sh
@@ -211,6 +224,19 @@ This boots and the guest accepts the virtio-vga-gl device, but QEMU's
 It is a documented no-win for the screenshot-first workflow; keep
 `--display-device virtio-vga` for QMP captures. GTK with GL may work on a
 desktop session but cannot be validated on this headless host.
+
+## Recovery smoke
+
+```sh
+python3 -B launch.py run --profile conformance --scenario recovery-reboot \
+  --timeout 120
+```
+
+The guest prints `HARNESS_CHECK reboot-marker PASS`, syncs, and calls
+`reboot -f`; QEMU runs with `-no-reboot`, so the harness accepts the marker
+plus a terminated QEMU as PASS (`reboot_exit: true`). This is a first
+recovery slice, not power-loss, corrupt-media, no-space or repeated-update
+coverage.
 
 ## Troubleshooting
 

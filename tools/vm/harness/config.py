@@ -14,7 +14,8 @@ VM = Path(__file__).resolve().parent.parent
 SCENARIO_NAMES = ('boot', 'usb-discovery', 'dbus-ready', 'dmclient-events',
                   'updater-launch', 'stock-update-stage', 'storage-isolation', 'environment-audit', 'update-graphics',
                   'entropy-ready', 'vendor-lifecycle', 'applauncher-sigstub',
-                  'vendor-lifecycle-sigstub', 'ui-smoke', 'wifi-ui')
+                  'vendor-lifecycle-sigstub', 'ui-smoke', 'wifi-ui',
+                  'can-smoke', 'recovery-reboot')
 
 
 def load_profile(name: str) -> dict:
@@ -62,6 +63,10 @@ def scenario_command(scenario: dict, profile: dict, graphics: str = 'patched-off
         return (VM / 'probes' / 'ui-smoke.sh').read_text()
     if name == 'wifi-ui':
         return (VM / 'probes' / 'wifi-ui.sh').read_text()
+    if name == 'can-smoke':
+        return (VM / 'probes' / 'can-smoke.sh').read_text()
+    if name == 'recovery-reboot':
+        return ("echo 'HARNESS_CHECK reboot-marker PASS'; sync; reboot -f\n")
     if name == 'environment-audit':
         return audit_script()
     if name == 'storage-isolation':

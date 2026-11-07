@@ -47,6 +47,10 @@ VM-validated (vendor kernel):
   lifecycle; updater launch chain
 - package install/restore round-trips against the real QML tree
 - update-engine state machines up to the device-credential gate
+- forced-reboot recovery smoke (marker + QEMU `-no-reboot` exit; one slice,
+  not power-loss/corrupt-media coverage)
+- synthetic micom CAN interface smoke (`can-smoke`): READY/CALL/ACK for
+  fixed and bulk calls; contract only, not real CAN timing
 
 VM-validated (compat kernel):
 

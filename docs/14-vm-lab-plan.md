@@ -504,5 +504,16 @@ items beyond that.
 - **2026-11-07 — P2-4 documented no-win**: `egl-headless` + `virtio-vga-gl`
   boots the compat guest, but QMP screendump has no surface. Keep
   `virtio-vga` for screenshots; GTK+GL remains untested headless. 200 tests.
-- **Remaining P2:** P2-3 wcap (client absent), P2-7/P2-8 recovery/stock boot,
-  P2-9 CAN expansion. P3 deferred.
+- **2026-11-07 — P2-4 sync**: SCOURGE commit `6fd8e2f` pushed with the
+  egl-headless/virtio-vga-gl options, no-win documentation and test.
+- **2026-11-07 — P2-9 complete (contract test)**: `can-smoke` mounts the
+  existing CAN-sim payload, starts the system bus, and asserts READY/CALL/
+  ACK for `SetCANFixedMicomRecv` and `SetCANMicomRecv` with argument values.
+  Vendor run PASS; serial contains the full simulator log. 203 tests. This
+  is a deterministic interface test, not real CAN timing/vehicle fidelity.
+- **2026-11-07 — P2-7 slice**: `recovery-reboot` accepts a marker plus a
+  terminated `-no-reboot` QEMU (`reboot_exit=true`). Vendor run PASS. Other
+  recovery cases (power-loss, corrupt media, no-space, USB removal, repeat
+  update) remain.
+- **Remaining:** P2-3 wcap (client absent), P2-7 full recovery matrix,
+  P2-8 stock boot. P3 deferred.
