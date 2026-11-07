@@ -50,6 +50,7 @@ from harness.manager import parse_manager_snapshots
 from harness.protocol import command_frame, command_output, completion_pattern
 from harness.qmp import QmpError
 from harness.qmp import click as qmp_click
+from harness.qmp import device_del as qmp_device_del
 from harness.qmp import key as qmp_key
 from harness.qmp import screendump as qmp_screendump
 from harness.runs import collect_runs, extract as extract_run, filter_runs, prune as prune_runs
@@ -418,7 +419,7 @@ def qemu_argv(run_dir: Path, usb: Path | None = None,
     if usb is not None:
         argv += [
             "-drive", drive('usb', usb),
-            "-device", "usb-storage,drive=usb,bus=ehci0.0",
+            "-device", "usb-storage,id=usbdev,drive=usb,bus=ehci0.0",
         ]
     if tools is not None:
         argv += [
@@ -653,6 +654,11 @@ def run(cmd: str | None, interactive: bool, timeout: float,
     result['failure_bundle'] = None
     result['screenshot'] = {'requested': screenshot or qmp_screenshot, 'ok': None,
                             'artifacts': [], 'qmp': None, 'qmp_error': None}
+    usb_removal = scenario.get('usb_removal') if scenario else None
+    result['usb_removal'] = ({'requested': True,
+                              'device_id': usb_removal.get('device_id', 'usbdev'),
+                              'marker': usb_removal.get('marker', 'USB_REMOVAL_READY_')}
+                             if usb_removal else None)
     result['harness_sources'] = source_identities()
     storage = {'mode': 'flat', 'volumes': {}}
     result['storage'] = storage
@@ -664,6 +670,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
     artifact_serial = None
     qmp_socket = None
     state_lock = None
+    removal_thread = None
     t0 = time.monotonic()
     old_handlers = {}
 
@@ -742,7 +749,8 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         artifact_serial = run_dir / 'artifact-serial.bin' if screenshot else None
         if artifact_serial is not None:
             result['screenshot']['serial'] = str(artifact_serial)
-        qmp_socket = run_dir / 'qmp.sock' if qmp_screenshot else None
+        qmp_socket = (run_dir / 'qmp.sock'
+                      if qmp_screenshot or usb_removal is not None else None)
         if qmp_socket is not None:
             result['screenshot']['qmp_socket'] = str(qmp_socket)
         kernel = compat_kernel_path() if kernel_target == 'compat' else (
@@ -833,8 +841,34 @@ def run(cmd: str | None, interactive: bool, timeout: float,
             result['share'].update({'setup_rc': share_rc, 'seconds': share_seconds})
             if share_rc != 0:
                 raise RuntimeError(f'host share mount failed; see {run_dir / "share-setup.log"}')
+        if usb_removal is not None:
+            marker = str(usb_removal.get('marker', 'USB_REMOVAL_READY_')).encode()
+            device_id = str(usb_removal.get('device_id', 'usbdev'))
+            delay = float(usb_removal.get('delay', 0.5))
+
+            def detach_usb():
+                deadline = time.monotonic() + 60
+                with ser.cond:
+                    while marker not in ser.log:
+                        if time.monotonic() > deadline:
+                            result['usb_removal']['error'] = 'marker timeout'
+                            return
+                        ser.cond.wait(0.5)
+                result['usb_removal']['marker_seen'] = True
+                time.sleep(delay)
+                try:
+                    result['usb_removal']['qmp'] = qmp_device_del(qmp_socket, device_id)
+                except Exception as exc:  # noqa: BLE001
+                    result['usb_removal']['error'] = f'{type(exc).__name__}: {exc}'
+
+            removal_thread = threading.Thread(target=detach_usb, daemon=True)
+            removal_thread.start()
         token, output, guest_rc, scenario_seconds = execute_guest(
             ser, cmd or 'uname -a; id; cat /proc/partitions', remaining())
+        if removal_thread is not None:
+            removal_thread.join(10)
+            if removal_thread.is_alive():
+                result['usb_removal']['error'] = 'detach thread did not finish'
         result['command_id'] = token
         (run_dir / 'guest-output.log').write_text(output + '\n')
         result.update(evaluate(output, guest_rc, scenario, profile,
@@ -900,7 +934,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
             signal.signal(signum, signal.SIG_IGN)
         cleanup_errors = []
         stopped = True
-        if qmp_socket is not None and proc is not None and proc.poll() is None:
+        if qmp_screenshot and qmp_socket is not None and proc is not None and proc.poll() is None:
             try:
                 result['screenshot']['qmp'] = qmp_screendump(
                     qmp_socket, run_dir / 'qmp-screenshot.png')

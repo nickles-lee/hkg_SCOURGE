@@ -116,6 +116,19 @@ def key(socket_path: Path, qcode: str, timeout: float = 10.0) -> dict:
     return {"ok": True, "qcode": qcode}
 
 
+def device_del(socket_path: Path, device_id: str, timeout: float = 10.0) -> dict:
+    """Detach a QEMU device, e.g. the usbdev update stick."""
+    if not device_id or any(char.isspace() for char in device_id):
+        raise ValueError(f"invalid device id: {device_id!r}")
+    sock, handle, deadline = _connect(Path(socket_path), timeout)
+    try:
+        _execute(handle, deadline, "device_del", {"id": device_id})
+    finally:
+        handle.close()
+        sock.close()
+    return {"ok": True, "id": device_id}
+
+
 def _png_dimensions(data: bytes) -> tuple[int, int]:
     if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n":
         raise QmpError("screendump did not produce a PNG")

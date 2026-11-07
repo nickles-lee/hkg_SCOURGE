@@ -34,6 +34,14 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn('IONIQ5_EU.ver', command)
         self.assertIn('corrupt-detected', command)
 
+    def test_usb_removal_scenario_contract(self) -> None:
+        scenario = load_scenario('recovery-usb-removal')
+        self.assertEqual(scenario['requires'], ['usb'])
+        self.assertEqual(scenario['usb_removal']['device_id'], 'usbdev')
+        command = scenario_command(scenario, load_profile('research'))
+        self.assertIn('USB_REMOVAL_READY_', command)
+        self.assertIn('usb-cleanup', command)
+
 
 if __name__ == '__main__':
     unittest.main()

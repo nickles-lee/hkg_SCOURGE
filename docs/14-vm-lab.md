@@ -52,6 +52,8 @@ VM-validated (vendor kernel):
 - no-space recovery on a synthetic 16 MiB update volume (ENOSPC assertion)
 - corrupt-media recovery: overlay-only `IONIQ5_EU.ver` corruption is detected
   by `MANIFEST.sha256` with an actionable failure marker
+- USB-removal recovery: QMP detaches the mounted update stick; the guest sees
+  an I/O error and lazy-unmounts without hanging
 - synthetic micom CAN interface smoke (`can-smoke`): READY/CALL/ACK for
   fixed and bulk calls; contract only, not real CAN timing
 

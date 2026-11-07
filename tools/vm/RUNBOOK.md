@@ -258,6 +258,17 @@ The expected marker is `IONIQ5_EU.ver: FAILED` plus the `sha256sum` warning;
 the backing update image is never modified. This is the manifest-level media
 gate, not the AppUpgrade signature/credential path.
 
+`recovery-usb-removal` mounts the update stick and has the host detach it via
+QMP after a runtime marker:
+
+```sh
+python3 -B launch.py run --profile conformance \
+  --scenario recovery-usb-removal --usb update-k.img --timeout 180
+```
+
+The guest must see an I/O error/removed device (not a hang), then lazy-unmount
+and pass. QEMU `device_del` models USB detachment, not a physical hot-unplug.
+
 ## Troubleshooting
 
 | Symptom | Action |

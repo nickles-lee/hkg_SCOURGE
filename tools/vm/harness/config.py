@@ -16,7 +16,7 @@ SCENARIO_NAMES = ('boot', 'usb-discovery', 'dbus-ready', 'dmclient-events',
                   'entropy-ready', 'vendor-lifecycle', 'applauncher-sigstub',
                   'vendor-lifecycle-sigstub', 'ui-smoke', 'wifi-ui',
                   'can-smoke', 'recovery-reboot', 'recovery-no-space',
-                  'recovery-corrupt-media')
+                  'recovery-corrupt-media', 'recovery-usb-removal')
 
 
 def load_profile(name: str) -> dict:
@@ -86,6 +86,35 @@ echo 'HARNESS_CHECK recovery-no-space PASS'
 '''
     if name == 'recovery-corrupt-media':
         return (VM / 'probes' / 'recovery-corrupt-media.sh').read_text()
+    if name == 'recovery-usb-removal':
+        return r'''set -u
+modprobe ehci-pci 2>/dev/null || true
+modprobe usb-storage 2>/dev/null || true
+modprobe sd_mod 2>/dev/null || true
+sleep 2
+mkdir -p /media/usb
+USB_DEV=
+for dev in /dev/sd?; do
+    [ -b "$dev" ] || continue
+    mount -o rw "$dev" /media/usb 2>/dev/null || continue
+    if [ -f /media/usb/IONIQ5_EU.ver ]; then USB_DEV=$dev; break; fi
+    umount /media/usb 2>/dev/null || true
+done
+[ -n "$USB_DEV" ] || { echo 'HARNESS_BLOCKED USB update stick missing'; exit 77; }
+echo 'HARNESS_CHECK usb-mount PASS'
+echo "USB_REMOVAL_READY_$(date +%s)_$$"
+sleep 4
+if [ ! -b "$USB_DEV" ] || ! dd if="$USB_DEV" of=/dev/null bs=512 count=4 skip=1000 2>/tmp/usb-removed.log; then
+    echo 'HARNESS_CHECK usb-removed PASS'
+else
+    echo 'HARNESS_FAIL usb-removed (device still readable)'
+    cat /tmp/usb-removed.log 2>/dev/null
+    exit 1
+fi
+umount -l /media/usb 2>/dev/null || true
+echo 'HARNESS_CHECK usb-cleanup PASS'
+echo 'HARNESS_CHECK recovery-usb-removal PASS'
+'''
     if name == 'environment-audit':
         return audit_script()
     if name == 'storage-isolation':
