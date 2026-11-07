@@ -96,8 +96,9 @@ repo.
 - Which packages to put on a combo stick (`packages/compose.sh` prompts).
 - Which agent/model gives the rule-11 second opinion for unattended
   commits/merges (or whether to prompt for it every task). Store the pick
-  in gitignored `config/reviewer.local`; the committed example is
-  `config/reviewer.local.example`.
+  in gitignored `config/reviewer.local`; the committed
+  `config/reviewer.local.example` is a per-owner template, not a repo
+  default, and may list fallbacks in preference order.
 - Confirmation before `14_format_usb.sh`, Pi deployment, and every car step.
 
 ## Environment

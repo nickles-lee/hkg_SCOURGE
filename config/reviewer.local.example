@@ -1,12 +1,20 @@
 # SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
 # SPDX-License-Identifier: AGPL-3.0-only
-# Reviewer selection for AGENTS.md rule 11: the distinct second agent that
-# double-checks unattended commits and merges.
+# Reviewer selection template for AGENTS.md rule 11: the distinct second agent
+# that double-checks unattended commits and merges.
 #
-# Copy this file to config/reviewer.local (gitignored) and set your values.
-# REVIEWER_MODEL may include a variant as `provider/model#variant`; omit the
-# variant to use the provider's default effort.
-# Set REVIEWER_AGENT=prompt to ask at the start of every task instead of
-# reusing a stored pick.
-REVIEWER_AGENT=general
-REVIEWER_MODEL=opencode-go/glm-5.3
+# Copy this file to config/reviewer.local (gitignored) and set your own values.
+# This is a template, not a repo default: the individual owner chooses the
+# reviewer.
+#
+# REVIEWER_AGENT: agent to use (for example `general`, `explore`, or `prompt`
+# to ask at the start of every task instead of reusing a stored pick).
+# REVIEWER_MODEL: primary reviewer as `provider/modelID[#variant]`, where the
+# modelID may include an `@quantization` suffix (local models use this).
+# Omit the variant for the provider default effort.
+# REVIEWER_FALLBACK_1..3: optional fallbacks in preference order, same format.
+REVIEWER_AGENT=<agent or prompt>
+REVIEWER_MODEL=<provider/modelID[#variant]>
+REVIEWER_FALLBACK_1=<provider/modelID[#variant]>
+REVIEWER_FALLBACK_2=<provider/modelID[#variant]>
+REVIEWER_FALLBACK_3=<provider/modelID[#variant]>
