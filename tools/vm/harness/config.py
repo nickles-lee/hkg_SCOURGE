@@ -17,7 +17,7 @@ SCENARIO_NAMES = ('boot', 'usb-discovery', 'dbus-ready', 'dmclient-events',
                   'vendor-lifecycle-sigstub', 'ui-smoke', 'wifi-ui',
                   'can-smoke', 'recovery-reboot', 'recovery-no-space',
                   'recovery-corrupt-media', 'recovery-usb-removal',
-                  'recovery-power-loss')
+                  'recovery-power-loss', 'vendor-systemd')
 
 
 def load_profile(name: str) -> dict:

@@ -286,6 +286,19 @@ write loop; the host kills QEMU. Phase 2 boots the same state and must print
 `POWER_LOSS_RECOVERED`, proving the ext4 journal recovered the marker. This is
 one crash-consistency slice, not update-engine crash safety.
 
+## Vendor systemd partial boot (Mode V)
+
+```sh
+python3 -B launch.py run --profile conformance --scenario vendor-systemd \
+  --timeout 120
+```
+
+Boots the vendor rootfs with real systemd instead of the research `/init` and
+passes when `Reached target Multi-User System` appears. `result.json` records
+`failed_units` observed in that boot. This is a **partial boot**: SMACK setup
+units fail without the vendor initramfs, and nothing here is stock
+equivalence or an update-conformance claim.
+
 ## Troubleshooting
 
 | Symptom | Action |

@@ -316,6 +316,13 @@ def usb_host_option(value: str) -> str:
             f"productid=0x{int(product, 16):04x},bus=ehci0.0")
 
 
+def _vendor_cmdline(noapic: bool, init_override: str | None = None) -> str:
+    cmdline = CMDLINE if noapic else CMDLINE.replace(" noapic", "")
+    if init_override:
+        cmdline = cmdline.replace("init=/init", f"init={init_override}")
+    return cmdline
+
+
 def qemu_argv(run_dir: Path, usb: Path | None = None,
               tools: Path | None = None,
               patched_kernel: bool = False,
@@ -327,6 +334,7 @@ def qemu_argv(run_dir: Path, usb: Path | None = None,
               smp: int = 1, memory_mb: int = 4096,
               noapic: bool = True,
               kernel_target: str = "vendor",
+              init_override: str | None = None,
               share: Path | None = None,
               display: str = "none",
               vnc_display: str = ":1",
@@ -406,7 +414,7 @@ def qemu_argv(run_dir: Path, usb: Path | None = None,
             "-drive", drive('rootfs', ROOTFS),
             "-device", "sdhci-pci,id=sdhci0",
             "-device", "sd-card,drive=rootfs",
-            "-append", CMDLINE if noapic else CMDLINE.replace(" noapic", ""),
+            "-append", _vendor_cmdline(noapic, init_override),
         ]
     argv += ["-serial", "stdio", "-monitor", "none", "-no-reboot"]
     if display_device == "std":
@@ -759,7 +767,10 @@ def run(cmd: str | None, interactive: bool, timeout: float,
             result['storage'] = storage
             for name, item in storage['volumes'].items():
                 inputs[item['overlay_name']] = Path(item['backing'])
-        if scenario:
+        boot_only = bool(scenario and scenario.get('init_override'))
+        if boot_only and collect_audit:
+            raise ValueError('--audit is not available for boot-only scenarios')
+        if scenario and not boot_only:
             cmd = scenario_command(scenario, profile, graphics, storage, kernel_target)
             result['cmd'] = cmd
         if screenshot:
@@ -798,8 +809,10 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         result['overlays'] = overlays
         argv = qemu_argv(run_dir, usb, tools, patched, inputs.get('payload'), overlays,
                          artifact_serial, qmp_socket, display_device,
-                         smp, memory_mb, not apic, kernel_target, share,
-                         display, vnc_display, network, audio, usb_host, cache)
+                         smp, memory_mb, not apic, kernel_target,
+                         scenario.get('init_override') if scenario else None,
+                         share, display, vnc_display, network, audio,
+                         usb_host, cache)
         (run_dir / 'command.json').write_text(json.dumps(argv, indent=2) + '\n')
         if kernel_target == 'compat':
             result['kernel_mode'] = 'compat'
@@ -819,6 +832,40 @@ def run(cmd: str | None, interactive: bool, timeout: float,
             result['patch'] = {'mode': 'offline_vmlinux', 'kernel': str(kernel)}
         else:
             result['patch'] = patch_sdhci(run_dir, proc, remaining())
+        if boot_only:
+            marker = str(scenario.get('boot_marker', 'Reached target Multi-User System'))
+            text = ''
+            try:
+                ser.read_until(marker.encode(), remaining())
+                # Brief settle so unit failures around the target are captured.
+                time.sleep(float(scenario.get('settle_seconds', 2)))
+                text = bytes(ser.log).decode(errors='replace')
+            except (TimeoutError, EOFError):
+                text = bytes(ser.log).decode(errors='replace')
+            checks = {name: 'FAIL' for name in scenario.get('checks', [])}
+            marker_present = marker in text
+            if marker_present:
+                for name in checks:
+                    checks[name] = 'PASS'
+            failures = []
+            if not marker_present:
+                failures.append(f'boot marker not reached: {marker}')
+            if 'Kernel panic' in text:
+                failures.append('kernel panic')
+            failed_units = re.findall(r'Failed to start ([^\r\n]+)', text)
+            result.update(
+                checks=checks,
+                failures=failures,
+                failed_unit_descriptions=sorted(set(failed_units))[:20],
+                boot_only=True,
+                boot_marker=marker,
+                verdict='FAIL' if failures else 'PASS',
+                rc=1 if failures else 0,
+                guest_rc=None,
+            )
+            print(f"[vm] boot-only marker {'found' if marker_present else 'missing'}: {marker}",
+                  flush=True)
+            return result['rc']
         if interactive:
             written = 0
             while proc.poll() is None:
@@ -1027,6 +1074,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
                 result.setdefault('failures', []).append(
                     'visible frame required: QMP screenshot missing (use --qmp-screenshot)')
         if (failure_bundle and result.get('verdict') == 'FAIL'
+                and not result.get('boot_only')
                 and ser is not None and proc is not None and proc.poll() is None):
             try:
                 from harness.failures import collect_failure_bundle
@@ -1035,7 +1083,8 @@ def run(cmd: str | None, interactive: bool, timeout: float,
                 result['failure_bundle'] = {
                     'error': f'{type(exc).__name__}: {exc}'
                 }
-        if state is not None and ser is not None and proc is not None and proc.poll() is None:
+        if (state is not None and not result.get('boot_only')
+                and ser is not None and proc is not None and proc.poll() is None):
             try:
                 _, _, flush_rc, flush_seconds = execute_guest(ser, 'sync', 10)
                 result['state'].update({'flush_rc': flush_rc, 'flush_seconds': flush_seconds})

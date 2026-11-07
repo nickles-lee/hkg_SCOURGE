@@ -530,5 +530,10 @@ items beyond that.
 - **2026-11-07 — USB-removal sync**: SCOURGE commit `8894274` pushed with
   `recovery-usb-removal`, QMP detach helper, tests and docs (131 files in
   `tools/vm/`). Policy audit clean.
-- **Remaining:** P2-3 wcap (client absent), P2-7 power-loss/repeat-update,
-  P2-8 stock boot. P3 deferred.
+- **2026-11-07 — P2-8 slice**: `vendor-systemd` boots the vendor rootfs with
+  real systemd to Multi-User (`init_override` + `boot_marker`), records
+  observed failed units, and is explicitly partial-boot only. Real run PASS.
+  215 tests.
+- **Remaining:** P2-3 wcap (client absent), P2-7 repeat-update, P2-8 deeper
+  unit ordering/D-Bus activation, P2-9 broader vehicle-state model.
+  P3 deferred.
