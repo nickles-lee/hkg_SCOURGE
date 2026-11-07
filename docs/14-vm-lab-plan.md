@@ -534,6 +534,11 @@ items beyond that.
   real systemd to Multi-User (`init_override` + `boot_marker`), records
   observed failed units, and is explicitly partial-boot only. Real run PASS.
   215 tests.
-- **Remaining:** P2-3 wcap (client absent), P2-7 repeat-update, P2-8 deeper
-  unit ordering/D-Bus activation, P2-9 broader vehicle-state model.
-  P3 deferred.
+- **2026-11-07 — P2-7 repeat-update (media slice)**: `recovery-repeat-update`
+  verifies the stick, injects corruption, detects the manifest failure,
+  restores from a local backup, re-verifies and rediscovers the media. Real
+  run PASS with five markers; the AppUpgrade engine's repeat path is out of
+  scope (provisioned credentials). 216 tests.
+- **Remaining:** P2-3 wcap (client absent), P2-7 AppUpgrade-engine repeat
+  behaviour (credential-gated), P2-8 deeper unit ordering/D-Bus activation,
+  P2-9 broader vehicle-state model. P3 deferred.

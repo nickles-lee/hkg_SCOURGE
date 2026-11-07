@@ -274,6 +274,22 @@ python3 -B launch.py run --profile conformance \
 The guest must see an I/O error/removed device (not a hang), then lazy-unmount
 and pass. QEMU `device_del` models USB detachment, not a physical hot-unplug.
 
+`recovery-repeat-update` is the media-level repeat attempt: verify the stick,
+inject corruption into a manifest-covered file, detect the manifest failure,
+restore the file from a backup, re-verify, then unmount and rediscover the
+media:
+
+```sh
+python3 -B launch.py run --profile conformance \
+  --scenario recovery-repeat-update --usb update-k.img --timeout 300
+```
+
+It passes only when all five checks pass (`repeat-baseline`,
+`repeat-corrupt-detected`, `repeat-after-repair`, `repeat-rediscover` and
+`recovery-repeat-update`). The repair is a local backup restore, not a
+re-download; the AppUpgrade engine's own repeat behaviour needs provisioned
+credentials and is not covered.
+
 Power-loss recovery is a two-phase command:
 
 ```sh
@@ -295,7 +311,7 @@ python3 -B launch.py run --profile conformance --scenario vendor-systemd \
 
 Boots the vendor rootfs with real systemd instead of the research `/init` and
 passes when `Reached target Multi-User System` appears. `result.json` records
-`failed_units` observed in that boot. This is a **partial boot**: SMACK setup
+`failed_unit_descriptions` observed in that boot. This is a **partial boot**: SMACK setup
 units fail without the vendor initramfs, and nothing here is stock
 equivalence or an update-conformance claim.
 

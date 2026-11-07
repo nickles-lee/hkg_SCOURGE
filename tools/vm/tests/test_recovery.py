@@ -32,7 +32,8 @@ class RecoveryTests(unittest.TestCase):
         command = scenario_command(scenario, load_profile('research'))
         self.assertIn('MANIFEST.sha256', command)
         self.assertIn('IONIQ5_EU.ver', command)
-        self.assertIn('corrupt-detected', command)
+        for check in scenario['checks']:
+            self.assertIn(f'HARNESS_CHECK {check} PASS', command)
 
     def test_usb_removal_scenario_contract(self) -> None:
         scenario = load_scenario('recovery-usb-removal')
@@ -41,6 +42,18 @@ class RecoveryTests(unittest.TestCase):
         command = scenario_command(scenario, load_profile('research'))
         self.assertIn('USB_REMOVAL_READY_', command)
         self.assertIn('usb-cleanup', command)
+
+    def test_repeat_update_scenario_contract(self) -> None:
+        scenario = load_scenario('recovery-repeat-update')
+        self.assertEqual(scenario['requires'], ['usb'])
+        self.assertEqual(set(scenario['checks']),
+                         {'repeat-baseline', 'repeat-corrupt-detected',
+                          'repeat-after-repair', 'repeat-rediscover',
+                          'recovery-repeat-update'})
+        command = scenario_command(scenario, load_profile('conformance'))
+        self.assertIn('MANIFEST.sha256', command)
+        for check in scenario['checks']:
+            self.assertIn(f'HARNESS_CHECK {check} PASS', command)
 
     def test_power_loss_scenario_contract(self) -> None:
         scenario = load_scenario('recovery-power-loss')

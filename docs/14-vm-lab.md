@@ -56,6 +56,9 @@ VM-validated (vendor kernel):
   an I/O error and lazy-unmounts without hanging
 - power-loss recovery: kill QEMU mid-write, reboot the same state, require
   the synced marker to survive (ext4 journal recovery)
+- repeat-update recovery (`recovery-repeat-update`): media-level verify,
+  corruption detection, backup repair, re-verify and rediscovery; not the
+  AppUpgrade engine's credential-gated repeat path
 - vendor systemd partial boot (`vendor-systemd`): real systemd reaches
   Multi-User; SMACK units fail, consistent with the missing vendor initramfs (documented)
 - synthetic micom CAN interface smoke (`can-smoke`): READY/CALL/ACK for
