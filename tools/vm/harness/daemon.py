@@ -4,6 +4,7 @@
 """Persistent VM daemon: boot once, then exec/screenshot/stop over a socket."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
@@ -13,9 +14,37 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
+from .governor import LockTimeout, run_lock
+
 DEFAULT_DAEMON_DIR = "runs/daemon"
+
+
+@contextmanager
+def _start_lock(daemon_dir: Path, timeout: float = 30.0):
+    """Parent-side lock so two `daemon start` calls cannot clobber a dir."""
+    path = Path(daemon_dir).with_name(Path(daemon_dir).name + ".start.lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "w")
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        f"another daemon start is in progress: {path}")
+                time.sleep(0.1)
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 def status_path(daemon_dir: Path) -> Path:
@@ -104,37 +133,38 @@ def _tail(path: Path, lines: int = 40) -> str:
 
 def start(config: dict, launch_path: Path, timeout: float = 180.0) -> dict:
     daemon_dir = Path(config["daemon_dir"])
-    previous = read_status(daemon_dir)
-    if previous.get("state") in ("starting", "ready") and pid_alive(previous.get("daemon_pid")):
-        raise RuntimeError(f"daemon already running: {daemon_dir}")
-    if daemon_dir.exists():
-        shutil.rmtree(daemon_dir)
-    daemon_dir.mkdir(parents=True)
-    config_path(daemon_dir).write_text(json.dumps(config, indent=2) + "\n")
-    log = open(daemon_dir / "daemon.log", "ab")
-    try:
-        process = subprocess.Popen(
-            [sys.executable, "-B", str(launch_path), "daemon", "_serve",
-             "--config", str(config_path(daemon_dir))],
-            cwd=str(daemon_dir), stdin=subprocess.DEVNULL,
-            stdout=log, stderr=subprocess.STDOUT,
-            start_new_session=True)
-    finally:
-        log.close()
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        status = read_status(daemon_dir)
-        if status.get("state") == "ready":
-            status["daemon_pid"] = process.pid
-            return status
-        if status.get("state") == "error":
-            raise RuntimeError(status.get("error") or "daemon failed to start")
-        if process.poll() is not None:
-            raise RuntimeError(
-                f"daemon exited rc={process.returncode}: "
-                + _tail(daemon_dir / "daemon.log", 30))
-        time.sleep(0.2)
-    raise TimeoutError("daemon did not become ready; see daemon.log")
+    with _start_lock(daemon_dir, timeout=timeout):
+        previous = read_status(daemon_dir)
+        if previous.get("state") in ("starting", "ready") and pid_alive(previous.get("daemon_pid")):
+            raise RuntimeError(f"daemon already running: {daemon_dir}")
+        if daemon_dir.exists():
+            shutil.rmtree(daemon_dir)
+        daemon_dir.mkdir(parents=True)
+        config_path(daemon_dir).write_text(json.dumps(config, indent=2) + "\n")
+        log = open(daemon_dir / "daemon.log", "ab")
+        try:
+            process = subprocess.Popen(
+                [sys.executable, "-B", str(launch_path), "daemon", "_serve",
+                 "--config", str(config_path(daemon_dir))],
+                cwd=str(daemon_dir), stdin=subprocess.DEVNULL,
+                stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True)
+        finally:
+            log.close()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = read_status(daemon_dir)
+            if status.get("state") == "ready":
+                status["daemon_pid"] = process.pid
+                return status
+            if status.get("state") == "error":
+                raise RuntimeError(status.get("error") or "daemon failed to start")
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f"daemon exited rc={process.returncode}: "
+                    + _tail(daemon_dir / "daemon.log", 30))
+            time.sleep(0.2)
+        raise TimeoutError("daemon did not become ready; see daemon.log")
 
 
 def stop(config_dir: Path, timeout: float = 20.0) -> dict:
@@ -182,6 +212,7 @@ def _serve(config: dict) -> int:
     proc = None
     ser = None
     state_lock = None
+    lock_stack = None
     server = None
     stop_event = threading.Event()
     guest_lock = threading.Lock()
@@ -193,6 +224,12 @@ def _serve(config: dict) -> int:
 
     old_term = signal.signal(signal.SIGTERM, _term_handler)
     try:
+        lock_timeout = min(float(config.get("lock_timeout", 180)),
+                           float(config.get("ready_timeout", 180)))
+        lock_stack = ExitStack()
+        lock_info = lock_stack.enter_context(run_lock(launch.VM, lock_timeout))
+        status["lock"] = lock_info
+        write_status(daemon_dir, status)
         tools = Path(config["tools"]) if config.get("tools") else None
         usb = Path(config["usb"]) if config.get("usb") else None
         payload = Path(config["payload"]) if config.get("payload") else None
@@ -338,6 +375,8 @@ def _serve(config: dict) -> int:
                 continue
             threading.Thread(target=handle, args=(conn,), daemon=True).start()
         status.update({"state": "stopped", "exit_code": proc.poll()})
+    except LockTimeout as exc:
+        status.update({"state": "error", "error": f"lock timeout: {exc}"})
     except Exception as exc:  # noqa: BLE001
         status.update({"state": "error", "error": f"{type(exc).__name__}: {exc}"})
         if proc is not None and proc.poll() is None:
@@ -364,6 +403,8 @@ def _serve(config: dict) -> int:
                 pass
         if state_lock is not None:
             state_lock.close()
+        if lock_stack is not None:
+            lock_stack.close()
         try:
             signal.signal(signal.SIGTERM, old_term)
         except (ValueError, OSError):

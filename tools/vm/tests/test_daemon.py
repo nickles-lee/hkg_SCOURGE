@@ -24,6 +24,14 @@ class DaemonTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
+    def test_start_lock_serializes_and_times_out(self) -> None:
+        with daemon._start_lock(self.root, timeout=1):
+            with self.assertRaises(RuntimeError):
+                with daemon._start_lock(self.root, timeout=0.2):
+                    pass
+        with daemon._start_lock(self.root, timeout=1):
+            pass  # released and reacquirable
+
     def test_status_round_trip_and_pid(self) -> None:
         daemon.write_status(self.root, {"state": "ready", "daemon_pid": os.getpid()})
         self.assertEqual(daemon.read_status(self.root)["state"], "ready")

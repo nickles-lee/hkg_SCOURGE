@@ -34,6 +34,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 
 from patch_kernel import COMPAT, TABLE_ENTRY, vaddr_to_offset
@@ -42,6 +43,7 @@ from harness.artifacts import extract_artifacts, wrap_command
 from harness import daemon as daemon_mod
 from harness.compat import verify_kernel_pin
 from harness.config import SCENARIO_NAMES, load_profile, load_scenario, scenario_command
+from harness.governor import LockTimeout, run_lock
 from harness.doctor import (MIN_QEMU, REQUIRED_DEVICES, compat_state, qemu_devices,
                             qemu_displays, running_vm_pids, runs_stats, version_tuple)
 from harness.images import cleanup_overlays, create_overlays, drive_path, validate_output
@@ -572,7 +574,8 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         display: str = "none", vnc_display: str = ":1",
         label: str = "", state: Path | None = None, reset: bool = False,
         network: bool = False, audio: bool = False,
-        usb_host: list[str] | None = None, cache: str = "writeback") -> int:
+        usb_host: list[str] | None = None, cache: str = "writeback",
+        lock_info: dict | None = None) -> int:
     profile = load_profile(profile_name)
     scenario = load_scenario(scenario_name) if scenario_name else None
     if profile_name == 'conformance' and (scenario is None or interactive):
@@ -650,6 +653,8 @@ def run(cmd: str | None, interactive: bool, timeout: float,
               'scenario_seconds': None, 'phase': None, 'images': {}, 'overlays': {},
               'keep_overlay': keep_overlay, 'qemu': qemu_version(),
               'applied_substitutions': [], 'output_streams': 'stdout/stderr merged on serial'}
+    if lock_info is not None:
+        result['lock'] = lock_info
     result['graphics_mode'] = graphics
     result['mode'] = kernel_target
     result['kernel_target'] = kernel_target
@@ -1345,6 +1350,52 @@ def doctor(verify_images: bool = False, tools: Path | None = None,
     return 0 if ok else 1
 
 
+def _recovery_power_loss(args, lock_info: dict) -> int:
+    """Two-phase power-loss check; children run under the caller's lock."""
+    state = args.state.resolve()
+    phase1 = [sys.executable, '-B', str(VM / 'launch.py'), 'run', '--no-lock',
+              '--profile', 'conformance', '--scenario', 'recovery-power-loss',
+              '--state', str(state), '--timeout', str(args.timeout)]
+    if args.reset:
+        phase1.append('--reset')
+    first = subprocess.run(phase1, capture_output=True, text=True)
+    print(first.stdout, end='')
+    if first.stderr:
+        print(first.stderr, file=sys.stderr, end='')
+    match = re.search(r'result=(\S+)', first.stdout)
+    if first.returncode != 0 or not match:
+        return first.returncode or 1
+    result1 = json.loads(Path(match.group(1)).read_text())
+    if result1.get('verdict') != 'PASS':
+        print(json.dumps(result1, indent=2))
+        return 1
+    verify = ("test -f /tmp/power-loss-marker && echo POWER_LOSS_RECOVERED || "
+              "{ echo POWER_LOSS_ABSENT; exit 1; }")
+    phase2 = [sys.executable, '-B', str(VM / 'launch.py'), 'run', '--no-lock',
+              '--profile', 'research', '--cmd', verify,
+              '--state', str(state), '--timeout', str(args.timeout)]
+    second = subprocess.run(phase2, capture_output=True, text=True)
+    print(second.stdout, end='')
+    if second.stderr:
+        print(second.stderr, file=sys.stderr, end='')
+    match = re.search(r'result=(\S+)', second.stdout)
+    if second.returncode != 0 or not match:
+        return second.returncode or 1
+    result2 = json.loads(Path(match.group(1)).read_text())
+    output = (Path(result2['run_dir']) / 'guest-output.log').read_text()
+    summary = {
+        'ok': result2.get('verdict') == 'PASS' and 'POWER_LOSS_RECOVERED' in output,
+        'phase1': {'verdict': result1.get('verdict'),
+                   'power_loss': result1.get('power_loss')},
+        'phase2': {'verdict': result2.get('verdict'),
+                   'recovered_marker': 'POWER_LOSS_RECOVERED' in output},
+        'state': str(state),
+        'lock': lock_info,
+    }
+    print(json.dumps(summary, indent=2))
+    return 0 if summary['ok'] else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="action", required=True)
@@ -1427,6 +1478,8 @@ def main() -> int:
     ds.add_argument('--cache', choices=('writeback', 'writethrough', 'directsync',
                                        'unsafe', 'none'), default='writeback')
     ds.add_argument('--ready-timeout', type=float, default=180)
+    ds.add_argument('--lock-timeout', type=float, default=180,
+                    help='lock queue wait, capped at --ready-timeout')
     dserve = dsub.add_parser('_serve')
     dserve.add_argument('--config', type=Path, required=True)
     for name in ('status', 'stop', 'screenshot', 'console', 'exec'):
@@ -1444,6 +1497,10 @@ def main() -> int:
     rp.add_argument('--state', type=Path, default=VM / 'states' / 'recovery-power-loss')
     rp.add_argument('--reset', action='store_true')
     rp.add_argument('--timeout', type=float, default=180)
+    rp.add_argument('--no-lock', action='store_true',
+                    help='do not serialize the two phases against other VM runs (unsafe)')
+    rp.add_argument('--lock-timeout', type=float, default=600,
+                    help='seconds to wait for the VM boot lock (default 600)')
     r = sub.add_parser("run")
     r.add_argument("--cmd", default=None)
     r.add_argument('--label', default='', help='searchable run label')
@@ -1506,6 +1563,10 @@ def main() -> int:
                    help="vendor (exact 4.1.27-abl) or compat (pinned/host kernel + initramfs); legacy auto/bzimage/vmlinux select vendor sub-modes")
     r.add_argument("--payload", type=Path, default=None,
                    help="directory (built to ext4) or image for a third USB stick")
+    r.add_argument('--no-lock', action='store_true',
+                   help='do not serialize this boot against other VM runs (unsafe)')
+    r.add_argument('--lock-timeout', type=float, default=600,
+                   help='seconds to wait for the VM boot lock (default 600)')
     args = ap.parse_args()
     if args.action == "prepare":
         prepare()
@@ -1518,47 +1579,14 @@ def main() -> int:
             print(f"{name}: {item['description']}")
         return 0
     if args.action == 'recovery-power-loss':
-        state = args.state.resolve()
-        phase1 = [sys.executable, '-B', str(VM / 'launch.py'), 'run',
-                  '--profile', 'conformance', '--scenario', 'recovery-power-loss',
-                  '--state', str(state), '--timeout', str(args.timeout)]
-        if args.reset:
-            phase1.append('--reset')
-        first = subprocess.run(phase1, capture_output=True, text=True)
-        print(first.stdout, end='')
-        if first.stderr:
-            print(first.stderr, file=sys.stderr, end='')
-        match = re.search(r'result=(\S+)', first.stdout)
-        if first.returncode != 0 or not match:
-            return first.returncode or 1
-        result1 = json.loads(Path(match.group(1)).read_text())
-        if result1.get('verdict') != 'PASS':
-            print(json.dumps(result1, indent=2))
+        lock = (nullcontext({'held': False}) if args.no_lock
+                else run_lock(VM, args.lock_timeout))
+        try:
+            with lock as lock_info:
+                return _recovery_power_loss(args, lock_info)
+        except LockTimeout as exc:
+            print(f'ERROR: {exc}', file=sys.stderr)
             return 1
-        verify = ("test -f /tmp/power-loss-marker && echo POWER_LOSS_RECOVERED || "
-                  "{ echo POWER_LOSS_ABSENT; exit 1; }")
-        phase2 = [sys.executable, '-B', str(VM / 'launch.py'), 'run',
-                  '--profile', 'research', '--cmd', verify,
-                  '--state', str(state), '--timeout', str(args.timeout)]
-        second = subprocess.run(phase2, capture_output=True, text=True)
-        print(second.stdout, end='')
-        if second.stderr:
-            print(second.stderr, file=sys.stderr, end='')
-        match = re.search(r'result=(\S+)', second.stdout)
-        if second.returncode != 0 or not match:
-            return second.returncode or 1
-        result2 = json.loads(Path(match.group(1)).read_text())
-        output = (Path(result2['run_dir']) / 'guest-output.log').read_text()
-        summary = {
-            'ok': result2.get('verdict') == 'PASS' and 'POWER_LOSS_RECOVERED' in output,
-            'phase1': {'verdict': result1.get('verdict'),
-                       'power_loss': result1.get('power_loss')},
-            'phase2': {'verdict': result2.get('verdict'),
-                       'recovered_marker': 'POWER_LOSS_RECOVERED' in output},
-            'state': str(state),
-        }
-        print(json.dumps(summary, indent=2))
-        return 0 if summary['ok'] else 1
     if args.action == 'daemon':
         if args.daemon_action == '_serve':
             config = json.loads(args.config.read_text())
@@ -1602,6 +1630,7 @@ def main() -> int:
                 'label': args.label,
                 'cache': args.cache,
                 'ready_timeout': args.ready_timeout,
+                'lock_timeout': args.lock_timeout,
             }
             try:
                 status = daemon_mod.start(config, VM / 'launch.py', args.ready_timeout + 30)
@@ -1736,16 +1765,23 @@ def main() -> int:
         kernel_target, vendor_mode = 'vendor', 'auto'
     else:
         kernel_target, vendor_mode = 'vendor', args.kernel
-    return run(args.cmd, args.interactive, args.timeout, args.usb, args.tools,
-               vendor_mode, args.payload, args.profile, args.scenario,
-               args.keep_overlay, args.verify_images, args.graphics,
-               args.storage, parse_sizes(args.storage_size), args.audit,
-               args.allow_stale_tools, args.screenshot, args.qmp_screenshot,
-               args.display_device, args.smp, args.memory, args.apic,
-               args.failure_bundle, kernel_target, args.allow_kernel_mismatch,
-               args.share, args.display, args.vnc_display, args.label,
-               args.state, args.reset, args.network, args.audio, args.usb_host,
-               args.cache)
+    lock = (nullcontext({'held': False}) if args.no_lock
+            else run_lock(VM, args.lock_timeout))
+    try:
+        with lock as lock_info:
+            return run(args.cmd, args.interactive, args.timeout, args.usb, args.tools,
+                       vendor_mode, args.payload, args.profile, args.scenario,
+                       args.keep_overlay, args.verify_images, args.graphics,
+                       args.storage, parse_sizes(args.storage_size), args.audit,
+                       args.allow_stale_tools, args.screenshot, args.qmp_screenshot,
+                       args.display_device, args.smp, args.memory, args.apic,
+                       args.failure_bundle, kernel_target, args.allow_kernel_mismatch,
+                       args.share, args.display, args.vnc_display, args.label,
+                       args.state, args.reset, args.network, args.audio, args.usb_host,
+                       args.cache, lock_info=lock_info)
+    except LockTimeout as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

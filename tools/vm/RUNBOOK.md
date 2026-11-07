@@ -230,18 +230,32 @@ reports changed pixels/ratio. A deliberate UI change is rebaselined by
 running the `baseline` command against the reviewed frame. Baselines are
 workspace-local, so each agent can choose the frames it guards.
 
-## Parallel suites
+## Parallel runs and suites
 
-`regress.py` takes an exclusive lock at `runs/.vm-lab.lock` for the whole
-suite. A second suite waits for `--lock-timeout` (default 600 s) instead of
-racing the first on EHCI/QEMU resources:
+All heavy boots share an exclusive lock at `runs/.vm-lab.lock`:
+
+- `launch.py run` and `recovery-power-loss` take it by default and wait up to
+  `--lock-timeout` seconds (default 600) instead of racing on EHCI/QEMU
+  resources; `--no-lock` is the explicit opt-out.
+- The persistent daemon holds the same lock for its lifetime. `daemon start`
+  waits up to `min(--lock-timeout, --ready-timeout)` queued behind another
+  boot; direct runs queue behind a ready daemon. A direct run queued behind a
+  live daemon will time out after its lock wait: `daemon stop` first (or use
+  `--no-lock` only for a controlled experiment).
+- `regress.py` holds the lock for the whole suite and runs its children with
+  `--no-lock`, so there is no self-deadlock.
 
 ```sh
 python3 -B regress.py --profile conformance --scenario boot
-python3 -B regress.py --no-lock ...      # only for controlled, non-booting work
+python3 -B launch.py run --cmd '...' --lock-timeout 900
+python3 -B launch.py run --cmd '...' --no-lock   # controlled opt-out only
 ```
 
-`summary.json` records `locked: true`. `--no-lock` is an explicit opt-out.
+`result.json` records the lock (`held`, `path`, `pid`, `waited_seconds`);
+inside a regression suite the child runs record `held: false` because the
+suite holds the lock, and `summary.json` records both `locked: true` and the
+`suite_lock` evidence. Daemon status records the lock it holds.
+A blocked second run exits with a clear `another VM boot holds ...` error.
 
 ## Virgl experiment
 

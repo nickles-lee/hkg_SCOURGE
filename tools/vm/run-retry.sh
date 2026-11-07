@@ -9,9 +9,20 @@ cd "$(dirname "$0")/.."
 n=${VM_RETRIES:-3}
 i=1
 while [ "$i" -le "$n" ]; do
-    if ./vm/launch.py "$@"; then
+    log=$(mktemp) || exit 1
+    ./vm/launch.py "$@" >"$log" 2>&1
+    rc=$?
+    cat "$log"
+    if [ "$rc" -eq 0 ]; then
+        rm -f "$log"
         exit 0
     fi
+    if grep -qE 'another VM boot holds|lock timeout' "$log"; then
+        echo "vm: lock wait failed; not retrying" >&2
+        rm -f "$log"
+        exit 1
+    fi
+    rm -f "$log"
     echo "vm: attempt $i failed; retrying ($i/$n)" >&2
     i=$((i + 1))
 done

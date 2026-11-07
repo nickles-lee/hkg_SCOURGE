@@ -313,8 +313,8 @@ items beyond that.
    decide after spike; requirements: virtio-gpu/bochs/9p/virtio-input/SMACK.
 3. **Mode C SMACK** (`lsm=smack`) approximates but does not reproduce 4.1.27
    policy semantics — policy claims stay Mode-V-only.
-4. **EHCI concurrency flakiness** observed once — governor (P2-10) is the fix;
-   don't parallelize boots before then.
+4. **EHCI concurrency flakiness** observed once — the governor (P2-10) is the
+   fix; one-shot runs, the daemon and regression suites now share the lock.
 5. **SCOURGE sync discipline** — the sync script must be used, not hand-copied;
    it enforces headers and byte rules so nothing OEM leaks.
 
@@ -550,7 +550,16 @@ items beyond that.
   outside decoding, clamp evidence, a hostile-range guard, bulk retention and
   a lab GetState/Reset interface. Real run PASS; `can-smoke` still PASS. Lab
   mapping, not a vendor DBC. 228 tests.
+- **2026-11-07 — P2-10 extension (direct runs/daemon)**: `launch.py run`,
+  `recovery-power-loss` and the persistent daemon now share
+  `runs/.vm-lab.lock`; `--lock-timeout`/`--no-lock` on one-shot boots,
+  daemon start capped by the ready timeout, and `regress.py` children use
+  `--no-lock` to avoid self-deadlock. The holder record is contention-safe,
+  non-finite timeouts are rejected, and a parent-side start lock prevents
+  concurrent starts of one daemon dir. Live evidence: second run refused,
+  concurrent daemon start refused, lock-holding run PASS, regress PASS with
+  `locked: true`/`suite_lock`, daemon start/exec/stop. 233 tests.
 - **Remaining:** P2-3 wcap (client absent), P2-7 AppUpgrade-engine repeat
   behaviour (credential-gated), P2-8 deeper stock/esinit fidelity (needs the
   vendor boot chain), P2-9 further signals/real DBC mapping (lab model
-  landed). P3 deferred.
+  landed), P2-11 performance benchmarks (baseline landed). P3 deferred.

@@ -19,7 +19,8 @@ VM = Path(__file__).resolve().parents[1]
 @unittest.skipUnless(os.environ.get('IONIQ_RUN_VM_TESTS') == '1', 'set IONIQ_RUN_VM_TESTS=1 to boot QEMU')
 class VMIntegrationTests(unittest.TestCase):
     def run_guest(self, *args):
-        process = subprocess.run([sys.executable, '-B', str(VM / 'launch.py'), 'run', *args],
+        process = subprocess.run([sys.executable, '-B', str(VM / 'launch.py'), 'run',
+                                  '--lock-timeout', '100', *args],
                                  cwd=VM, capture_output=True, text=True, timeout=120)
         directory = next(line[5:] for line in process.stdout.splitlines() if line.startswith('run: '))
         result = json.loads((Path(directory) / 'result.json').read_text())
@@ -140,6 +141,7 @@ class VMIntegrationTests(unittest.TestCase):
 
     def test_launcher_sigterm_cleans_owned_qemu(self):
         process = subprocess.Popen([sys.executable, '-B', str(VM / 'launch.py'), 'run',
+                                    '--lock-timeout', '100',
                                     '--cmd', 'sleep 60', '--timeout', '90', '--storage', 'split',
                                     '--storage-size', 'update=32', '--storage-size', 'rwdata=32',
                                     '--storage-size', 'logdata=32'], cwd=VM,

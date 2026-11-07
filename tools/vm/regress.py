@@ -20,7 +20,7 @@ from harness.storage import parse_sizes
 VM = Path(__file__).resolve().parent
 
 
-def run_suite(args, scenarios) -> int:
+def run_suite(args, scenarios, lock_info: dict | None = None) -> int:
     directory = VM / 'runs' / f'regression-{time.time_ns()}'
     directory.mkdir(parents=True)
     paths = {name: path.resolve() for name, path in {
@@ -41,7 +41,10 @@ def run_suite(args, scenarios) -> int:
     results = []
     for iteration in range(args.repeat):
         for scenario in scenarios:
-            argv = [sys.executable, '-B', str(VM / 'launch.py'), 'run', '--profile', args.profile,
+            # The suite holds the global boot lock (unless --no-lock), so
+            # child runs must not try to acquire it again.
+            argv = [sys.executable, '-B', str(VM / 'launch.py'), 'run', '--no-lock',
+                    '--profile', args.profile,
                     '--scenario', scenario['name'], '--timeout', str(args.timeout),
                     '--storage', args.storage]
             for value in args.storage_size:
@@ -75,6 +78,7 @@ def run_suite(args, scenarios) -> int:
     summary = {'ok': ok, 'profile': args.profile, 'storage': args.storage,
                'backing_metadata_unchanged': unchanged,
                'locked': not args.no_lock,
+               'suite_lock': lock_info or {},
                'known_failures': [{'scenario': item['scenario'],
                                    'known_issue': item['known_issue']} for item in known],
                'new_failures': [item['scenario'] for item in new_failures],
@@ -113,10 +117,10 @@ def main() -> int:
         if any(item.get('requires_storage', args.storage) != args.storage for item in scenarios):
             raise ValueError('selected scenario requires --storage split')
         if args.no_lock:
-            return run_suite(args, scenarios)
+            return run_suite(args, scenarios, {})
         try:
-            with run_lock(VM, args.lock_timeout):
-                return run_suite(args, scenarios)
+            with run_lock(VM, args.lock_timeout) as lock_info:
+                return run_suite(args, scenarios, lock_info)
         except LockTimeout as exc:
             print(f'ERROR: {exc}', file=sys.stderr)
             return 1
