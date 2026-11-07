@@ -564,7 +564,22 @@ items beyond that.
   unpinned mean 4.240 s vs pinned 4.176 s over three warm boots — a small
   consistent gain at n=3, too small for a default, so opt-in only.
   `docs/perf-smp-memory.md` updated. 239 tests.
-- **Remaining:** P2-3 wcap (client absent), P2-7 AppUpgrade-engine repeat
-  behaviour (credential-gated), P2-8 deeper stock/esinit fidelity (needs the
-  vendor boot chain), P2-9 further signals/real DBC mapping (lab model
-  landed). P2-11 pinning landed as an opt-in no-win; P3 deferred.
+- **2026-11-07 — plan audit (feasible P2 exhausted)**: final locked regression
+  suite (`boot`, `vendor-systemd-dbus`, `vehicle-state`,
+  `recovery-repeat-update`) all PASS; 239 tests (13 skipped); doctor green;
+  sync self-test and `--check` clean. Remaining items are blocked:
+  - **P2-3 wcap**: the rootfs ships only `wcap-decode`; there is no wcap
+    recorder client or `wcap.so` module, and no Weston 1.10 source/build in
+    the lab.
+  - **P2-7 AppUpgrade-engine repeat**: needs provisioned device credentials;
+    the media-level repeat slice is covered.
+  - **P2-8 esinit/stock**: the reconstructed rootfs has no `esinit`
+    executable (only helper scripts), and the vendor initramfs/boot chain is
+    absent. The systemd/D-Bus partial-boot slices are the feasible scope.
+  - **P2-9 real DBC mapping**: no vendor DBC/signal database is available;
+    the lab-defined vehicle model is the deterministic slice.
+  - **P2-6 hardware validation**: no WiFi/BT/CAN dongle is attached and the
+    host `/dev/bus/usb` nodes are root-only; plumbing is complete but the
+    hardware validation is blocked.
+- **Remaining:** only the blocked items above; no feasible P2 work remains.
+  P3 is deferred per the plan (P3-1/P3-2 retry-later).
