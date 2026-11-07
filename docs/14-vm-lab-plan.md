@@ -512,12 +512,16 @@ items beyond that.
   Vendor run PASS; serial contains the full simulator log. 203 tests. This
   is a deterministic interface test, not real CAN timing/vehicle fidelity.
 - **2026-11-07 — P2-7 slices complete**: `recovery-reboot` (marker +
-  terminated `-no-reboot` QEMU) and `recovery-no-space` (16 MiB synthetic
-  update volume, ENOSPC, cleanup). Both real runs PASS. Power-loss, corrupt
-  media, USB removal and repeat-update recovery remain.
+  terminated `-no-reboot` QEMU), `recovery-no-space` (16 MiB synthetic
+  update volume, ENOSPC, cleanup), and `recovery-corrupt-media` (overlay
+  `IONIQ5_EU.ver` corruption → `MANIFEST.sha256` FAILED, no crash). All real
+  runs PASS. Power-loss, USB removal and repeat-update recovery remain.
 - **2026-11-07 — P2-9/P2-7 sync**: SCOURGE commit `253bf08` pushed with
   CAN smoke, forced-reboot recovery, tests and docs (127 files in
   `tools/vm/`). Policy audit clean. The no-space addition is pending the next
   sync.
-- **Remaining:** P2-3 wcap (client absent), P2-7 remaining cases, P2-8 stock
-  boot. P3 deferred.
+- **2026-11-07 — no-space sync**: SCOURGE commit `34e17a1` pushed with
+  `recovery-no-space` and scenario-provided storage sizing (128 files in
+  `tools/vm/`). Policy audit clean.
+- **Remaining:** P2-3 wcap (client absent), P2-7 power-loss/USB-removal/
+  repeat-update cases, P2-8 stock boot. P3 deferred.

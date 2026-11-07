@@ -1,0 +1,1 @@
+{"name":"recovery-corrupt-media","description":"Corrupt IONIQ5_EU.ver on the writable update-stick overlay and assert the MANIFEST.sha256 gate fails cleanly with an actionable marker; not the AppUpgrade signature path.","requires":["usb"],"checks":["media-discovery","manifest-baseline","corrupt-detected","recovery-corrupt-media"],"blockers":{}}

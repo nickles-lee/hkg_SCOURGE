@@ -25,6 +25,15 @@ class RecoveryTests(unittest.TestCase):
         self.assertIn('no space', command)
         self.assertIn('/update/.no-space', command)
 
+    def test_corrupt_media_scenario_contract(self) -> None:
+        scenario = load_scenario('recovery-corrupt-media')
+        self.assertEqual(scenario['requires'], ['usb'])
+        self.assertIn('corrupt-detected', scenario['checks'])
+        command = scenario_command(scenario, load_profile('research'))
+        self.assertIn('MANIFEST.sha256', command)
+        self.assertIn('IONIQ5_EU.ver', command)
+        self.assertIn('corrupt-detected', command)
+
 
 if __name__ == '__main__':
     unittest.main()

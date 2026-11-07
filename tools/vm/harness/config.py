@@ -15,7 +15,8 @@ SCENARIO_NAMES = ('boot', 'usb-discovery', 'dbus-ready', 'dmclient-events',
                   'updater-launch', 'stock-update-stage', 'storage-isolation', 'environment-audit', 'update-graphics',
                   'entropy-ready', 'vendor-lifecycle', 'applauncher-sigstub',
                   'vendor-lifecycle-sigstub', 'ui-smoke', 'wifi-ui',
-                  'can-smoke', 'recovery-reboot', 'recovery-no-space')
+                  'can-smoke', 'recovery-reboot', 'recovery-no-space',
+                  'recovery-corrupt-media')
 
 
 def load_profile(name: str) -> dict:
@@ -83,6 +84,8 @@ if ! grep -qi 'no space' /tmp/no-space.log; then
 fi
 echo 'HARNESS_CHECK recovery-no-space PASS'
 '''
+    if name == 'recovery-corrupt-media':
+        return (VM / 'probes' / 'recovery-corrupt-media.sh').read_text()
     if name == 'environment-audit':
         return audit_script()
     if name == 'storage-isolation':

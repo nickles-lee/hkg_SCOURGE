@@ -50,6 +50,8 @@ VM-validated (vendor kernel):
 - forced-reboot recovery smoke (marker + QEMU `-no-reboot` exit; one slice,
   not power-loss/corrupt-media coverage)
 - no-space recovery on a synthetic 16 MiB update volume (ENOSPC assertion)
+- corrupt-media recovery: overlay-only `IONIQ5_EU.ver` corruption is detected
+  by `MANIFEST.sha256` with an actionable failure marker
 - synthetic micom CAN interface smoke (`can-smoke`): READY/CALL/ACK for
   fixed and bulk calls; contract only, not real CAN timing
 
