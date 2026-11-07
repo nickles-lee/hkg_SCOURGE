@@ -22,6 +22,7 @@ test: payload
 	sh tests/test_ports.sh
 	sh tests/test_wifi_stack.sh
 	sh tests/test_logdump.sh
+	sh tests/test_prune.sh
 	sh tests/test_ssh_persistence.sh
 	sh tests/test_installer.sh stock
 	sh tests/test_installer.sh hello

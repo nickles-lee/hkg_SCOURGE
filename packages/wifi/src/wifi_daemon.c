@@ -3164,6 +3164,45 @@ static void snap_cmd(FILE *f, const char *cmd)
 /* Keep only the newest LOG_DUMP_KEEP bundles; stamps are fixed width so
  * a lexical sort is a chronological sort. */
 #define LOG_DUMP_KEEP 5
+
+/* A prune candidate must be exactly a bundle this daemon itself wrote:
+ * the "wifi_logs_" prefix plus the fixed-width %Y%m%d%H%M%S stamp and
+ * nothing else.  Whatever else a stick carries — however it is named —
+ * is data, never a command (rule 9): not a candidate, not deleted. */
+static bool is_pruneable_name(const char *name)
+{
+    if (!name || strncmp(name, "wifi_logs_", 10)) return false;
+    const char *stamp = name + 10;
+    for (int i = 0; i < 14; i++)
+        if (!isdigit((unsigned char)stamp[i])) return false;
+    return stamp[14] == '\0';
+}
+
+/* rm -rf without a shell: lstat first so a symlink is unlinked, never
+ * followed; depth-capped so a pathological tree cannot recurse without
+ * bound.  Returns false on any refusal — the caller logs and keeps it. */
+#define PRUNE_MAX_DEPTH 12
+static bool safe_rmtree(const char *path, int depth)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0) return errno == ENOENT;
+    if (!S_ISDIR(st.st_mode)) return unlink(path) == 0;
+    if (depth >= PRUNE_MAX_DEPTH) return false;
+    DIR *d = opendir(path);
+    if (!d) return false;
+    struct dirent *de;
+    bool ok = true;
+    while ((de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        char child[768];
+        if (snprintf(child, sizeof(child), "%s/%s", path, de->d_name)
+            >= (int)sizeof(child)) { ok = false; continue; }
+        if (!safe_rmtree(child, depth + 1)) ok = false;
+    }
+    closedir(d);
+    return ok && rmdir(path) == 0;
+}
+
 static void prune_old_dumps(const char *usb)
 {
     DIR *d = opendir(usb);
@@ -3172,7 +3211,7 @@ static void prune_old_dumps(const char *usb)
     int count = 0;
     struct dirent *de;
     while ((de = readdir(d)) && count < 16) {
-        if (strncmp(de->d_name, "wifi_logs_", 10)) continue;
+        if (!is_pruneable_name(de->d_name)) continue;
         size_t len = strlen(de->d_name);
         if (len >= sizeof(names[0])) continue;
         memcpy(names[count], de->d_name, len + 1);
@@ -3190,8 +3229,16 @@ static void prune_old_dumps(const char *usb)
         }
         memcpy(names[j + 1], key, sizeof(names[0]));
     }
-    for (int i = 0; i + LOG_DUMP_KEEP < count; i++)
-        sh("rm -rf %s/%s 2>/dev/null", usb, names[i]);
+    for (int i = 0; i + LOG_DUMP_KEEP < count; i++) {
+        char path[600];
+        if (snprintf(path, sizeof(path), "%s/%s", usb, names[i])
+            >= (int)sizeof(path)) {
+            log_msg("prune: path too long for %s", names[i]);
+            continue;
+        }
+        if (!safe_rmtree(path, 0))
+            log_msg("prune: cannot remove %s", path);
+    }
 }
 
 static bool dump_logs_to_usb(bool verbose)

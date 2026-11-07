@@ -33,6 +33,15 @@ rootfs, using per-run overlays):
 
 Details in `docs/FINDINGS.md` §5.2f.
 
+## Offline hardening (2026-11-07)
+
+- **Log-bundle prune hardened** (`rm -rf` injection fix): only the
+  daemon's own `wifi_logs_<14-digit stamp>` names are prune candidates,
+  and deletion is shell-free (`safe_rmtree`, `lstat`-first so symlinks are
+  unlinked not followed, depth-capped). `tests/test_prune.sh` proves
+  planted injection names do not execute and decoys are kept;
+  `tests/test_wifi_stack.sh` guards against the shell form returning.
+  **Status: offline-tested — VM retest and car validation still pending.**
 
 - Firmware findings documented in `docs/FINDINGS.md`.
 - Static C daemon `src/wifi_daemon` built and smoke-tested:

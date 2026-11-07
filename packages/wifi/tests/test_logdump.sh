@@ -33,16 +33,22 @@ if [ -f /rw_data/wifi/config.conf ]; then
 fi
 
 # Pruning: 6 old bundles + 1 new one must leave only the newest 5.
+# Fixtures use the daemon's real 14-digit %Y%m%d%H%M%S stamp; the prune
+# allowlist accepts only that exact shape (see test_prune.sh).
 i=0
 while [ $i -lt 6 ]; do
-    mkdir "$USB/wifi_logs_202001010$i"0
+    mkdir "$USB/wifi_logs_2020010100000$i"
     i=$((i + 1))
 done
 WIFI_USB_ROOT="$USB" "$BIN" --dump-logs >/dev/null 2>&1
 n=$(ls -1d "$USB"/wifi_logs_* 2>/dev/null | wc -l)
 [ "$n" -eq 5 ] || { echo "pruning failed: $n bundles left (want 5)" >&2; exit 1; }
-ls -d "$USB"/wifi_logs_2020010101000 >/dev/null 2>&1 &&
-    { echo "pruning removed the wrong bundles" >&2; exit 1; }
+for old in 20200101000000 20200101000001; do
+    ls -d "$USB/wifi_logs_$old" >/dev/null 2>&1 &&
+        { echo "pruning removed the wrong bundles ($old kept)" >&2; exit 1; }
+done
+ls -d "$USB/wifi_logs_20200101000005" >/dev/null 2>&1 ||
+    { echo "pruning removed a kept bundle" >&2; exit 1; }
 
 # The car mounts exFAT as Tuxera "texfat" (and FUSE sticks as fuseblk).
 # find_usb_dir must accept those, using a synthetic /proc/mounts.
