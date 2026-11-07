@@ -15,7 +15,7 @@ class ProvenanceTests(unittest.TestCase):
             'guest/phase3.sh',
             'guest/applauncher_stub.c',
             'probes/ui-smoke.sh',
-            'probes/qt-shutdown.md',
+            'probes/qt-backtrace.py',
             'toolsroot/phase4.sh',
             'toolsroot/scenarios.sh',
             'compat/spike.py',

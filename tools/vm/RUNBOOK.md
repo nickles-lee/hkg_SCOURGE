@@ -1,10 +1,9 @@
 # vm-lab runbook — Mode V and Mode C
 
 Status: **VM-validated** where stated; this is a research harness, not a stock
-head-unit replica. Start with [PLAN.md](../PLAN.md), read
-[NOTES.md](../NOTES.md) for dated evidence, and use
-[FIDELITY.md](../FIDELITY.md) plus [compat/FIDELITY.md](../compat/FIDELITY.md)
-for the limits.
+head-unit replica. Start with [docs/14-vm-lab-plan.md](../../docs/14-vm-lab-plan.md),
+then read [docs/14-vm-lab.md](../../docs/14-vm-lab.md) for what the lab can
+establish, its limits and its known issues.
 
 ## Capability matrix
 
@@ -381,7 +380,7 @@ equivalence.
 | `no_running_vm` failure | stop the listed `vm-lab` QEMU PIDs before another managed run |
 | flat `entropy-ready` FAIL | known issue; run with `--storage split` or read `known_issue` |
 | `updater-launch` timeout | use `--timeout 540` or `600`; the scenario waits for a log line |
-| `update-graphics` FAIL | known Qt shutdown hang; see `probes/qt-shutdown.md` |
+| `update-graphics` FAIL | known Qt shutdown hang; see `docs/14-vm-lab.md` known issues |
 | `wifi-ui` missing imports | expected current evidence (`HMIEVENTS`, `AppHome_Enum`); AppHomeScreen runtime not wired |
 | blank QMP frame | ensure a display device is attached; compat uses `virtio-vga` |
 | GTK window fails headless | use `--display vnc --vnc-display :N`; GTK needs a desktop session |

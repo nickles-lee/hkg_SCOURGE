@@ -14,7 +14,7 @@ class KnownIssueTests(unittest.TestCase):
         scenario = load_scenario('update-graphics')
         self.assertTrue(scenario['expected_fail'])
         self.assertEqual(scenario['known_issue']['id'], 'qt-shutdown-hang')
-        self.assertIn('probes/qt-shutdown.md', scenario['known_issue']['probe'])
+        self.assertIn('docs/14-vm-lab.md', scenario['known_issue']['probe'])
         result = evaluate('HARNESS_CHECK qt-egl-context FAIL\n', 1, scenario)
         self.assertEqual(result['verdict'], 'FAIL')
         self.assertTrue(result['known_failure'])

@@ -280,7 +280,7 @@ unit exposes.
 
 The top **90 px** are the system status bar. The Battery overlay starts at
 `y: ConstantModel.MENU_BAR_Y` and is `DEVICE_HEIGHT - ConstantModel.MENU_BAR_Y`
-(630 px) high. See `/home/nick/ioniq/UI_CONTEXT.md`.
+(630 px) high. See `docs/ui/UI_CONTEXT.md`.
 
 ### 6.2 Tile + overlay
 

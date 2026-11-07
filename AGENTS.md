@@ -109,9 +109,56 @@ repo.
   - Exceptions (no header, never add one): `payload/rootfs/**` (bytes are
     pinned by the known-good hash table), `config/message.txt` (its bytes
     are the payload), `packages/wifi/wifi.txt.sample` (imported content),
-    `LICENSE`, and files under `docs/` (covered by the project-level
-    notice). Third-party/fetched material never gets our header.
+    `LICENSE`, files under `docs/`, and — codified with the enforcement
+    gate — all markdown (the project-level notice covers it, including
+    package README/SPEC), all JSON (no comment syntax), binary/image
+    assets, and `tools/vm/payload/PAYLOAD` (marker bytes, like
+    `config/message.txt`). Third-party/fetched material never gets our
+    header.
 - Package installers follow the docs/06 house rules (manifest, stock-hash
   guards, backups, idempotency, explicit status lines).
 - Docs are numbered `docs/01–14`; UI research lives in `docs/ui/`.
-- Scripts are run with `sh`/`bash`/`python3` (do not rely on +x bits).
+- Scripts are run with `sh`/`bash`/`python3` (do not rely on +x bits) —
+  except the hooks under `scripts/githooks/`, which git itself executes
+  and therefore must stay executable (`scripts/install_hooks.sh` restores
+  the bits).
+
+## Enforcement (gates)
+
+`scripts/policy_check.py` is the single gate for the mechanically
+checkable rules above; `sh scripts/install_hooks.sh` wires it into git
+per clone via `core.hooksPath scripts/githooks`:
+
+- **pre-commit** — `leaks`, `spdx`, `oem`, `refs`, `ignore` over the
+  staged set.
+- **pre-push** — the same checks over `origin/<branch>..HEAD`, then the
+  VM unit-test gate: the `tools/vm` suite must run (with CWD `tools/vm`;
+  half its modules import `harness.*` with no path fixup), failures
+  listed in `scripts/known_test_failures.txt` (reviewed,
+  environment-dependent reds) do not block, **new failures block**, and
+  stale entries print a warning so the list cannot rot.
+
+The checks:
+
+- **`leaks`** — no personal data: absolute host paths, usernames, LAN
+  details, key material. **Deliberate product defaults are not secrets:**
+  the `car`/`electric` SSH credential and the fixed UIDs (`car` = UID 0)
+  are intended defaults — never remove them. QEMU gateway addresses
+  (`10.0.2.x`), loopback, and the `config/paths.env.example` fill-in
+  placeholders are allowed; target-device paths (`/home/root`,
+  `/home/car`) and image-URI internals are fixtures, not leaks.
+- **`spdx`** — the header on every new in-scope file, per the exception
+  list above; `policy_check.py spdx --staged --fix` offers to prepend it.
+- **`oem`** — no OEM-derived file added (path rules plus a sha256 match
+  against the local `input/` tree when it exists). Added QML/image
+  artifacts under `packages/` warn instead of blocking: the pre-existing
+  `packages/battery` stock-QML artifacts are grandfathered pending an
+  un-publish decision.
+- **`refs`** — path-like values inside `tools/vm` scenario/profile JSON
+  must resolve in-tree; dangling `NOTES.md`-style pointers block.
+- **`ignore`** — the ignore rules promised above (including
+  `packages/*/base/`) actually ignore, and nothing tracked is ignored.
+
+Escape hatches: `git commit --no-verify` / `git push --no-verify` skip the
+gates, and `SCOURGE_SKIP_TEST_GATE=1` skips only the test gate. Use them
+consciously — never to silence an unexplained failure.

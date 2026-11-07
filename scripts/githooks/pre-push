@@ -1,0 +1,31 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# SCOURGE pre-push: repo policy gate over the pushed range, then the VM
+# unit-test gate with its known-failures allowlist (AGENTS.md, Enforcement).
+# `git push --no-verify` skips everything; SCOURGE_SKIP_TEST_GATE=1 skips
+# only the test gate. Never use either to silence an unexplained failure.
+
+set -e
+REPO=$(git rev-parse --show-toplevel)
+ZERO=0000000000000000000000000000000000000000
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ "$local_sha" = "$ZERO" ] && continue    # deleting a remote ref
+    if [ "$remote_sha" = "$ZERO" ]; then
+        # First push of this branch: gate the whole tree instead of a range.
+        python3 "$REPO/scripts/policy_check.py" leaks
+        python3 "$REPO/scripts/policy_check.py" spdx
+        python3 "$REPO/scripts/policy_check.py" ignore
+        python3 "$REPO/scripts/policy_check.py" refs
+    else
+        python3 "$REPO/scripts/policy_check.py" all \
+            --range "$remote_sha..$local_sha"
+    fi
+
+    if [ "${SCOURGE_SKIP_TEST_GATE:-0}" = "1" ]; then
+        echo "pre-push: SCOURGE_SKIP_TEST_GATE=1 — skipping the VM test gate"
+        continue
+    fi
+    python3 "$REPO/scripts/policy_check.py" tests
+done
