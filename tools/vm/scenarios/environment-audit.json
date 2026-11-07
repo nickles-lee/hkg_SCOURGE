@@ -1,0 +1,1 @@
+{"name":"environment-audit","description":"Read-only structured inventory of init, mounts, policies, processes and selected devices; not a stock-equivalence verdict.","requires":[],"checks":["environment-audit"],"blockers":{}}

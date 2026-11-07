@@ -1,7 +1,3 @@
-> Mirrored from the VM lab master plan (maintainer VM workspace) per the
-> cross-commit policy in AGENTS.md; it may lag the live plan between
-> syncs. The runbook itself is [`docs/14-vm-lab.md`](14-vm-lab.md).
-
 # Ioniq 5 Gen5W — VM Lab plan (final, decisions applied)
 
 **Date:** 2026-11-07 · **Workspace:** `~/ioniq/vm` (→ dedicated repo) · **Sync target:** this repository (SCOURGE)
@@ -329,3 +325,141 @@ items beyond that.
 - Treating `update-graphics` FAIL as a display problem (it's the known
   QtWayland shutdown hang).
 - Solving `verifyKeyFile`/credential provisioning (unchanged, Mode V research).
+
+---
+
+## 9. Progress log
+
+- **2026-11-07 — P0-1 complete** (`9f2c71f`): `vm-lab` repo initialized with
+  `.gitignore`, SPDX headers (59 code files), `LICENSE`, `PLAN.md`,
+  `NOTES.md`, README/dev-doc source-of-truth updates, local `docs/14-vm-lab.md`,
+  and `sync-to-scourge.sh` with a passing refusal-rule self-test. 100 files /
+  506 KB committed; no images or OEM bytes. Clean clone + managed `boot`
+  scenario → `HARNESS_CHECK boot PASS`, `PASS rc=0`.
+- **2026-11-07 — P0-2 complete**: deterministic `toolsroot/manifest.json`
+  embedded in the image; `harness/tools.py` compares it via read-only
+  `debugfs`. `build_tools.sh` writes and self-checks the manifest and sizes
+  the image from the tree. `launch.py` refuses stale tools for managed
+  scenarios, `doctor` reports `tools_manifest`, and `run-phase4.sh` refuses
+  with rebuild instructions. Legacy `tools.dev.img` detected as
+  `unmanifested`; rebuilt `tools.p0-2.img` is `fresh` and
+  `usb-discovery` PASSes. 126 unit tests OK.
+- **2026-11-07 — P0-3 complete**: one shared builder compiles all seven
+  `guest/*.c` helpers (entropy, applauncher/appmanager/automount/credman,
+  micom, usb-signal, tweaks CAN sim) into `build/helpers/`, `toolsroot/`,
+  `guest/`, and the tweaks payload. `build_tools.sh` byte-compares the five
+  toolsroot helpers against the image; rebuilt helpers are byte-identical
+  (manifest build id unchanged). Scenario sweep with `tools.p0-3.img`:
+  flat boot/usb-discovery/dbus-ready/dmclient-events/environment-audit PASS,
+  updater-launch PASS at `--timeout 600`; split entropy-ready,
+  storage-isolation, vendor-lifecycle, vendor-lifecycle-sigstub,
+  applauncher-sigstub PASS. Known pre-existing issue for P0-11: flat
+  `entropy-ready` fails nonblocking getrandom (legacy image too; split passes).
+- **2026-11-07 — P0-4 complete**: raw artifact channel over a second QEMU
+  serial port (`/dev/ttyS1` → `artifact-serial.bin`), with `--screenshot` on
+  `launch.py`, automatic extraction of `wayland-screenshot.png` into the run
+  dir, sha256 in `result.json`, and `run-phase4.sh` requesting a screenshot by
+  default. The guest trap disables tty `-opost` to keep PNG bytes intact.
+  `phase4.sh` now creates the missing `rw_data/var` target so Weston starts in
+  flat runs. Evidence: phase4/AppUpgrade `PASS`, valid 1920×720 PNG; the image
+  is black because Mode V Qt is offscreen (content is Mode C's job). 132 unit
+  tests pass.
+- **2026-11-07 — P0-5 complete**: `harness/qmp.py` QMP client
+  (`qmp_capabilities` + `screendump format=png`, PNG validation) and
+  `launch.py --qmp-screenshot` with `--display-device none|std|virtio-vga`.
+  Capture runs before QEMU is killed, including on failures. Evidence:
+  managed boot with `std` and with `virtio-vga` produced valid 720×400 PNGs
+  with sha256/dimensions in `result.json`. 136 unit tests pass.
+- **2026-11-07 — P0-6 complete**: `compat/mkinitcpio.conf`,
+  `compat/build-initramfs.sh`, and `compat/spike.py` boot the vendor rootfs
+  with host kernel 7.2.15 over virtio-blk, no gdbstub. Chain:
+  virtio-vga 1280×720 → `/dev/dri/card0` + `/dev/fb0` → Weston 1.10
+  `drm-backend --use-pixman` → `fullscreen-shell` → `weston-simple-shm` →
+  QMP PNG. Evidence: boot 2.85 s, probe bbox `515,235–764,484`, image
+  `docs/screenshots/mode-c-probe.png`. Fidelity delta: fullscreen-shell, not
+  the vendor IVI window manager (IVI surfaces need placement; P1-3).
+- **2026-11-07 — P0-7 complete**: QEMU argv is deterministic:
+  `-no-user-config -nodefaults -name vm-lab -uuid <fixed> -rtc base=utc`;
+  repeated argv is identical, and managed boot + usb-discovery pass under
+  `-nodefaults`. 138 unit tests.
+- **2026-11-07 — P0-8 complete**: `--smp 1|2|4`, `--memory MiB` and `--apic`
+  are recorded per run. Boot matrix in `docs/perf-smp-memory.md`: SMP 1 is
+  fastest, SMP 4 had a 26 s outlier, APIC removal and 8 GiB memory showed no
+  win. Defaults stay `-smp 1`, `-m 4096`, `noapic`; no regressions.
+- **2026-11-07 — P0-9 complete**: `harness/failures.py` writes a
+  `failure/summary.md` plus dmesg/process/mount/storage/Weston/QML/updater/
+  tools/serial logs on FAIL or timeout, while QEMU is still alive;
+  `--no-failure-bundle` opts out. Verified with a real `exit 7` run
+  (`FAIL rc=7`, complete bundle). 142 unit tests.
+- **2026-11-07 — P0-10 complete**: `launch.py doctor --graphics` checks KVM,
+  QEMU >= 8.0, required devices/display backends, `debugfs`, tools
+  contents/manifest, input/update images, free disk, run count, stale
+  `vm-lab` QEMUs, and (graphics mode) host kernel/compat initramfs/modules/
+  spike. Failures print `next_actions`. Fresh tools + graphics → ok; legacy
+  tools → only `tools_manifest` fails with the rebuild command. 144 tests.
+- **2026-11-07 — P0-11 complete**: scenarios support `expected_fail`
+  (bool or storage-scoped) and `known_issue`; runs record
+  `expected_fail`/`known_failure`/`known_issue`; `regress.py` separates
+  `known_failures` from `new_failures`. `update-graphics` is expected-fail
+  (Qt shutdown hang, probe link); flat `entropy-ready` is expected-fail;
+  `updater-launch` carries the timeout-540 note. Real flat entropy run:
+  `FAIL (known)`, summary `ok=true`, no new failures. 147 tests.
+- **2026-11-07 — P1-1 complete**: `launch.py --kernel vendor|compat`
+  (legacy vendor sub-modes still accepted); compat uses pinned-or-host kernel
+  + initramfs, virtio-blk root, `lsm=smack`, no gdbstub; mode/fidelity/kernel
+  paths recorded in `result.json`. Mode-aware bootstrap avoids vendor
+  `modprobe`. Compat PASS: boot, usb-discovery, dbus-ready, environment-audit,
+  storage-isolation; vendor boot/usb-discovery still PASS. 152 tests.
+- **2026-11-07 — P1-2 complete**: `compat/kernel.lock.json` pins the
+  installed kernel version, `vmlinuz`/config hashes, required module hashes
+  and the initramfs recipe; `compat/pin-kernel.sh` records it.
+  `build-initramfs.sh`, `launch.py --kernel compat`, and `doctor --graphics`
+  verify it and refuse mismatches (`--allow-kernel-mismatch` is research-only).
+  `compat/FIDELITY.md` documents deltas vs `4.1.27-abl`. Pinned build + boot
+  PASS; doctor ok. 157 tests.
+- **2026-11-07 — P1-3 complete**: `ui-smoke` is Mode C only and asserts
+  Weston alive, a visible Wayland probe, a real QML `qmlscene` marker, and a
+  non-black 1280×720 QMP frame (`requires_visible_frame`). Evidence:
+  all checks PASS, bbox `515,235–764,484`,
+  `docs/screenshots/mode-c-ui-smoke.png`. QML runs offscreen because the
+  vendor QtWayland stack only has IVI integration; real QML on the compositor
+  is P1-10. 162 tests.
+- **2026-11-07 — P1-4 complete**: compat-only opt-in `--share DIR` mounts a
+  host directory at `/media/host` over 9p (`security_model=none`); setup
+  timing and path are recorded, mount failure stops the run, vendor mode
+  rejects it. Host file readable in-guest; docs warn to use a disposable
+  directory. 166 tests.
+- **2026-11-07 — P1-5/P1-6 complete (protocol level)**: `--display gtk|vnc`
+  plus `--vnc-display`; compat adds virtio tablet/keyboard. `launch.py input`
+  (`--click`/`--key`) injects QMP `input-send-event`. Evidence: VNC :7
+  listened; live VM accepted click 640,360 and `ret`, both ok. A
+  UI-state-changing click still needs the P1-10 real QML/IVI surface; current
+  ui-smoke QML is offscreen. 170 tests.
+- **2026-11-07 — P1-8 complete**: `--label` in results; `list/show/extract/
+  prune/gc` CLI. Prune defaults to dry-run, protects retained overlays and
+  unsafe paths; `--apply` is explicit. Evidence: labeled run listed; dry-run
+  reported 62 candidates with 800 protected; extraction produced a valid PNG.
+  174 tests. The 2.7 GB backlog was deliberately not deleted.
+- **2026-11-07 — P1-7 complete**: `--state DIR` persistent qcow2 overlays
+  with a state lock; `--reset` returns to pristine backing. Drives use
+  writethrough plus guest `sync`; backings unchanged. Evidence: write →
+  reboot read → reset absent; backing size/mtime unchanged. Flat storage
+  only. 178 tests.
+- **2026-11-07 — P1-11 complete**: `harness_sources` hashes guest, probes,
+  toolsroot scripts and compat sources (manifest excluded); a compat result
+  records 73 source hashes. 179 tests.
+- **2026-11-07 — P1-9 complete**: compat-only opt-in `--network` adds
+  user-mode net with `restrict=on`, hostfwd 2222→22 and `virtio-net-pci`;
+  vendor/conformance reject it, default remains `-nic none`. Guest eth0 at
+  10.0.2.15 pinged the controlled gateway 10.0.2.2. Pin includes virtio_net.
+  182 tests.
+- **2026-11-07 — P1-10 complete (QML-error branch)**: `wifi-ui` installs the
+  first-party WiFi payload from `--share` and evaluates patched
+  `WifiPage.qml`; install/QML logs are emitted. Evidence: install PASS and
+  captured errors `HMIEVENTS`/`AppHome_Enum` not installed. This is not a
+  rendered page; visual content needs the AppHomeScreen runtime. 186 tests.
+- **2026-11-07 — P1-12 complete**: `docs/RUNBOOK.md` consolidates both
+  quickstarts, capability matrix, screenshots, daily workflow, troubleshooting
+  and safety; README/DEVELOPMENT/README.local route to it and stale wording is
+  removed. 186 tests unchanged.
+- **Next:** P1-13 (first full SCOURGE sync via the policy-checked script).

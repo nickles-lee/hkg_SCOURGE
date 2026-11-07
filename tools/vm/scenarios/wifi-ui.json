@@ -1,0 +1,1 @@
+{"name":"wifi-ui","description":"Mode C: install the first-party WiFi payload from a host share and evaluate the patched AppHomeScreen WifiPage.qml; captures QML errors, not a page screenshot.","requires":[],"checks":["wifi-install","wifi-qml","wifi-ui"],"blockers":{},"requires_mode":"compat","requires_share":true}

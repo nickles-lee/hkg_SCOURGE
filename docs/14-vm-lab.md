@@ -4,94 +4,128 @@ TARGET: Ioniq 5 Gen5W_L (Linux), firmware 260128 (EU). Boots your own
 decrypted rootfs under QEMU/KVM so apps, installers and patches can be
 exercised dozens of times an hour without touching the vehicle.
 
-**Status: WIP.** The harness already runs on the maintainer bench — it is
-what produces the "VM-validated" notes on the packages (docs/07) — but it is
-not yet packaged inside this repo. Importing it under `tools/vm/`, adding
-screenshot support, and adding a second (compat-kernel) graphics mode are
-tracked in the master plan:
-[`docs/14-vm-lab-plan.md`](14-vm-lab-plan.md). Until the import lands, this
-page is the design record and roadmap.
+**Status: VM-validated substrate, WIP for full stock equivalence.** Mode V
+(vendor kernel) is the policy/security test bench. Mode C (compat kernel) is
+the graphics/UI substrate. Both are packaged in the VM lab source tree; the
+full stock boot, genuine device credentials and a rendered AppHomeScreen page
+remain WIP.
 
 ## Why a VM
 
 - The head unit is an x86-64 PC. The exact vendor kernel (`4.1.27-abl`) and
-  the decrypted glibc 2.25 rootfs boot under KVM on commodity hardware.
-- Iteration: a boot-to-shell run takes well under a minute; the same test
-  on the car is an hour plus physical access.
-- Agent-friendly: a serial console with framed commands, a structured
-  `result.json` per run, and managed scenarios with PASS/FAIL/BLOCKED
-  verdicts.
-- Safety: untrusted firmware code only ever executes inside the guest; no
-  NIC by default; every disk is a disposable qcow2 overlay over read-only
-  backing images, so your staged inputs are never written.
-
-## The one hard limit: the vendor kernel cannot show graphics
-
-Read straight from the shipped kernel config (the IKCONFIG block inside
-`vmlinux`):
-
-- `CONFIG_FB` is not set; `CONFIG_VGA_CONSOLE` is not set
-- `CONFIG_DRM_FBDEV_EMULATION` is not set
-- the only DRM GPU driver is `CONFIG_DRM_I915=y`
-- no bochs/QXL/virtio-gpu/vmwgfx, no virtio, no 9p
-
-QEMU cannot emulate an i915 GPU, and AMD-only hosts have nothing to pass
-through, so the exact vendor kernel is **headless-only in the VM — by
-design, not for lack of work**. This constraint drives the two-mode design
-below.
+  the decrypted glibc 2.25 rootfs boot under KVM.
+- A managed boot takes seconds; the same test on the car takes an hour plus
+  physical access.
+- Every run writes a structured `result.json`, a serial log and (when asked)
+  a screenshot. Scenarios have PASS/FAIL/BLOCKED verdicts and known-issue
+  metadata.
+- Untrusted firmware only executes in the guest. The default is no NIC; every
+  disk is a disposable qcow2 overlay over read-only backing images.
 
 ## Two modes
 
-| | Mode V — vendor fidelity (works today) | Mode C — compat (roadmap) |
+| | Mode V — vendor fidelity | Mode C — compat |
 |---|---|---|
-| Kernel | exact `4.1.27-abl` | pinned modern kernel + initramfs |
+| Kernel | exact `4.1.27-abl` | pinned host kernel (hash lock) + initramfs |
 | Rootfs | your decrypted 260128 rootfs | the same rootfs |
-| Display | none possible (see above); headless Weston | virtio-gpu/bochs → Weston fbdev/DRM |
-| Input | none | virtio tablet/keyboard + QMP injection |
-| Screenshots | vendor `weston-screenshooter` (plan P0-4) | QMP `screendump` (plan P0-5) |
-| Good for | policy ground truth: SMACK, `.sign` gates, update policy, crypto/credential behavior | UI/QML/package behavior, layout, input, human debugging |
+| Boot | vendor bzImage + SDHCI gdbstub patch | virtio-blk, `init=/init`, `lsm=smack`, no gdbstub |
+| Display | headless by kernel config; vendor `weston-screenshooter` artifact | virtio-vga → Weston 1.10 DRM + QMP PNG |
+| Input | none by design | virtio tablet/keyboard + QMP injection |
+| Share/network | no 9p; no NIC | opt-in 9p share; opt-in restricted user net |
+| Good for | policy: SMACK, `.sign` gates, update policy, crypto/credential behavior | QML/UI, packages, layout, interactive debugging |
 
 Division of truth: security and policy claims are only made from Mode V.
-UI findings from Mode C are always labeled "compat kernel, not stock kernel
-fidelity".
+UI findings from Mode C are labeled "compat kernel, not stock kernel
+fidelity". Mode C is never policy evidence.
 
 ## What the lab can establish — and what it cannot
 
-Offline-validated today (Mode V):
+VM-validated (vendor kernel):
 
-- vendor-kernel boot; USB update-tree discovery; texfat/exFAT mounts
-- D-Bus service contracts; the real AppLauncher / ApplicationManager /
-  AppDMClient lifecycle; the updater launch chain
-- package install/restore round-trips against the real QML tree (docs/07)
+- vendor-kernel boot; USB update-tree discovery; ext4/texfat mounts
+- D-Bus service contracts; real AppLauncher/ApplicationManager/AppDMClient
+  lifecycle; updater launch chain
+- package install/restore round-trips against the real QML tree
 - update-engine state machines up to the device-credential gate
+
+VM-validated (compat kernel):
+
+- vendor rootfs boot on a pinned modern kernel; `/dev/fb0` + `/dev/dri/card0`
+- Weston 1.10 DRM/pixman; visible Wayland probe; 1280×720 QMP screenshots
+- QML engine evaluation (`qmlscene`) and WiFi-payload QML-error capture
+- 9p host share, persistent state, VNC display, QMP click/key injection
 
 Car-only (never VM claims):
 
 - RF reality: WiFi/BT association, CarPlay over the air, iPhone behavior
 - micom/CAN timing, audio/radio/GPS, the physical i965 display pipeline
-- the device-credential path (the provisioned key is absent from the
-  rootfs; code cannot substitute for missing provisioned state)
+- the device-credential path (the provisioned key is absent from the rootfs)
 
 ## Building it from your own firmware
 
 Nothing OEM ships in this repo (AGENTS.md). The lab consumes artifacts you
-already staged for the stage-1 build: after `scripts/01_stage_inputs.sh`
-and `scripts/02_decrypt_rootfs.sh` you have the plaintext rootfs, and the
-lab boots it read-only through qcow2 overlays. Concrete build/run steps
-ship with the `tools/vm/` import (plan P1-13); until then, ask in the
-Discord and a maintainer can walk you through the current bench setup.
+already staged for the stage-1 build. After `scripts/01_stage_inputs.sh` and
+`scripts/02_decrypt_rootfs.sh`:
+
+```sh
+# Mode V
+sh build_tools.sh tools.$(date +%Y%m%d).img
+python3 -B launch.py doctor --graphics
+
+# Mode C
+sh compat/pin-kernel.sh
+sh compat/build-initramfs.sh
+python3 -B launch.py doctor --graphics
+```
+
+The tools image embeds a generated manifest; stale images are refused. The
+compat kernel lock pins the installed kernel version, `vmlinuz`/config
+hashes, required module hashes and the mkinitcpio recipe. Kernel bytes are
+never committed.
+
+Quickstarts:
+
+```sh
+# Mode V
+python3 -B launch.py run --profile conformance --scenario boot
+
+# Mode C
+python3 -B launch.py run --kernel compat --profile conformance --scenario boot
+python3 -B launch.py run --kernel compat --profile conformance \
+  --scenario ui-smoke --qmp-screenshot
+```
+
+`tools/vm/RUNBOOK.md` in this repo (mirrored from the VM lab) has the full
+two-mode workflow, capability matrix and troubleshooting.
 
 ## Screenshots before interactivity
 
-Project decision: screenshot capture lands first (plan P0-4/P0-5) — one
-PNG per run, agent-friendly — then interactive GTK/VNC windows for humans
-(plan P1-5/P1-6).
+Mode V captures `wayland-screenshot.png` through a second serial artifact
+channel (vendor `weston-screenshooter`); it proves capture, not visible UI.
+Mode C captures `qmp-screenshot.png` via QMP and can require a non-black
+1280×720 frame (`ui-smoke`). Interactive GTK/VNC windows and QMP input are
+available in Mode C; the vendor kernel stays input-free.
 
-## Roadmap and status labels
+## Known issues
 
-The full prioritized plan, with effort estimates and acceptance criteria,
-is [`docs/14-vm-lab-plan.md`](14-vm-lab-plan.md); it is mirrored back here
-at every milestone checkpoint, so this page stays current as the modes and
-screenshot support land. Everything in this repo keeps its honesty labels:
+- Flat-mode `entropy-ready` fails the nonblocking getrandom check; split
+  storage passes. It is marked expected-fail only for flat storage.
+- `updater-launch` waits up to 240 s for an updater log line; use
+  `--timeout 540` or `600`.
+- `update-graphics` is expected-fail: the Qt shutdown hang is not a display
+  regression (`probes/qt-shutdown.md`).
+- `wifi-ui` currently captures missing AppHomeScreen imports
+  (`HMIEVENTS`, `AppHome_Enum`); rendering the page needs the runtime.
+- Mode C SMACK (`lsm=smack`) approximates but does not reproduce 4.1.27
+  policy semantics.
+
+Every FAIL/timeout writes a failure bundle with dmesg, processes, mounts,
+Weston/QML/updater logs and the serial tail. Run management
+(`list/show/extract/prune/gc`) defaults to dry-run; `--apply` is required to
+delete runs.
+
+## Status labels
+
 `car-validated` · `VM-validated (vendor kernel)` · `VM-validated (compat
-kernel)` · `offline-validated` · `WIP`.
+kernel)` · `offline-validated` · `WIP`. The prioritized plan and acceptance
+criteria live in the VM lab master plan (`docs/14-vm-lab-plan.md`).

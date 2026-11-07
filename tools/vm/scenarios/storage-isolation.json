@@ -1,0 +1,1 @@
+{"name":"storage-isolation","description":"Synthetic split-volume mount isolation, remount persistence and read-only enforcement; not production eMMC equivalence.","requires":[],"requires_storage":"split","checks":["storage-isolation","storage-remount-persistence","storage-readonly"],"blockers":{}}

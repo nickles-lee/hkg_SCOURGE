@@ -1,0 +1,1 @@
+{"name":"dmclient-events","description":"Research AppDMClient receives USB and standby events; no update-completion claim.","requires":["usb","tools"],"checks":["dmclient-usb","dmclient-standby"],"blockers":{"conformance":["Unmodified AppDMClient graphics and manager/credential prerequisites are not validated."]}}

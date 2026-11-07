@@ -1,0 +1,1 @@
+{"name":"boot","description":"Vendor kernel and responsive root shell, not normal vendor boot.","requires":[],"checks":["boot"],"blockers":{}}

@@ -1,0 +1,47 @@
+{
+  "initramfs": {
+    "builder": "compat/build-initramfs.sh",
+    "config": "compat/mkinitcpio.conf",
+    "config_sha256": "1d7dc084a9ad5751d4d313a69d80157a69c5777d53b01c256ab347e667241668",
+    "image": "compat/initramfs-linux.img"
+  },
+  "kernel": {
+    "config": "/proc/config.gz",
+    "config_sha256": "51b2838124ce6c0bc657c44f2d4e9b3c38403d47ddd1f2927c70a4eb096341fc",
+    "package": "linux-omarchy",
+    "version": "7.2.15-1-omarchy",
+    "vmlinuz": "/usr/lib/modules/7.2.15-1-omarchy/vmlinuz",
+    "vmlinuz_sha256": "b4aae0fbbcfe8893671f504b2971373c43350d029d28f1c9d69d8f516fae6756"
+  },
+  "modules": {
+    "9p": {
+      "path": "kernel/fs/9p/9p.ko.zst",
+      "sha256": "2056fe2ea49d0d1e59bd5f2941567be4da6dba64543827bdf3399e6b1f71065f"
+    },
+    "9pnet_virtio": {
+      "path": "kernel/net/9p/9pnet_virtio.ko.zst",
+      "sha256": "2e6bf78925a09af7f284d85c667d93ce2aac2b65065e0a34cbc0c80cda2e2ae6"
+    },
+    "bochs": {
+      "path": "kernel/drivers/gpu/drm/tiny/bochs.ko.zst",
+      "sha256": "3a39ece51a810358b07e215821f307ff807b2cfaa8b44b5ac7baae284d9ec0d8"
+    },
+    "usb_storage": {
+      "path": "kernel/drivers/usb/storage/usb-storage.ko.zst",
+      "sha256": "8ce0acbf533c0ca19dbd310a987c9b3658fd40214c5b9763c0a4496d46b87572"
+    },
+    "virtio_gpu": {
+      "path": "kernel/drivers/gpu/drm/virtio/virtio-gpu.ko.zst",
+      "sha256": "f521ffd4bfdfd29cfd29c403100b25cea3ab06b55bb3f5dcaa575b3d0341bae9"
+    },
+    "virtio_input": {
+      "path": "kernel/drivers/virtio/virtio_input.ko.zst",
+      "sha256": "9ad083127cde9313952087f3097c7e5315f5aa39f86db96f26ca64f3fa89c0cd"
+    },
+    "virtio_net": {
+      "path": "kernel/drivers/net/virtio_net.ko.zst",
+      "sha256": "ab23a8be01d7e15b557a9595531c29827b5ca6fbe9e560658a943431ced9c779"
+    }
+  },
+  "schema": 1
+}

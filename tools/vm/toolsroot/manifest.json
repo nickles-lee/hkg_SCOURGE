@@ -1,0 +1,294 @@
+{
+  "build_id": "3e95092b8b3e6423d0139fc90e4e61d7ff094af155a89ee9d20fe685353db280",
+  "files": {
+    "AppDMClient.nogui": {
+      "sha256": "12a28254427b0de362ef6b2decc038a309a777aaa14d81315d7853077122e160",
+      "size": 2226072
+    },
+    "AppLauncher.sigstub": {
+      "sha256": "d00efd1363dcaef2c3c5b3c5aefc01d0eea99dce84d60647ab036ce65113e2e0",
+      "size": 407720
+    },
+    "AppUpgrade.usb": {
+      "sha256": "5355059b8793f90440bbddafcb11ac884374d6b98b95309ac693a46aa70c2eca",
+      "size": 10803676
+    },
+    "applauncher-stub": {
+      "sha256": "b03ea63cabb4480c2e7ce14ecef5b1f7d2dd936a8d47c8d7656e36744d582d73",
+      "size": 1671648
+    },
+    "appmanager-stub": {
+      "sha256": "b95eb546a07683eec753d943c2ada009a2c76c74ba2d547eb65ef9da0a9f0ab3",
+      "size": 1671576
+    },
+    "automount-stub": {
+      "sha256": "9bc12c96f29b46eebf0457c38ccec4f7018bc750091e677a411a59a5cab4337c",
+      "size": 1672440
+    },
+    "crash.elf": {
+      "sha256": "669bccec01fbab07dd4661356fe5194c6c2b2ad039dee5c84b4913c14d18172a",
+      "size": 856616
+    },
+    "credman-stub": {
+      "sha256": "5e14b592ce1158078441b5b617389f194ef3a3e075e8a1d906c723db91bef375",
+      "size": 1671552
+    },
+    "engine.elf": {
+      "sha256": "464a87646153213ce1f405743a10cff78eb90c203b619f983002358ca74ef0e7",
+      "size": 5066264
+    },
+    "entropy-seed": {
+      "sha256": "1b55a189e181e745e7445a814b447e774ad64466e30b2ad0b6eab533099a2441",
+      "size": 896248
+    },
+    "llvm38/usr/lib/x86_64-linux-gnu/libLLVM-3.8.so.1": {
+      "sha256": "3b4fba7831d879a892a6a8476c474919294363c4dd74d393447223db95a03f45",
+      "size": 41587032
+    },
+    "llvm38/usr/share/doc/libllvm3.8/NEWS.Debian.gz": {
+      "sha256": "e9d5164dd98e870b07f8b0db31f5730822b709c0a4daffb54db9b74961f742a7",
+      "size": 201
+    },
+    "llvm38/usr/share/doc/libllvm3.8/changelog.Debian.gz": {
+      "sha256": "429f6f859b93ac8148cb35538d8f044f68f7b1608d9ed4131c3e3ef67c8af660",
+      "size": 1277
+    },
+    "llvm38/usr/share/doc/libllvm3.8/copyright": {
+      "sha256": "fb06457a5d68bca363a6b4a993c74fd95786676865e070d85fd0c493accd8ff6",
+      "size": 18557
+    },
+    "llvm38/usr/share/lintian/overrides/libllvm3.8": {
+      "sha256": "dea107498302673f9ac45c3afb03a38a885a84046aeb5f5d0e6601e18f73b6dd",
+      "size": 124
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/dri/i915_dri.so": {
+      "sha256": "034a14fa03d47a8627b95b510934e8689dd52131b1280a4ab3713cc1e8a26e53",
+      "size": 6561728
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/dri/i965_dri.so": {
+      "sha256": "034a14fa03d47a8627b95b510934e8689dd52131b1280a4ab3713cc1e8a26e53",
+      "size": 6561728
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/dri/kms_swrast_dri.so": {
+      "sha256": "6b49b08eb03d5fb356aff4856ee734cf0cb3fcb2c0fbfdcebeb712efb7f0bcc9",
+      "size": 9734592
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/dri/nouveau_dri.so": {
+      "sha256": "6b49b08eb03d5fb356aff4856ee734cf0cb3fcb2c0fbfdcebeb712efb7f0bcc9",
+      "size": 9734592
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/dri/nouveau_vieux_dri.so": {
+      "sha256": "034a14fa03d47a8627b95b510934e8689dd52131b1280a4ab3713cc1e8a26e53",
+      "size": 6561728
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/dri/r200_dri.so": {
+      "sha256": "034a14fa03d47a8627b95b510934e8689dd52131b1280a4ab3713cc1e8a26e53",
+      "size": 6561728
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/dri/r300_dri.so": {
+      "sha256": "6b49b08eb03d5fb356aff4856ee734cf0cb3fcb2c0fbfdcebeb712efb7f0bcc9",
+      "size": 9734592
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/dri/r600_dri.so": {
+      "sha256": "6b49b08eb03d5fb356aff4856ee734cf0cb3fcb2c0fbfdcebeb712efb7f0bcc9",
+      "size": 9734592
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/dri/radeon_dri.so": {
+      "sha256": "034a14fa03d47a8627b95b510934e8689dd52131b1280a4ab3713cc1e8a26e53",
+      "size": 6561728
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/dri/radeonsi_dri.so": {
+      "sha256": "6b49b08eb03d5fb356aff4856ee734cf0cb3fcb2c0fbfdcebeb712efb7f0bcc9",
+      "size": 9734592
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/dri/swrast_dri.so": {
+      "sha256": "6b49b08eb03d5fb356aff4856ee734cf0cb3fcb2c0fbfdcebeb712efb7f0bcc9",
+      "size": 9734592
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/dri/virtio_gpu_dri.so": {
+      "sha256": "6b49b08eb03d5fb356aff4856ee734cf0cb3fcb2c0fbfdcebeb712efb7f0bcc9",
+      "size": 9734592
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/dri/vmwgfx_dri.so": {
+      "sha256": "6b49b08eb03d5fb356aff4856ee734cf0cb3fcb2c0fbfdcebeb712efb7f0bcc9",
+      "size": 9734592
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/libgbm.so.1.0.0": {
+      "sha256": "6a0211ef687cee6d4d0e2cc5b972c86835c73dc2bad3fe947a832a6b833502e7",
+      "size": 56536
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/libglapi.so.0.0.0": {
+      "sha256": "38a7ed92b47bf5506888f7cae95bd53dad0bf35a55416c5e825acf68b952612a",
+      "size": 182592
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/libwayland-egl.so.1.0.0": {
+      "sha256": "25d0cae2daf9668d4c6a714d06815f784bacebef65151dbe9c5f6d0c5db971b7",
+      "size": 6088
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/mesa-egl/ld.so.conf": {
+      "sha256": "000c12c585444cb3b236ef896a2b2556539b1006604ad2d13e0acbdbcc179ba0",
+      "size": 35
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/mesa-egl/libEGL.so.1.0.0": {
+      "sha256": "65219063e70ee0e5fe490597e5277f5e4220b63a8c220509022edbe1279135af",
+      "size": 206624
+    },
+    "mesa112/usr/lib/x86_64-linux-gnu/mesa-egl/libGLESv2.so.2.0.0": {
+      "sha256": "68b1159ba060a8fcdaaaf7c81b860d769d6194681337e0f30b2d47b163bf1c7b",
+      "size": 30496
+    },
+    "mesa112/usr/share/bug/libegl1-mesa/control": {
+      "sha256": "929f2f85f8c3c683fc47c0ad160834826587a77a36b027d00e6ad948bae8b21f",
+      "size": 44
+    },
+    "mesa112/usr/share/bug/libegl1-mesa/script": {
+      "sha256": "e53c557758d853d7e7af01ad44c16ddad6287360def8f3f00795c60dce453587",
+      "size": 448
+    },
+    "mesa112/usr/share/bug/libgbm1/control": {
+      "sha256": "929f2f85f8c3c683fc47c0ad160834826587a77a36b027d00e6ad948bae8b21f",
+      "size": 44
+    },
+    "mesa112/usr/share/bug/libgbm1/script": {
+      "sha256": "e53c557758d853d7e7af01ad44c16ddad6287360def8f3f00795c60dce453587",
+      "size": 448
+    },
+    "mesa112/usr/share/bug/libgl1-mesa-dri/control": {
+      "sha256": "929f2f85f8c3c683fc47c0ad160834826587a77a36b027d00e6ad948bae8b21f",
+      "size": 44
+    },
+    "mesa112/usr/share/bug/libgl1-mesa-dri/script": {
+      "sha256": "e53c557758d853d7e7af01ad44c16ddad6287360def8f3f00795c60dce453587",
+      "size": 448
+    },
+    "mesa112/usr/share/bug/libglapi-mesa/control": {
+      "sha256": "929f2f85f8c3c683fc47c0ad160834826587a77a36b027d00e6ad948bae8b21f",
+      "size": 44
+    },
+    "mesa112/usr/share/bug/libglapi-mesa/script": {
+      "sha256": "e53c557758d853d7e7af01ad44c16ddad6287360def8f3f00795c60dce453587",
+      "size": 448
+    },
+    "mesa112/usr/share/bug/libgles2-mesa/control": {
+      "sha256": "929f2f85f8c3c683fc47c0ad160834826587a77a36b027d00e6ad948bae8b21f",
+      "size": 44
+    },
+    "mesa112/usr/share/bug/libgles2-mesa/script": {
+      "sha256": "e53c557758d853d7e7af01ad44c16ddad6287360def8f3f00795c60dce453587",
+      "size": 448
+    },
+    "mesa112/usr/share/bug/libwayland-egl1-mesa/control": {
+      "sha256": "929f2f85f8c3c683fc47c0ad160834826587a77a36b027d00e6ad948bae8b21f",
+      "size": 44
+    },
+    "mesa112/usr/share/bug/libwayland-egl1-mesa/script": {
+      "sha256": "e53c557758d853d7e7af01ad44c16ddad6287360def8f3f00795c60dce453587",
+      "size": 448
+    },
+    "mesa112/usr/share/doc/libegl1-mesa/copyright": {
+      "sha256": "6e4d2a878ce1d5c45fd5ff5d9c86a5b3a5139070497ee645d948f4f8b2f0bdcd",
+      "size": 7273
+    },
+    "mesa112/usr/share/doc/libgbm1/changelog.Debian.gz": {
+      "sha256": "3f684bf28b2fb793f0a50100a8befd849184ae89af8abea1419a4ec53d9f17ef",
+      "size": 1176
+    },
+    "mesa112/usr/share/doc/libgbm1/copyright": {
+      "sha256": "6e4d2a878ce1d5c45fd5ff5d9c86a5b3a5139070497ee645d948f4f8b2f0bdcd",
+      "size": 7273
+    },
+    "mesa112/usr/share/doc/libgl1-mesa-dri/changelog.Debian.gz": {
+      "sha256": "06cf440afdde5688ad6ed75c7ce926dbf1b2376f5f5a31df651d2b95c2bc4a57",
+      "size": 1176
+    },
+    "mesa112/usr/share/doc/libgl1-mesa-dri/copyright": {
+      "sha256": "6e4d2a878ce1d5c45fd5ff5d9c86a5b3a5139070497ee645d948f4f8b2f0bdcd",
+      "size": 7273
+    },
+    "mesa112/usr/share/doc/libglapi-mesa/changelog.Debian.gz": {
+      "sha256": "23f2c0599f8d7171a1a1c54e8757c311422d967360fba29b83c0ea1077c36bfc",
+      "size": 1178
+    },
+    "mesa112/usr/share/doc/libglapi-mesa/copyright": {
+      "sha256": "6e4d2a878ce1d5c45fd5ff5d9c86a5b3a5139070497ee645d948f4f8b2f0bdcd",
+      "size": 7273
+    },
+    "mesa112/usr/share/doc/libgles2-mesa/copyright": {
+      "sha256": "6e4d2a878ce1d5c45fd5ff5d9c86a5b3a5139070497ee645d948f4f8b2f0bdcd",
+      "size": 7273
+    },
+    "mesa112/usr/share/doc/libwayland-egl1-mesa/copyright": {
+      "sha256": "6e4d2a878ce1d5c45fd5ff5d9c86a5b3a5139070497ee645d948f4f8b2f0bdcd",
+      "size": 7273
+    },
+    "mesa112/usr/share/lintian/overrides/libegl1-mesa": {
+      "sha256": "84702cecf9f91f814fd867299f17f8530ef716425624b30bc783e83952f7da53",
+      "size": 42
+    },
+    "mesa112/usr/share/lintian/overrides/libgbm1": {
+      "sha256": "c89ba612bb964a7d62dbc68c0d803e1af63748e6b9244cb058dff3923e498c73",
+      "size": 61
+    },
+    "mesa112/usr/share/lintian/overrides/libglapi-mesa": {
+      "sha256": "66e0c4921dc55d75c8bfd674aa033e7bd915f5c8f5ba1d8cb481342581862fa2",
+      "size": 44
+    },
+    "mesa112/usr/share/lintian/overrides/libgles2-mesa": {
+      "sha256": "66454aaed4f6d3eede117495c4d7b9dfb5490108f6a223fc9844de994a1a1a8f",
+      "size": 46
+    },
+    "mesa112/usr/share/lintian/overrides/libwayland-egl1-mesa": {
+      "sha256": "be38aeca206a7a8e42533f556d2883ea565c0c4de1a7bc98cf5f0e89aa67790d",
+      "size": 50
+    },
+    "phase4.sh": {
+      "sha256": "4d6185a52c96ed31b2464e7628284836e81df77496967db053205d44fdb0bfee",
+      "size": 11157
+    },
+    "phase4.sh.bak-180205": {
+      "sha256": "0b722ff28f2d8a2d12fbe3dede8afd4b19433ffe79ad7598389422410796530b",
+      "size": 7300
+    },
+    "run-au.sh": {
+      "sha256": "51f11f6deb1eddfc945449e2c95b4607d6d256c0f1c90f24ded2fa7f8dfc7f15",
+      "size": 835
+    },
+    "run-cdh.sh": {
+      "sha256": "c875a31d73adb8fcad400f902797239adffe2adf46131e2cc8a4ef799d0b7c24",
+      "size": 652
+    },
+    "run-crash.sh": {
+      "sha256": "b212ff4ed985390f49c3c2711b995c18c030f1ff67a03247ad6e501874d302de",
+      "size": 501
+    },
+    "run-engine-mesa.sh": {
+      "sha256": "761cdd0fe0e1043eeb0fe8566186b4530dab26526959e08fd5a64ef71266377f",
+      "size": 2841
+    },
+    "run-engine-plain.sh": {
+      "sha256": "385a2ca92b8f4f68750f3c0d0de1c09217c79adb7662d881c9d8552990258f23",
+      "size": 995
+    },
+    "run-engine.sh": {
+      "sha256": "90b8adfa0f2f186a5f523aa63971abd13efd5b418948f1a079d172ffdb219417",
+      "size": 1051
+    },
+    "run.sh": {
+      "sha256": "b725448d67b264389f6b3f711b6b77e67572761728a9bd718bb83dd58647751f",
+      "size": 1378
+    },
+    "scenarios.sh": {
+      "sha256": "6cdfcddc43b6b6dd99eb3f2d2d513b681eb500e2725c02321c463d63f290e099",
+      "size": 2669
+    },
+    "update.tar.gz": {
+      "sha256": "df39e305b9de8e92011d1665adf85e418927ea542759c0e648a3169d995dac52",
+      "size": 42117462
+    },
+    "xml.plain": {
+      "sha256": "ec10111d7b3bfcdbf8f5b7f3d45706e8a192e50e5dca808d68ba0c65a47cac8d",
+      "size": 1250
+    }
+  },
+  "schema": 1
+}

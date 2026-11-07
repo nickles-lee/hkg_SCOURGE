@@ -1,0 +1,19 @@
+{
+  "name": "research",
+  "description": "Instrumented component research; not production-equivalence evidence.",
+  "allowed_workarounds": {
+    "dmclient-gui-patch": true,
+    "getkeyfile-success-patch": true,
+    "decrypt-pass-through": true,
+    "plaintext-update": true,
+    "applauncher-sigstub": true
+  },
+  "limitations": [
+    "Direct kernel boot bypasses the OEM bootloader and root of trust.",
+    "SDHCI PCI compatibility entry is changed in guest memory.",
+    "Research bash init replaces vendor systemd/esinit.",
+    "Reconstructed rootfs does not reproduce production partitioning or SMACK initialization.",
+    "No physical GPU, micom, keystore, CAN, audio or radio hardware.",
+    "No NIC, host filesystem passthrough or vehicle connection."
+  ]
+}

@@ -1,0 +1,1 @@
+{"name":"ui-smoke","description":"Mode C Weston + visible Wayland probe + real Qt Quick file; graphics substrate only, not stock UI fidelity.","requires":[],"checks":["weston-alive","wayland-probe","qml-ready","ui-smoke"],"blockers":{},"requires_mode":"compat","requires_visible_frame":true}

@@ -1,0 +1,1 @@
+{"name":"dbus-ready","description":"System and session bus readiness; not vendor service ordering.","requires":["tools"],"checks":["dbus-system","dbus-session"],"blockers":{}}
