@@ -539,6 +539,12 @@ items beyond that.
   restores from a local backup, re-verifies and rediscovers the media. Real
   run PASS with five markers; the AppUpgrade engine's repeat path is out of
   scope (provisioned credentials). 216 tests.
+- **2026-11-07 — P2-8 deeper (D-Bus/ordering)**: `vendor-systemd-dbus`
+  prepares the missing-initramfs runtime layout in the research shell, execs
+  systemd as PID 1, and requires the D-Bus socket/service before Multi-User
+  (socket/service startup in order, not on-demand activation).
+  Real run PASS with ordered evidence; only `System service for micommanager`
+  failed (vehicle hardware absent). Lab fixture, not stock/esinit. 223 tests.
 - **Remaining:** P2-3 wcap (client absent), P2-7 AppUpgrade-engine repeat
-  behaviour (credential-gated), P2-8 deeper unit ordering/D-Bus activation,
-  P2-9 broader vehicle-state model. P3 deferred.
+  behaviour (credential-gated), P2-8 deeper stock/esinit fidelity (needs the
+  vendor boot chain), P2-9 broader vehicle-state model. P3 deferred.

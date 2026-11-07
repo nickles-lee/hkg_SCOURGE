@@ -311,9 +311,39 @@ python3 -B launch.py run --profile conformance --scenario vendor-systemd \
 
 Boots the vendor rootfs with real systemd instead of the research `/init` and
 passes when `Reached target Multi-User System` appears. `result.json` records
-`failed_unit_descriptions` observed in that boot. This is a **partial boot**: SMACK setup
-units fail without the vendor initramfs, and nothing here is stock
-equivalence or an update-conformance claim.
+`failed_unit_descriptions` observed in that boot. This is a **partial boot**:
+SMACK setup units fail without the vendor initramfs, and nothing here is stock
+equivalence or an update-conformance claim. The deeper
+`vendor-systemd-dbus` scenario below prepares the missing runtime layout and
+exercises the D-Bus socket/service path.
+
+## Vendor systemd D-Bus service and ordering (Mode V)
+
+```sh
+python3 -B launch.py run --profile conformance --scenario vendor-systemd-dbus \
+  --timeout 120
+```
+
+Two-phase: the research shell first creates the runtime layout that the
+missing vendor initramfs normally provides (`/var` skeleton, `/var/run ->
+/run`, `/tmp/passwd` from `passwd.legacy` with the `messagebus` user, and a
+tmpfiles rule for `/run/dbus`), then `exec`s real systemd as PID 1. The
+scenario passes only
+when `result.json` records all of:
+
+- the handoff shell was PID 1 (`research-shell-pid1`)
+- systemd entered system mode (`systemd-pid1`)
+- the D-Bus socket and service started (`dbus-socket`, `dbus-service`)
+- D-Bus started before Multi-User (`dbus-before-multi-user`)
+- `Reached target Multi-User System` (`multi-user-target`)
+
+It also records `started_units`, `reached_targets` and
+`failed_unit_descriptions`. A real run starts D-Bus and reaches Multi-User
+with one remaining failure, `System service for micommanager`, which needs
+the vehicle/micom hardware. This proves socket/service startup in order,
+not on-demand client-triggered activation. The preparation is a **lab
+fixture**, not the vendor initramfs and not esinit; this is not stock boot
+equivalence.
 
 ## Troubleshooting
 

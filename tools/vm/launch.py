@@ -60,7 +60,7 @@ from harness.state import StateBusy, create_state_overlays
 from harness.visual import baseline as visual_baseline
 from harness.visual import compare as visual_compare
 from harness.visual import list_baselines
-from harness.results import evaluate, phase_summary
+from harness.results import evaluate, evaluate_systemd_transition, phase_summary
 from harness.storage import VOLUMES, cleanup_storage, create_storage, mount_script, parse_sizes
 from harness.tools import check_tools
 
@@ -768,8 +768,16 @@ def run(cmd: str | None, interactive: bool, timeout: float,
             for name, item in storage['volumes'].items():
                 inputs[item['overlay_name']] = Path(item['backing'])
         boot_only = bool(scenario and scenario.get('init_override'))
-        if boot_only and collect_audit:
-            raise ValueError('--audit is not available for boot-only scenarios')
+        transition = dict(scenario.get('systemd_transition') or {}) if scenario else None
+        if boot_only and transition:
+            raise ValueError('scenario cannot be both boot-only and systemd-transition')
+        if (boot_only or transition) and collect_audit:
+            raise ValueError('--audit is not available for boot-only or '
+                             'systemd-transition scenarios')
+        if transition and (screenshot or qmp_screenshot):
+            raise ValueError('screenshots are not available for systemd-transition scenarios')
+        if transition and interactive:
+            raise ValueError('--interactive is not available for systemd-transition scenarios')
         if scenario and not boot_only:
             cmd = scenario_command(scenario, profile, graphics, storage, kernel_target)
             result['cmd'] = cmd
@@ -909,6 +917,63 @@ def run(cmd: str | None, interactive: bool, timeout: float,
             result['share'].update({'setup_rc': share_rc, 'seconds': share_seconds})
             if share_rc != 0:
                 raise RuntimeError(f'host share mount failed; see {run_dir / "share-setup.log"}')
+        if transition:
+            if cmd is None:
+                raise RuntimeError('systemd-transition scenario has no preparation command')
+            # Mark the run before the handoff so a later exception never tries
+            # shell-dependent cleanup against a shell-less systemd guest.
+            result['systemd_transition'] = True
+            try:
+                settle_seconds = float(transition.get('settle_seconds', 2))
+            except (TypeError, ValueError) as exc:
+                raise ValueError('invalid systemd transition settle_seconds') from exc
+            transition_start = time.monotonic()
+            _, prep_output, prep_rc, prep_seconds = execute_guest(
+                ser, cmd, remaining())
+            (run_dir / 'systemd-prep.log').write_text(prep_output + '\n')
+            text = ''
+            if prep_rc == 0 and 'P28_PREP_OK' in prep_output:
+                markers = transition.get('required_markers') or {}
+                final_marker = transition.get('final_marker') or (
+                    list(markers)[-1] if markers else None)
+                with ser.cond:
+                    offset = len(ser.log)
+                raw_exec = str(transition.get('exec', '/lib/systemd/systemd'))
+                # The echo is a synchronization point and proves the handoff
+                # came from PID 1, not a command-framing child shell.
+                ser.send(f'echo P28_SHELL pid=$$ ppid=$PPID; exec {raw_exec}\n')
+                try:
+                    if final_marker:
+                        ser.read_until(final_marker.encode(), remaining())
+                    # Settle so post-target unit failures are recorded too.
+                    time.sleep(settle_seconds)
+                except (TimeoutError, EOFError):
+                    pass
+                text = bytes(ser.log[offset:]).decode(errors='replace')
+            transition_seconds = round(time.monotonic() - transition_start, 3)
+            evaluated = evaluate_systemd_transition(
+                scenario, prep_rc, prep_output, text)
+            result.update(
+                checks=evaluated['checks'],
+                failures=evaluated['failures'],
+                markers=evaluated['markers'],
+                ordering=evaluated['ordering'],
+                exec_shell=evaluated['exec_shell'],
+                started_units=evaluated['started_units'],
+                reached_targets=evaluated['reached_targets'],
+                failed_unit_descriptions=evaluated['failed_unit_descriptions'],
+                exec_command=str(transition.get('exec', '/lib/systemd/systemd')),
+                prep_seconds=prep_seconds,
+                transition_seconds=transition_seconds,
+                scenario_seconds=transition_seconds,
+                guest_rc=None,
+                verdict=evaluated['verdict'],
+                rc=evaluated['rc'],
+            )
+            missing = sum(1 for present in evaluated['markers'].values() if not present)
+            print(f"[vm] systemd transition {evaluated['verdict']}: "
+                  f"{missing} marker(s) missing", flush=True)
+            return result['rc']
         if usb_removal is not None:
             marker = str(usb_removal.get('marker', 'USB_REMOVAL_READY_')).encode()
             device_id = str(usb_removal.get('device_id', 'usbdev'))
@@ -1075,6 +1140,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
                     'visible frame required: QMP screenshot missing (use --qmp-screenshot)')
         if (failure_bundle and result.get('verdict') == 'FAIL'
                 and not result.get('boot_only')
+                and not result.get('systemd_transition')
                 and ser is not None and proc is not None and proc.poll() is None):
             try:
                 from harness.failures import collect_failure_bundle
@@ -1084,6 +1150,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
                     'error': f'{type(exc).__name__}: {exc}'
                 }
         if (state is not None and not result.get('boot_only')
+                and not result.get('systemd_transition')
                 and ser is not None and proc is not None and proc.poll() is None):
             try:
                 _, _, flush_rc, flush_seconds = execute_guest(ser, 'sync', 10)

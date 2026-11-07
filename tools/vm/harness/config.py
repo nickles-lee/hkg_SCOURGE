@@ -18,7 +18,7 @@ SCENARIO_NAMES = ('boot', 'usb-discovery', 'dbus-ready', 'dmclient-events',
                   'can-smoke', 'recovery-reboot', 'recovery-no-space',
                   'recovery-corrupt-media', 'recovery-usb-removal',
                   'recovery-power-loss', 'vendor-systemd',
-                  'recovery-repeat-update')
+                  'vendor-systemd-dbus', 'recovery-repeat-update')
 
 
 def load_profile(name: str) -> dict:
@@ -86,6 +86,8 @@ if ! grep -qi 'no space' /tmp/no-space.log; then
 fi
 echo 'HARNESS_CHECK recovery-no-space PASS'
 '''
+    if name == 'vendor-systemd-dbus':
+        return (VM / 'probes' / 'vendor-systemd-dbus.sh').read_text()
     if name == 'recovery-corrupt-media':
         return (VM / 'probes' / 'recovery-corrupt-media.sh').read_text()
     if name == 'recovery-repeat-update':

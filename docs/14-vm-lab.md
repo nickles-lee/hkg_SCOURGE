@@ -61,6 +61,10 @@ VM-validated (vendor kernel):
   AppUpgrade engine's credential-gated repeat path
 - vendor systemd partial boot (`vendor-systemd`): real systemd reaches
   Multi-User; SMACK units fail, consistent with the missing vendor initramfs (documented)
+- vendor systemd D-Bus service/ordering (`vendor-systemd-dbus`): the research shell
+  prepares the missing runtime layout and hands PID 1 to systemd; the D-Bus
+  socket/service start before Multi-User, with micommanager still failing
+  without vehicle hardware (lab fixture, not stock/esinit)
 - synthetic micom CAN interface smoke (`can-smoke`): READY/CALL/ACK for
   fixed and bulk calls; contract only, not real CAN timing
 
