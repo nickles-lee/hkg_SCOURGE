@@ -81,6 +81,12 @@ static const char *GAMMA_TABLE[10] = {
     "128:112:96",
 };
 
+/* Deep-red night mode: front display brightness and cluster CAN level used
+ * while deep_red is on.  The cluster level field is 4 bits; the vendor UI
+ * only offers 1-9, so 9 is the deepest documented setting. */
+#define DEEP_RED_GAMMA "128:32:16"
+#define DEEP_RED_LEVEL 9
+
 typedef struct {
     int cluster_fix;
     int infotainment_fix;
@@ -88,6 +94,7 @@ typedef struct {
     int main_crtc;
     int warmth_override;       /* 0 = follow vehicle */
     int force_filter_on;
+    int deep_red;              /* 1 = deep-red night mode (front + cluster L9) */
     int projection_always;
     int projection_app_id;     /* 0 = learn */
     int poll_ms;
@@ -564,6 +571,12 @@ static int night_mode_on(void)
  */
 static void effective_warmth(char *out, size_t size)
 {
+    if (cfg.deep_red) {
+        /* Deep-red night mode overrides the vehicle gamma on the front
+         * display; callers only apply it while night mode is effective. */
+        snprintf(out, size, "%s", DEEP_RED_GAMMA);
+        return;
+    }
     if (valid_gamma(rt.brightness) && !is_neutral_gamma(rt.brightness))
         snprintf(out, size, "%s", rt.brightness);
     else if (valid_gamma(rt.gamma) && !is_neutral_gamma(rt.gamma))
@@ -590,6 +603,7 @@ static void load_config(void)
     cfg.main_crtc = 1;
     cfg.warmth_override = 0;
     cfg.force_filter_on = 0;
+    cfg.deep_red = 0;
     cfg.projection_always = 0;
     cfg.projection_app_id = 0;
     cfg.poll_ms = 1000;
@@ -642,6 +656,8 @@ static void load_config(void)
             cfg.warmth_override = atoi(v);
         else if (!strcmp(k, "force_filter_on"))
             cfg.force_filter_on = parse_bool(v) == 1;
+        else if (!strcmp(k, "deep_red"))
+            cfg.deep_red = parse_bool(v) == 1;
         else if (!strcmp(k, "projection_always"))
             cfg.projection_always = parse_bool(v) == 1;
         else if (!strcmp(k, "projection_app_id"))
@@ -705,6 +721,7 @@ static void save_config(void)
              "main_crtc=%d\n"
              "warmth_override=%d\n"
              "force_filter_on=%d\n"
+             "deep_red=%d\n"
              "projection_always=%d\n"
              "projection_app_id=%d\n"
              "poll_ms=%d\n"
@@ -724,7 +741,8 @@ static void save_config(void)
              "dbus_send_path=%s\n"
              "xdg_runtime_dir=%s\n",
              cfg.cluster_fix, cfg.infotainment_fix, cfg.cluster_crtc, cfg.main_crtc,
-             cfg.warmth_override, cfg.force_filter_on, cfg.projection_always,
+             cfg.warmth_override, cfg.force_filter_on, cfg.deep_red,
+             cfg.projection_always,
              cfg.projection_app_id, cfg.poll_ms, cfg.disclaimer_auto,
              cfg.disclaimer_timeout_ms, cfg.auto_dst, cfg.dst_zone, cfg.dst_check_ms,
              cfg.ota_block, cfg.wrandr_path, cfg.persist_helper, cfg.tzdata_dir,
@@ -1718,10 +1736,18 @@ static void set_blu_forced_marker(int on)
  * writing the same fixed CAN signals the vendor uses.  When the force ends
  * and the vendor filter is still off, restore the vendor state once.
  */
+/* Cluster CAN level to assert while forcing: vendor max (9) in deep-red
+ * night mode, otherwise the vehicle's own warmth level. */
+static int effective_level(void)
+{
+    return cfg.deep_red ? DEEP_RED_LEVEL : rt.warmth_level;
+}
+
 static void check_cluster_blu(time_t now)
 {
     static int initialized;
     int want_forced = cfg.cluster_fix && rt.projection_active && !rt.filter_on;
+    int level = effective_level();
 
     if (!initialized) {
         /* A previous daemon run may have left the cluster forced on. */
@@ -1734,23 +1760,23 @@ static void check_cluster_blu(time_t now)
 
     if (want_forced) {
         int need = (rt.blu_status_sent != BLU_STATUS_ON) ||
-                   (rt.blu_level_sent != rt.warmth_level);
+                   (rt.blu_level_sent != level);
         if (!need && rt.blu_last_send &&
             now - rt.blu_last_send >= BLU_KEEPALIVE_S)
             need = 1;   /* keepalive: the vendor may re-assert its own state */
         if (need) {
             int ok = send_blu_status(1);
-            if (rt.warmth_level >= 1 && rt.warmth_level <= 9)
-                ok |= send_blu_level(rt.warmth_level);
+            if (level >= 1 && level <= 9)
+                ok |= send_blu_level(level);
             if (ok == 0) {
                 rt.blu_status_sent = BLU_STATUS_ON;
-                rt.blu_level_sent = rt.warmth_level;
+                rt.blu_level_sent = level;
                 rt.blu_last_send = now;
                 rt.cluster_applied = 1;
                 rt.blu_forced = 1;
                 set_blu_forced_marker(1);
                 log_msg("cluster BLU: forced on via CAN 0x063F (level %d)",
-                        rt.warmth_level);
+                        level);
             } else {
                 set_error("micom blue-light send failed");
             }
@@ -2079,6 +2105,7 @@ static void build_status(char *out, size_t size)
              "{\"ok\":true,"
              "\"cluster_fix\":%d,"
              "\"infotainment_fix\":%d,"
+             "\"deep_red\":%d,"
              "\"filter_active\":%d,"
              "\"warmth_level\":%d,"
              "\"gamma\":\"%s\","
@@ -2117,6 +2144,7 @@ static void build_status(char *out, size_t size)
              "\"last_error\":\"%s\"}\n",
              cfg.cluster_fix ? 1 : 0,
              cfg.infotainment_fix ? 1 : 0,
+             cfg.deep_red ? 1 : 0,
              rt.filter_on ? 1 : 0,
              rt.warmth_level,
              valid_gamma(rt.gamma) ? rt.gamma : "128:128:128",
@@ -2380,6 +2408,8 @@ static int apply_config_key(const char *k, const char *v)
         cfg.warmth_override = atoi(v);
     else if (!strcmp(k, "force_filter_on"))
         cfg.force_filter_on = parse_bool(v) == 1;
+    else if (!strcmp(k, "deep_red"))
+        cfg.deep_red = parse_bool(v) == 1;
     else if (!strcmp(k, "disclaimer_auto"))
         cfg.disclaimer_auto = parse_bool(v) == 1;
     else if (!strcmp(k, "disclaimer_timeout_ms"))
@@ -2445,7 +2475,7 @@ static void handle_http(int fd)
     } else if (!strcmp(decoded, "/set") && !strcmp(method, "POST")) {
         static const char *keys[] = {
             "cluster_fix", "infotainment_fix", "cluster_crtc", "main_crtc",
-            "warmth_override", "force_filter_on", "disclaimer_auto",
+            "warmth_override", "force_filter_on", "deep_red", "disclaimer_auto",
             "disclaimer_timeout_ms", "auto_dst", "dst_zone", "dst_check_ms",
             "ota_block", NULL
         };
@@ -2478,6 +2508,7 @@ static void handle_http(int fd)
     } else if (!strcmp(decoded, "/restore") && !strcmp(method, "POST")) {
         cfg.cluster_fix = 0;
         cfg.infotainment_fix = 0;
+        cfg.deep_red = 0;
         save_config();
         restore_main();
         if (rt.cluster_applied)

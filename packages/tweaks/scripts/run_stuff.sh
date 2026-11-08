@@ -308,6 +308,7 @@ cluster_crtc=2
 main_crtc=1
 warmth_override=0
 force_filter_on=0
+deep_red=0
 projection_always=0
 projection_app_id=0
 poll_ms=1000

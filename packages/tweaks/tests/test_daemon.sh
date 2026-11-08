@@ -216,6 +216,46 @@ grep -q -- '--crtc=1 --brightness=255:0:0' "$TMP/wrandr.log"
 last=$(grep -- '--crtc=1' "$TMP/wrandr.log" | tail -1)
 test "$last" = "--crtc=1 --brightness=128:128:128"
 
+# ---- deep red night mode ---------------------------------------------
+# Projection active + filter off + deep_red=1: cluster CAN level must be 9
+# (vendor max) and the front display gets the fixed deep-red brightness.
+mkdir -p "$TMP/rw4"
+cat > "$TMP/rw4/config.conf" <<EOF
+cluster_fix=1
+infotainment_fix=1
+cluster_crtc=2
+main_crtc=1
+deep_red=1
+poll_ms=1000
+wrandr_path=$TMP/fake-wrandr
+persist_helper=$TMP/fake-persist-night
+tzdata_dir=/usr/share/zoneinfo
+tzdata_version_file=$TMP/rw4/tzdata_version
+offline_status_path=$TMP/offline-dr
+dbus_send_path=$TMP/fake-dbus
+EOF
+echo 2026f > "$TMP/rw4/tzdata_version"
+echo 1 > "$TMP/rw4/projection_state"
+: > "$TMP/wrandr.log"
+: > "$TMP/dbus.log"
+out=$("$BIN" --rw-dir "$TMP/rw4" --once --no-dbus)
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["deep_red"] == 1, d; assert d["blu_forced"] == 1, d; assert d["blu_level_sent"] == 9, d; assert d["night_forced"] == 1, d'
+grep -q -- 'array:byte:0x06,0x3f int32:12 int32:4 int32:9' "$TMP/dbus.log"
+grep -q -- '--crtc=1 --brightness=128:32:16' "$TMP/wrandr.log"
+# toggle off: cluster level returns to the vehicle warmth (5), front display
+# returns to the vehicle brightness
+echo 0 > "$TMP/rw4/projection_state"
+"$BIN" --rw-dir "$TMP/rw4" --set deep_red=0 >/dev/null
+echo 1 > "$TMP/rw4/projection_state"
+: > "$TMP/wrandr.log"
+: > "$TMP/dbus.log"
+out=$("$BIN" --rw-dir "$TMP/rw4" --once --no-dbus)
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["deep_red"] == 0, d; assert d["blu_level_sent"] == 5, d'
+grep -q -- 'array:byte:0x06,0x3f int32:12 int32:4 int32:5' "$TMP/dbus.log"
+grep -q -- '--crtc=1 --brightness=128:116:104' "$TMP/wrandr.log"
+"$BIN" --rw-dir "$TMP/rw4" --set deep_red=1 >/dev/null   # leave it on for later blocks
+echo 0 > "$TMP/rw4/projection_state"
+
 # ---- new controls: disclaimer, auto-DST, OTA block ---------------------
 mkdir -p "$TMP/rw2" "$TMP/update2"
 cat > "$TMP/rw2/persist" <<EOF

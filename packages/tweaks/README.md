@@ -9,6 +9,11 @@ A home-screen Tweaks app plus a small daemon for the Ioniq 5 Gen5W.
   blue-light setting off when CarPlay/Android Auto takes over.
 - **Infotainment Night Mode Fix** — applies the same Hyundai warmth to the
   CarPlay / Android Auto screen.
+- **Deep red night mode** (optional toggle, off by default) — while night
+  mode is effective, the front/projection display gets a fixed deep red
+  (`128:32:16`) via the wrandr brightness channel and the instrument cluster
+  is driven to blue-light level 9 (the vendor maximum) through the same
+  CAN 0x063F signal the stock setting uses.
 
 Both follow the vehicle's existing **Setup > Display > Blue Light Filter**
 setting and use Hyundai's own gamma table. There is no new warmth slider.

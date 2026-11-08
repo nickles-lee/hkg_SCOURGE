@@ -10,6 +10,7 @@
   - vendor persistence read through `tweaks_persist`
   - Hyundai gamma table
   - cluster and infotainment fixes
+  - deep red night mode toggle (front 128:32:16, cluster CAN level 9)
   - `dbus-monitor` projection detection with manual override
 - `wrandr` wrapper:
   - intercepts `--crtc=1 --gamma=128:128:128`

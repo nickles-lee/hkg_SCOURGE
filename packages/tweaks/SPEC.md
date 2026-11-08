@@ -100,7 +100,7 @@ Brightness is kept at `128:128:128`.
   - `front_drawing_application`
 - `status.json` exposes `mon_system`, `mon_session`, `sig_carplay`,
   `sig_android`, `sig_front` and `sig_bus` so a test drive proves which bus
-  delivered the signals.
+  delivered the signals, plus `deep_red` for the deep-red night mode toggle.
 - The CarPlay and Android Auto app IDs are learned separately, each from the
   `front_drawing_application` value at the moment its play-enable flag turns
   on (0→1). A later front-app signal never overwrites the learned ID, so
@@ -159,6 +159,7 @@ Brightness is kept at `128:128:128`.
 | GET | `/logs` | log tail |
 | POST | `/set?cluster_fix=0\|1` | cluster toggle |
 | POST | `/set?infotainment_fix=0\|1` | projection toggle |
+| POST | `/set?deep_red=0\|1` | deep red night mode (front 128:32:16, cluster level 9) |
 | POST | `/set?disclaimer_auto=0\|1` | disclaimer auto-accept |
 | POST | `/set?disclaimer_timeout_ms=1000..10000` | auto-accept delay |
 | POST | `/set?auto_dst=0\|1` | automatic DST |

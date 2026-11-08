@@ -197,6 +197,15 @@ Found on the car (2026-11-08) and fixed:
    the expiry path no longer clears it, so the next tick restores neutral
    (regression test in `test_daemon.sh`).
 
+Deep red night mode (added 2026-11-08): `deep_red=1` makes `effective_warmth()`
+return a fixed `128:32:16` for the front/projection display (applied per tick
+and via the wrapper's `cluster_gamma`), and `effective_level()` return 9 —
+the vendor maximum — for the cluster CAN 0x063F level while forcing. The
+vendor's exact cluster protocol was re-verified in the ApplicationManager
+disassembly: `SetCANFixedMicomRecv(ay={0x06,0x3f}, 26, 2, on+1)` for status
+and `(ay={0x06,0x3f}, 12, 4, level)` for level, system bus, dest
+`com.lge.car.micom`, path `/Can`, interface `com.lge.car.micom.can`.
+
 VM-only artifacts (not daemon bugs): the guest boots without loopback (the
 status server correctly fail-fasts; the test raises `lo` with the vendor
 busybox), `/etc/passwd` is a symlink to `/tmp/passwd`, and `/var` is a symlink
