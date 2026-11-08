@@ -69,8 +69,9 @@ STOP  0x0C7:  00 C7 08 00 00 00 00 00 00 00 00   x3
 CLUSTER 0x4E8: 04 E8 08 <tenths|unit> 00 00 00 <dist lo> <dist hi> <flag> 00  (100 ms)
        0x4CC: 04 CC 08 02 00 00 00 00 00 00 00                        (with every 0x4E8)
 
-DOOR  0x4A2:  04 A2 08 FF FF FF DF FF FF FF FF   (open)
-              04 A2 08 FF FF FF EF FF FF FF FF   (close)
+DOOR  0x4A2:  04 A2 08 FF FF FF FF FF FF FF FF   (open, all-FF)
+              04 A2 08 FF FF FF DF FF FF FF FF   (open, commit)
+      0x4C5:  04 C5 08 00 00 00 00 00 00 00 00   (close — distinct ID)
 ```
 
 D-Bus call:
@@ -93,7 +94,7 @@ but the QML uses the factory models instead:
 
 | ID | Use | Decode | QML source |
 |---|---|---|---|
-| `0x036` | gear | `byte4 & 0x0F`: 0 P, 5 D, 6 N, 7 R | `AppNModeModel.gearPosRightTxtImg` |
+| `0x036` | gear | raw frame kept; `gear_b3` = `byte3 & 3`, `gear_b4` = `byte4 & 0x0F` — the two factory binaries disagree on the byte (AppHomeScreen reads byte3, TmsRemoteApp byte4), so both are reported and the on-car sniff settles it | `AppNModeModel.gearPosRightTxtImg` |
 | `0x038` | READY | `(byte0 & 0x0F) == 0x04` | `AppPHEVModel.vcuEvReady` |
 | `0x152` | battery temp | byte0/1 signed °C | daemon `0x2FC` |
 | `0x2AD` | precondition state | `byte1 & 0x1F`: 00 off, 01 idle, 05 preparing, 15 active | `AppPHEVModel.heatBatteryPercent` |
@@ -194,6 +195,12 @@ A stop completes as soon as the burst is done and the BMS reports off
 itself is the confirmation. Every distinct `0x2AD` value is logged
 (`battery_daemon: bms 0x..`) for diagnosis.
 
+Door frames are byte-identical to the decompiled factory TmsRemoteApp
+(`EVRemoteChargeDoorOpen/Close`): open = all-FF `0x4A2` then `0x4A2` with
+`DF` in data[3]; close = `0x4C5` all-zero. The factory applies no Park/cable
+gate in the send path (only a remote-service-state whitelist); our Park/cable
+gates are stricter than stock and stay.
+
 The QML passes `?park=1` when `AppNModeModel` says the car is in Park. The
 daemon still vetoes if its own `0x036` frame says otherwise. The command is
 skipped when the door is already in the requested state; a 500 ms cooldown
@@ -223,7 +230,8 @@ POST /chargedoor/toggle[?park=1]
 `eta_s`, `message`, `park`, `park_known`, `gear`, `cable`, `cable_known`,
 `charging`, `door_state`, `door_state_name`, `door_known`, `door_source`,
 `door_warn`, `door_opt`, `door_busy`, `door_allowed`, `door_block_reason`,
-`door_message`, `home_seq`, `home_source`, `last_app_key`, `home_monitor`,
+`door_message`, `batt_cond`, `batt_cond_known`, `gear_raw`, `gear_b3`,
+`gear_b4`, `home_seq`, `home_source`, `last_app_key`, `home_monitor`,
 `ver`, `send_ok`, `send_fail`, `last_send`.
 
 The daemon also mirrors the JSON to `/rw_data/battery/status.json` every second.
@@ -280,7 +288,7 @@ unit exposes.
 
 The top **90 px** are the system status bar. The Battery overlay starts at
 `y: ConstantModel.MENU_BAR_Y` and is `DEVICE_HEIGHT - ConstantModel.MENU_BAR_Y`
-(630 px) high. See `docs/ui/UI_CONTEXT.md`.
+(630 px) high. See `docs/ui/UI_CONTEXT.md` in this repo.
 
 ### 6.2 Tile + overlay
 
@@ -367,7 +375,7 @@ Environment overrides used by the offline test:
 
 | Test | Result |
 |---|---|
-| `tests/test_daemon.py` on `vcan0` | pass (0x2FC temp, micom 0x0C7 at 40 ms, 0x4E8/0x4CC cluster display, assume-active, cleanup stop burst, door gates, optimistic feedback, door send-fail not masked by dash frames, BMS 0x00 stop exit, cluster display without preheat, unknown-cable door, session-bus Home/Star monitor, sniff) |
+| `tests/test_daemon.py` on `vcan0` | pass (0x2FC temp, micom 0x0C7 at 40 ms, 0x4E8/0x4CC cluster display, assume-active, cleanup stop burst, factory door frames 0x4A2/0x4C5, door gates, optimistic feedback, door send-fail not masked by dash frames, BMS 0x00 stop exit, cluster display without preheat, unknown-cable door, 0x25D batt_cond, 0x036 raw gear, session-bus Home/Star monitor, sniff) |
 | `tests/test_installer.sh` | pass (install, reinstall, restore, Hello, restore-after-Hello) |
 | `qmllint` (vendor Qt 5.4, 260128 VM) | pass for all five QML files |
 | daemon `--help` on vendor 4.1.27 kernel | pass |

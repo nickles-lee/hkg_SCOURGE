@@ -93,6 +93,11 @@ Item {
     property string daemonVer: ""
     property int sendOk: 0
     property int sendFail: 0
+    property int battCond: 0
+    property bool battCondKnown: false
+    property string gearRaw: ""
+    property int gearB3: -1
+    property int gearB4: -1
 
     // ---- optimistic preheat ------------------------------------------
     property string blockReason: ""
@@ -242,6 +247,11 @@ Item {
         daemonVer = d.ver || ""
         sendOk = (typeof d.send_ok === "number") ? d.send_ok : 0
         sendFail = (typeof d.send_fail === "number") ? d.send_fail : 0
+        battCond = (typeof d.batt_cond === "number") ? d.batt_cond : 0
+        battCondKnown = d.batt_cond_known === true
+        gearRaw = d.gear_raw || ""
+        gearB3 = (typeof d.gear_b3 === "number") ? d.gear_b3 : -1
+        gearB4 = (typeof d.gear_b4 === "number") ? d.gear_b4 : -1
         homeSeq = (typeof d.home_seq === "number") ? d.home_seq : 0
         homeSource = d.home_source || "none"
         lastAppKey = (typeof d.last_app_key === "number") ? d.last_app_key : -1
@@ -664,6 +674,7 @@ Item {
                 x: 28
                 y: 44
                 text: root.heaterText()
+                      + (root.battCondKnown && root.battCond > 0 ? "  \u00b7  0x25D=" + root.battCond : "")
                 font.pixelSize: ConstantModel.FONT_SIZE_42
                 textBold: true
                 color: root.preheatOn ? "#4CAF50"
@@ -822,8 +833,11 @@ Item {
                 var raw = "0x" + ("0" + root.precondRaw.toString(16)).slice(-2)
                 var fg = root.atOtherApp ? "other" : "home"
                 var mon = root.homeMonitor ? "on" : "off"
-                var line = "FG " + fg + "   \u00b7   Gear " + gear
-                           + " (raw " + root.rawGear + ")"
+                var cond = root.battCondKnown ? ("Cond " + root.battCond) : "Cond ?"
+                var line = "FG " + fg + "   \u00b7   " + cond
+                           + "   \u00b7   Gear " + gear
+                           + " (raw " + root.rawGear
+                           + " b3=" + root.gearB3 + " b4=" + root.gearB4 + ")"
                            + "   \u00b7   Service " + svc
                            + "   \u00b7   Temp " + src + "   \u00b7   Cable " + cab
                            + "   \u00b7   BMS " + raw
@@ -833,6 +847,7 @@ Item {
                 if (root.lastAppKey >= 0)
                     line += "   \u00b7   Key " + root.lastAppKey
                 if (root.battRaw) line += "   \u00b7   2FC " + root.battRaw
+                if (root.gearRaw) line += "   \u00b7   036 " + root.gearRaw
                 if (root.lastTx) line += "   \u00b7   TX " + root.lastTx
                 line += "   \u00b7   Send " + root.sendOk + " ok"
                 if (root.sendFail > 0)

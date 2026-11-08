@@ -113,7 +113,7 @@ def main():
         f.write("#!/bin/sh\n"
                 "printf '%s\\n' \"$*\" >> \"$DBUS_LOG\"\n"
                 "case \"$*\" in\n"
-                "*0x04,0xa2*)\n"
+                "*0x04,0xa2*|*0x04,0xc5*)\n"
                 "  # Charge-door frames fail only when the regression test\n"
                 "  # asks for it, so the dash/burst children keep succeeding.\n"
                 "  if [ -f \"$DBUS_DOOR_FAIL\" ]; then exit 1; fi\n"
@@ -340,8 +340,9 @@ def main():
         assert r["ok"] is True and r["door"] == "opening", r
         time.sleep(0.3)
         log = read_log(dbus_log)
-        assert "0x04,0xa2,0x08,0xff,0xff,0xff,0xdf" in log[len(before):], log[-400:]
-        print("door open micom ok")
+        assert "0x04,0xa2,0x08,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff" in log[len(before):], log[-400:]
+        assert "0x04,0xa2,0x08,0xff,0xff,0xff,0xdf,0xff,0xff,0xff,0xff" in log[len(before):], log[-400:]
+        print("door open micom ok (all-FF + DF, factory frames)")
 
         send(s, 0x3AA, DOOR_OPEN)
         st = wait_door("open")
@@ -352,8 +353,8 @@ def main():
         r = http("/chargedoor/open?park=1", "POST")
         assert r["ok"] is True and r["door"] == "open", r
         time.sleep(0.2)
-        before_doors = [l for l in before.splitlines() if "0x04,0xa2,0x08" in l]
-        after_doors = [l for l in read_log(dbus_log).splitlines() if "0x04,0xa2,0x08" in l]
+        before_doors = [l for l in before.splitlines() if "0x04,0xa2,0x08" in l or "0x04,0xc5,0x08" in l]
+        after_doors = [l for l in read_log(dbus_log).splitlines() if "0x04,0xa2,0x08" in l or "0x04,0xc5,0x08" in l]
         assert after_doors == before_doors, "duplicate open command was sent"
         print("door already-open no-op ok")
 
@@ -362,7 +363,7 @@ def main():
         r = http("/chargedoor/close?park=1", "POST")
         assert r["ok"] is True and r["door"] == "closing", r
         time.sleep(0.3)
-        assert "0x04,0xa2,0x08,0xff,0xff,0xff,0xef" in read_log(dbus_log)[len(before):]
+        assert "0x04,0xc5,0x08,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00" in read_log(dbus_log)[len(before):]
         send(s, 0x3AA, DOOR_CLOSED)
         st = wait_door("closed")
         assert st["door_state"] == 2 and st["door_source"] == "can", st
@@ -577,6 +578,22 @@ def main():
                 proc2.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 proc2.kill()
+
+        # ---- 0x25D EV_BatteryConditioning + gear raw ----------------
+        send(s, 0x25D, [0, 0, 0x11, 0, 0, 0x40, 0, 0])   # data[5]=0x40 -> cond 1
+        time.sleep(0.1)
+        st = http("/status")
+        assert st["batt_cond"] == 1 and st["batt_cond_known"] is True, st
+        send(s, 0x25D, [0, 0, 0x11, 0, 0, 0x80, 0, 0])   # data[5]=0x80 -> cond 2
+        time.sleep(0.1)
+        st = http("/status")
+        assert st["batt_cond"] == 2, st
+        send(s, 0x036, [0x11, 0x22, 0x33, 0x05, 0x50, 0, 0, 0])  # b3=5&3=1, b4=0x50&0xF=0
+        time.sleep(0.1)
+        st = http("/status")
+        assert st["gear_b3"] == 1 and st["gear_b4"] == 0, st
+        assert st["gear_raw"] == "11 22 33 05 50 00 00 00", st
+        print("0x25D batt_cond + 0x036 raw gear decodes ok")
 
         # ---- bus sniffer --------------------------------------------
         proc = subprocess.Popen(

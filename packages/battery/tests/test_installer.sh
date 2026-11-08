@@ -87,7 +87,7 @@ echo "hello restore OK"
 echo "== wifi coexistence =="
 WIFI_QML="$HERE/../wifi_app/artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.hello_wifi.qml"
 if [ ! -f "$WIFI_QML" ]; then
-    echo "wifi fixture not present (wifi_app QML artifacts not shipped); skipping"
+    echo "wifi fixture not present (wifi package QML artifacts not shipped); skipping"
 else
 cp "$WIFI_QML" \
    "$QML/HomeScreen/QHMI_HomeScreenMain_Advanced.qml"

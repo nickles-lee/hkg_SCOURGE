@@ -11,13 +11,17 @@
  * I-CAN (can0):
  *   0x2FC  RX  SoC byte7/2, battery min temp in byte 2 (signed)
  *   0x326  RX  charge connector, (byte3 >> 2) & 3 != 0 or (byte4 & 3) != 0
+ *   0x25D  RX  BMS_04: EV_BatteryConditioning in (data[5] >> 6) & 3
+ *   0x036  RX  VCU gear (raw frame kept; byte offset differs between factory
+ *              binaries — AppHomeScreen reads data[3]&3, TmsRemoteApp data[4]&0xF)
  *
  * M-CAN (via com.lge.car.micom /Can SetCANMicomRecv), sequence fully mimics
  * the WiCAN "i-precondition" firmware (L1Z3/wicant-i-precondition):
  *   0x0C7  TX  BMU control start/stop burst (3+3 frames, 40 ms apart)
  *   0x4E8  TX  cluster distance/flag countdown display (WiCAN layout)
  *   0x4CC  TX  cluster icon request, data[0] = 0x02
- *   0x4A2  TX  charge door open/close
+ *   0x4A2  TX  charge door open (factory TmsRemoteApp frames: all-FF, then DF)
+ *   0x4C5  TX  charge door close (factory uses a distinct ID for close)
  *
  * M-CAN receive frames (0x036 gear, 0x038 READY, 0x152 temperature, 0x2AD
  * precondition state, 0x2AE utility, 0x3AA charge door) are not always
@@ -51,7 +55,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BATTERY_DAEMON_VERSION "2026-11-07.1"
+#define BATTERY_DAEMON_VERSION "2026-11-08.1"
 
 #define IFACE_DEFAULT "can0"
 #define HTTP_PORT 8088
@@ -61,6 +65,7 @@
 #define ID_CLUSTER 0x4E8        /* cluster distance/flag display */
 #define ID_CLUSTER_ICON 0x4CC   /* cluster icon request, data[0] = 0x02 */
 #define ID_BATT_TEMP 0x152
+#define ID_BATT_COND 0x25D
 #define ID_SOC 0x2FC
 #define ID_PRECOND 0x2AD
 #define ID_POWER 0x038
@@ -85,8 +90,8 @@
 #define FLAG_BLUE_4 0x4
 #define FLAG_NONE 0xF
 
-#define DOOR_CMD_OPEN 0xDF
-#define DOOR_CMD_CLOSE 0xEF
+#define DOOR_ID_OPEN 0x4A2
+#define DOOR_ID_CLOSE 0x4C5
 #define DOOR_STATE_UNKNOWN 0
 #define DOOR_STATE_OPEN 1
 #define DOOR_STATE_CLOSED 2
@@ -139,6 +144,11 @@ static int64_t g_last_idle_ms = 0;
 
 static int g_precond_raw = 0;
 static bool g_precond_known = false;
+static int g_batt_cond = 0;          /* EV_BatteryConditioning, 0x25D */
+static bool g_batt_cond_known = false;
+static int64_t g_batt_cond_ms = 0;
+static uint8_t g_gear_frame[8];
+static bool g_gear_frame_valid = false;
 static int g_batt_min_c = 0;
 static bool g_batt_valid = false;
 static int64_t g_batt_ms = 0;
@@ -288,16 +298,17 @@ static int can_open(const char *iface, bool filtered)
         return -1;
     }
 
-    struct can_filter filter[9];
+    struct can_filter filter[10];
     filter[0].can_id = ID_BATT_TEMP; filter[0].can_mask = CAN_SFF_MASK;
-    filter[1].can_id = ID_SOC;       filter[1].can_mask = CAN_SFF_MASK;
-    filter[2].can_id = ID_PRECOND;   filter[2].can_mask = CAN_SFF_MASK;
-    filter[3].can_id = ID_POWER;     filter[3].can_mask = CAN_SFF_MASK;
-    filter[4].can_id = ID_UTIL;      filter[4].can_mask = CAN_SFF_MASK;
-    filter[5].can_id = ID_CLUSTER;  filter[5].can_mask = CAN_SFF_MASK;
-    filter[6].can_id = ID_GEAR;      filter[6].can_mask = CAN_SFF_MASK;
-    filter[7].can_id = ID_CHARGE;    filter[7].can_mask = CAN_SFF_MASK;
-    filter[8].can_id = ID_CHARGEDOOR;filter[8].can_mask = CAN_SFF_MASK;
+    filter[1].can_id = ID_BATT_COND; filter[1].can_mask = CAN_SFF_MASK;
+    filter[2].can_id = ID_SOC;       filter[2].can_mask = CAN_SFF_MASK;
+    filter[3].can_id = ID_PRECOND;   filter[3].can_mask = CAN_SFF_MASK;
+    filter[4].can_id = ID_POWER;     filter[4].can_mask = CAN_SFF_MASK;
+    filter[5].can_id = ID_UTIL;      filter[5].can_mask = CAN_SFF_MASK;
+    filter[6].can_id = ID_CLUSTER;   filter[6].can_mask = CAN_SFF_MASK;
+    filter[7].can_id = ID_GEAR;      filter[7].can_mask = CAN_SFF_MASK;
+    filter[8].can_id = ID_CHARGE;    filter[8].can_mask = CAN_SFF_MASK;
+    filter[9].can_id = ID_CHARGEDOOR;filter[9].can_mask = CAN_SFF_MASK;
     if (filtered &&
         setsockopt(fd, SOL_CAN_RAW, CAN_RAW_FILTER, filter, sizeof(filter)) < 0) {
         perror("setsockopt(CAN_RAW_FILTER)");
@@ -421,13 +432,22 @@ static const char *door_block_reason(bool park_override)
 }
 
 /* The factory TmsRemoteApp sends the charge-door command through the micom
- * D-Bus service, not as a raw M-CAN frame.  dbus-send is present in the
- * 260128 rootfs and the system bus policy allows root to send to
- * com.lge.car.micom. */
-static int send_chargedoor_frame(uint8_t cmd)
+ * D-Bus service with these exact frames (decompiled from the 260128
+ * TmsRemoteApp, EVRemoteChargeDoorOpen/Close):
+ *   open:  04 A2 08 FF FF FF FF FF FF FF FF, then 04 A2 08 FF FF FF DF FF FF FF FF
+ *   close: 04 C5 08 00 00 00 00 00 00 00 00
+ * Our previous close frame (04 A2 ... EF ...) does not exist in the factory
+ * binary.  Returns the pid of the last send. */
+static int send_chargedoor_frame(int target)
 {
-    uint8_t d[8] = {0xFF, 0xFF, 0xFF, cmd, 0xFF, 0xFF, 0xFF, 0xFF};
-    return send_micom_frame(0x4A2, d);
+    if (target == DOOR_STATE_CLOSED) {
+        uint8_t d[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        return send_micom_frame(DOOR_ID_CLOSE, d);
+    }
+    uint8_t ff[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    send_micom_frame(DOOR_ID_OPEN, ff);
+    uint8_t df[8] = {0xFF, 0xFF, 0xFF, 0xDF, 0xFF, 0xFF, 0xFF, 0xFF};
+    return send_micom_frame(DOOR_ID_OPEN, df);
 }
 
 static void reap_children(void)
@@ -618,7 +638,6 @@ static int request_chargedoor(int target, bool park_override)
         return -1;
     }
 
-    uint8_t cmd = (target == DOOR_STATE_CLOSED) ? DOOR_CMD_CLOSE : DOOR_CMD_OPEN;
     g_door_target = target;
     g_door_attempts = 1;
     g_door_busy = true;
@@ -628,7 +647,7 @@ static int request_chargedoor(int target, bool park_override)
     g_door_last_ms = now;
     snprintf(g_door_msg, sizeof(g_door_msg), "%s",
              target == DOOR_STATE_CLOSED ? "closing" : "opening");
-    g_door_send_pid = send_chargedoor_frame(cmd);
+    g_door_send_pid = send_chargedoor_frame(target);
     if (g_door_send_pid < 0) {
         g_door_busy = false;
         g_door_attempts = 0;
@@ -672,8 +691,7 @@ static void tick_chargedoor(int64_t now)
             g_door_dbus_status = -1;
             g_door_send_pid = -1;
             g_door_last_ms = now;
-            g_door_send_pid = send_chargedoor_frame((g_door_target == DOOR_STATE_CLOSED)
-                                                     ? DOOR_CMD_CLOSE : DOOR_CMD_OPEN);
+            g_door_send_pid = send_chargedoor_frame(g_door_target);
             if (g_door_send_pid < 0) door_finish("send_failed", false);
             return;
         }
@@ -689,8 +707,7 @@ static void tick_chargedoor(int64_t now)
         g_door_send_pid = -1;
         g_door_last_ms = now;
         g_door_deadline_ms = now + DOOR_CMD_TIMEOUT_MS;
-        g_door_send_pid = send_chargedoor_frame((g_door_target == DOOR_STATE_CLOSED)
-                                                 ? DOOR_CMD_CLOSE : DOOR_CMD_OPEN);
+        g_door_send_pid = send_chargedoor_frame(g_door_target);
         if (g_door_send_pid < 0) door_finish("send_failed", false);
         return;
     }
@@ -995,8 +1012,26 @@ static void handle_frame(const struct can_frame *f)
         /* Heuristic: byte 4 is 0x01 normally and 0x06 in utility mode. */
         g_utility = (f->data[4] == 0x06);
         break;
+    case ID_BATT_COND: {
+        /* BMS_04 (0x25D): EV_BatteryConditioning = (data[5] >> 6) & 3,
+         * per the factory TmsRemoteApp decode.  This is the real
+         * "battery heater active" source (distinct from 0x2AD). */
+        int bc = (f->data[5] >> 6) & 0x03;
+        if (!g_batt_cond_known || bc != g_batt_cond) {
+            fprintf(stderr, "battery_daemon: batt_cond %d\n", bc);
+            fflush(stderr);
+        }
+        g_batt_cond = bc;
+        g_batt_cond_known = true;
+        g_batt_cond_ms = now;
+        break;
+    }
     case ID_GEAR:
-        /* VCU_GearPosSta: byte4 & 0x0F, 0 = P, 5 = D, 6 = N, 7 = R. */
+        /* VCU_GearPosSta.  The two factory binaries disagree on the byte:
+         * AppHomeScreen uses data[3]&3, TmsRemoteApp data[4]&0xF.  Keep the
+         * raw frame and both decodes so one car run settles it. */
+        memcpy(g_gear_frame, f->data, 8);
+        g_gear_frame_valid = true;
         g_gear = f->data[4] & 0x0F;
         g_park = (g_gear == 0);
         g_park_known = true;
@@ -1082,10 +1117,16 @@ static size_t build_status(char *buf, size_t sz)
     bool door_fresh = door_state_fresh();
     int door_state = door_fresh ? g_door_state : DOOR_STATE_UNKNOWN;
     char raw[32] = "";
+    char gear_raw[32] = "";
     if (g_soc_frame_valid) {
         snprintf(raw, sizeof(raw), "%02X %02X %02X %02X %02X %02X %02X %02X",
                  g_soc_frame[0], g_soc_frame[1], g_soc_frame[2], g_soc_frame[3],
                  g_soc_frame[4], g_soc_frame[5], g_soc_frame[6], g_soc_frame[7]);
+    }
+    if (g_gear_frame_valid) {
+        snprintf(gear_raw, sizeof(gear_raw), "%02X %02X %02X %02X %02X %02X %02X %02X",
+                 g_gear_frame[0], g_gear_frame[1], g_gear_frame[2], g_gear_frame[3],
+                 g_gear_frame[4], g_gear_frame[5], g_gear_frame[6], g_gear_frame[7]);
     }
     return (size_t)snprintf(
         buf, sz,
@@ -1106,6 +1147,8 @@ static size_t build_status(char *buf, size_t sz)
         "\"door_warn\":%d,\"door_opt\":%d,\"door_busy\":%s,"
         "\"door_allowed\":%s,\"door_block_reason\":\"%s\","
         "\"door_message\":\"%s\",\"last_tx\":\"%s\","
+        "\"batt_cond\":%d,\"batt_cond_known\":%s,"
+        "\"gear_raw\":\"%s\",\"gear_b3\":%d,\"gear_b4\":%d,"
         "\"home_seq\":%d,\"home_source\":\"%s\",\"last_app_key\":%d,"
         "\"home_monitor\":%s}\n",
         state_name(), g_precond_raw,
@@ -1132,6 +1175,10 @@ static size_t build_status(char *buf, size_t sz)
         g_door_busy ? "true" : "false",
         door_reason[0] ? "false" : "true", door_reason, dmsg,
         g_last_tx,
+        g_batt_cond, g_batt_cond_known ? "true" : "false",
+        gear_raw,
+        g_gear_frame_valid ? (int)(g_gear_frame[3] & 0x03) : -1,
+        g_gear_frame_valid ? (int)(g_gear_frame[4] & 0x0F) : -1,
         g_home_seq, g_home_source, g_last_app_key,
         g_home_monitor ? "true" : "false");
 }

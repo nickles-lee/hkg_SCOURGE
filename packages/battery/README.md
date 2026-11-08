@@ -149,8 +149,9 @@ dbus-send --system --type=method_call --dest=com.lge.car.micom /Can \
 - Preheat start: `0x0C7` `00 00 00 40 03 00 00 00` ×3, then `E0 07` ×3.
 - Preheat stop: `0x0C7` all zero ×3, then `E0 07` ×3.
 - Dash: `0x4ED` `00 00 00 00 00 10 A0 00` at 5 Hz.
-- Charge door: `0x4A2` `FF FF FF DF FF FF FF FF` open, `EF` close; an
-  unknown cable state (no `0x326` on the bus) is advisory and no longer
+- Charge door, factory frames: open = `0x4A2` all-FF then `0x4A2` with `DF`
+  in data[3]; close = `0x4C5` all-zero (from the decompiled TmsRemoteApp).
+  An unknown cable state (no `0x326` on the bus) is advisory and no longer
   blocks the door.
 - Full WiCAN sequence mimicry: the `0x0C7` burst at 40 ms pacing plus the
   `0x4E8`/`0x4CC` cluster countdown during start and stop; without BMS
