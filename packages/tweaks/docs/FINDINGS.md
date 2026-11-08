@@ -187,6 +187,16 @@ Bugs the VM run caught (all fixed):
    `--once`/`--status`/`--set` mode, orphaning them when the process exited
    one tick later. One-shot modes no longer fork monitors.
 
+Found on the car (2026-11-08) and fixed:
+
+5. **Identify left the display red until reboot** — the identify write used a
+   throwaway buffer, so the daemon never recorded that red was on screen;
+   when the window expired in daytime, `restore_main()` no-opped
+   (`main_applied==0`) and nothing rewrote the brightness. The identify write
+   now goes through the tracked `last_main_gamma`/`main_applied` state, and
+   the expiry path no longer clears it, so the next tick restores neutral
+   (regression test in `test_daemon.sh`).
+
 VM-only artifacts (not daemon bugs): the guest boots without loopback (the
 status server correctly fail-fasts; the test raises `lo` with the vendor
 busybox), `/etc/passwd` is a symlink to `/tmp/passwd`, and `/var` is a symlink

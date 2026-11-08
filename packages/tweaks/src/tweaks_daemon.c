@@ -2243,11 +2243,12 @@ static void tick(void)
     write_cluster_desired();
 
     if (rt.identify_crtc >= 0 && rt.identify_until <= now) {
+        /* Keep last_*_gamma / *_applied as they are: when the identify write
+         * targeted the main (or cluster) CRTC, they now read "255:0:0 is on
+         * screen", which is exactly what lets restore_main() rewrite the
+         * display on the next tick.  Clearing them here left the red in place
+         * until reboot in daytime (restore_main no-ops when applied==0). */
         rt.identify_crtc = -1;
-        rt.last_cluster_gamma[0] = 0;
-        rt.last_main_gamma[0] = 0;
-        rt.cluster_applied = 0;
-        rt.main_applied = 0;
     }
 
     int identifying_main = (rt.identify_crtc == cfg.main_crtc);
@@ -2269,10 +2270,24 @@ static void tick(void)
     }
 
     if (rt.identify_crtc >= 0) {
+        /* Write the red through the tracked state for known CRTCs so the
+         * daemon knows the display currently shows red and can restore it
+         * when the identify window ends. */
         char red[32] = "255:0:0";
-        char scratch[32];
-        int applied = 0;
-        apply_gamma(rt.identify_crtc, red, scratch, sizeof(scratch), &applied, 1);
+        if (rt.identify_crtc == cfg.main_crtc)
+            apply_gamma(rt.identify_crtc, red,
+                        rt.last_main_gamma, sizeof(rt.last_main_gamma),
+                        &rt.main_applied, 1);
+        else if (rt.identify_crtc == cfg.cluster_crtc)
+            apply_gamma(rt.identify_crtc, red,
+                        rt.last_cluster_gamma, sizeof(rt.last_cluster_gamma),
+                        &rt.cluster_applied, 1);
+        else {
+            char scratch[32];
+            int applied = 0;
+            apply_gamma(rt.identify_crtc, red, scratch, sizeof(scratch),
+                        &applied, 1);
+        }
     }
 
     save_last_gamma();

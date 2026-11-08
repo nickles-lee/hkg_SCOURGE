@@ -156,6 +156,66 @@ kill "$pid" 2>/dev/null || true
 wait "$pid" 2>/dev/null || true
 trap 'rm -rf "$TMP"' EXIT
 
+# ---- identify must not leave the display red after the window ends -----
+# Daytime scenario: filter off, no projection -> night_on=0 -> the restore
+# path (restore_main) must rewrite the CRTC to neutral once identify expires.
+mkdir -p "$TMP/rw3"
+cat > "$TMP/fake-persist-day" <<EOF
+#!/bin/sh
+case "\$1" in
+read)
+    echo "APP_SETTING_DISP_BLUE_LIGHT_STATUS=0"
+    echo "APP_SETTING_DISP_BLUE_LIGHT_WARM_LEVEL=5"
+    echo "APP_SETTING_DISP_GAMMA_R_G_B=128:128:128"
+    echo "APP_SETTING_DISP_BRIGHTNESS_R_G_B=128:128:128"
+    echo "APP_SETTING_CLOCK_DAYLIGHTSAVETIME=0"
+    ;;
+esac
+EOF
+chmod +x "$TMP/fake-persist-day"
+cat > "$TMP/rw3/config.conf" <<EOF
+cluster_fix=0
+infotainment_fix=1
+main_crtc=1
+poll_ms=300
+wrandr_path=$TMP/fake-wrandr
+persist_helper=$TMP/fake-persist-day
+tzdata_dir=/usr/share/zoneinfo
+tzdata_version_file=$TMP/rw3/tzdata_version
+offline_status_path=$TMP/offline-day
+dbus_send_path=$TMP/fake-dbus
+EOF
+echo 2026f > "$TMP/rw3/tzdata_version"
+: > "$TMP/wrandr.log"
+"$BIN" --rw-dir "$TMP/rw3" --port 18092 --no-dbus >/dev/null 2>&1 &
+pid3=$!
+i=0
+while [ $i -lt 30 ]; do
+    if python3 - "$TMP/rw3/status.json" <<'PY' 2>/dev/null
+import json,sys
+json.load(open(sys.argv[1]))
+PY
+    then break; fi
+    i=$((i+1)); sleep 0.2
+done
+python3 - <<'PY'
+import json,time,urllib.request
+base="http://127.0.0.1:18092"
+req=urllib.request.Request(base+"/identify?crtc=1&seconds=1", method="POST")
+d=json.load(urllib.request.urlopen(req, timeout=3))
+assert d["ok"] is True and d["crtc"] == 1, d
+# wait for the identify window to expire and at least one more tick
+time.sleep(2.0)
+d=json.load(urllib.request.urlopen(base+"/status", timeout=3))
+assert d["main_applied"] == 0, d
+PY
+kill "$pid3" 2>/dev/null || true
+wait "$pid3" 2>/dev/null || true
+# the wrandr log must show red first and end with the neutral restore
+grep -q -- '--crtc=1 --brightness=255:0:0' "$TMP/wrandr.log"
+last=$(grep -- '--crtc=1' "$TMP/wrandr.log" | tail -1)
+test "$last" = "--crtc=1 --brightness=128:128:128"
+
 # ---- new controls: disclaimer, auto-DST, OTA block ---------------------
 mkdir -p "$TMP/rw2" "$TMP/update2"
 cat > "$TMP/rw2/persist" <<EOF
