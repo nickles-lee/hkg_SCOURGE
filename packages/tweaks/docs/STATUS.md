@@ -1,6 +1,6 @@
 # Status — Tweaks app build
 
-**Date:** 2026-11-06
+**Date:** 2026-11-10
 **Target:** Ioniq 5 Gen5W, `NE_E.EUR.S5W_L.001.001.260128`
 
 ## Done
@@ -11,6 +11,8 @@
   - Hyundai gamma table
   - cluster and infotainment fixes
   - deep red night mode toggle (front 128:32:16, cluster CAN level 9)
+  - daemon/persist run on the SMACK floor label `_` (micom/system-bus access);
+    live label exposed in /status and /health
   - `dbus-monitor` projection detection with manual override
 - `wrandr` wrapper:
   - intercepts `--crtc=1 --gamma=128:128:128`

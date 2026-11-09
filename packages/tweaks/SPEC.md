@@ -89,6 +89,12 @@ Brightness is kept at `128:128:128`.
 - While the cluster fix is on and night mode is effective, the daemon asserts
   the vehicle's level; deep-red night mode asserts level 9. Disabling the
   override restores the vehicle's status and level.
+- The daemon (and the persist helper it execs) runs on the SMACK floor label
+  `_`, never `Privileged`: the floor label is the vendor's IPC context with
+  access to `App::micommanager` and the system-bus socket, while `Privileged`
+  is the label-administration (onlycap) label with no such rules. The
+  installer stamps the binaries and reports `smack=` in its result;
+  `/status` and `/health` expose the running label.
 - Ownership markers (`blu_forced`) survive daemon crashes. A restore is only
   considered complete when both writes succeed; otherwise it is retried.
 - `cluster_gamma` remains the wrapper's desired front-display value; the
@@ -160,7 +166,7 @@ Brightness is kept at `128:128:128`.
 | Method | Path | Meaning |
 |---|---|---|
 | GET | `/status` | state JSON |
-| GET | `/health` | liveness + build id/config version |
+| GET | `/health` | liveness + build id/config version/SMACK label |
 | GET | `/logs` | log tail |
 | POST | `/set?cluster_fix=0\|1` | cluster toggle |
 | POST | `/set?infotainment_fix=0\|1` | projection toggle |

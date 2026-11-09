@@ -547,6 +547,7 @@ import json,urllib.request
 d=json.load(urllib.request.urlopen("http://127.0.0.1:18093/health", timeout=3))
 assert d["ok"] is True and d["config_version"] == 2, d
 assert d["build"], d
+assert "smack" in d, d
 PY
 kill "$pidh" 2>/dev/null || true
 wait "$pidh" 2>/dev/null || true

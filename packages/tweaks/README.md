@@ -17,6 +17,9 @@ A home-screen Tweaks app plus a small daemon for the Ioniq 5 Gen5W.
 
 Both follow the vehicle's existing **Setup > Display > Blue Light Filter**
 setting and use Hyundai's own gamma table. There is no new warmth slider.
+The daemon must run on the SMACK floor label `_` (the installer stamps it
+that way); `Privileged` has no rule for the system bus or micom service, which
+silently blocks every cluster CAN write while the front display still works.
 
 **Startup, time and updates:**
 
@@ -185,7 +188,7 @@ Bound to `127.0.0.1:8091`.
 | Method | Path | Meaning |
 |---|---|---|
 | GET | `/status` | state JSON |
-| GET | `/health` | liveness + build id/config version |
+| GET | `/health` | liveness + build id/config version/SMACK label |
 | GET | `/logs` | daemon log tail |
 | POST | `/set?cluster_fix=0\|1` | cluster toggle |
 | POST | `/set?infotainment_fix=0\|1` | projection toggle |
@@ -257,6 +260,13 @@ Battery, WiFi and combined bases.
   cluster fix is on and night mode is effective (filter on, or projection
   active). Check `blu_level_sent`/`blu_forced` in `status.json` and the
   `micom BLU` lines in `failures.log` if the micom write was rejected.
+- **Front tint works but the instrument cluster never changes** — the most
+  common cause is the daemon's SMACK label. It must be `_` (floor), not
+  `Privileged`: only the floor label has access to `App::micommanager` and the
+  system-bus socket. Check `smack` in `/status`/`/health` (must be `_`) and
+  `smack=` in `run_stuff_result.txt`; the diagnostic script prints the running
+  label and a no-CAN-write micom D-Bus probe (Introspect may activate the
+  service). Reinstall if it is not `_`.
 - **Testing projection manually** — write `1` or `0` to
   `/rw_data/tweaks/projection_state`; the daemon prefers that file over the
   D-Bus detector.

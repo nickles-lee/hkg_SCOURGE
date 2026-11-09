@@ -258,13 +258,22 @@ chmod 644 "$ASSET_DIR/"* 2>/dev/null || true
 cp -f "$PAYLOAD/bin/tweaks_daemon" "$RW_DIR/tweaks_daemon" || fail "daemon copy failed"
 chmod 755 "$RW_DIR/tweaks_daemon" 2>/dev/null || true
 chown 0:0 "$RW_DIR/tweaks_daemon" 2>/dev/null || true
-command -v chsmack >/dev/null 2>&1 && chsmack -e Privileged "$RW_DIR/tweaks_daemon" 2>/dev/null || true
+# /rw_data is the SMACK floor label; the daemon inherits it. The floor label
+# has rwx access to App::micommanager, which the cluster blue-light CAN calls
+# need. Do not use a Privileged exec label here: it has no micommanager or
+# system-bus rule (the Battery daemon is the car-proven pattern).
+command -v chsmack >/dev/null 2>&1 && chsmack -e _ "$RW_DIR/tweaks_daemon" 2>/dev/null || true
+DAEMON_SMACK=$(getfattr -n security.SMACK64EXEC --only-values "$RW_DIR/tweaks_daemon" 2>/dev/null || true)
+[ -n "$DAEMON_SMACK" ] || DAEMON_SMACK=unset
+PERSIST_SMACK=absent
 
 if [ -f "$PAYLOAD/bin/tweaks_persist" ]; then
     cp -f "$PAYLOAD/bin/tweaks_persist" "$RW_DIR/tweaks_persist" || fail "persist helper copy failed"
     chmod 755 "$RW_DIR/tweaks_persist" 2>/dev/null || true
     chown 0:0 "$RW_DIR/tweaks_persist" 2>/dev/null || true
-    command -v chsmack >/dev/null 2>&1 && chsmack -e Privileged "$RW_DIR/tweaks_persist" 2>/dev/null || true
+    command -v chsmack >/dev/null 2>&1 && chsmack -e _ "$RW_DIR/tweaks_persist" 2>/dev/null || true
+    PERSIST_SMACK=$(getfattr -n security.SMACK64EXEC --only-values "$RW_DIR/tweaks_persist" 2>/dev/null || true)
+    [ -n "$PERSIST_SMACK" ] || PERSIST_SMACK=unset
     # The vendor library normally has this SONAME symlink already; make it
     # best-effort if a stripped rootfs is missing it.
     if [ ! -e /usr/lib/libpersistence_client_library.so.7 ]; then
@@ -515,8 +524,16 @@ fi
 log "restart=$restart"
 sync
 
+if [ "$DAEMON_SMACK" != "_" ]; then
+    log "WARNING: tweaks_daemon SMACK64EXEC=$DAEMON_SMACK (expected _); daemon may be unable to reach micom"
+fi
+if [ "$PERSIST_SMACK" != "_" ] && [ "$PERSIST_SMACK" != "absent" ]; then
+    log "WARNING: tweaks_persist SMACK64EXEC=$PERSIST_SMACK (expected _)"
+fi
+
 result "status=OK" "variant=$adv_variant/$wide_variant/$all_variant/$setup_variant/$custom_variant" \
        "backup=$BACKUP_HU" "daemon=$daemon_status" "restart=$restart" \
+       "smack=$DAEMON_SMACK" "persist_smack=$PERSIST_SMACK" \
        "disclaimer=next-boot" "tzdata=$(cat "$RW_DIR/tzdata_version" 2>/dev/null | head -n 1)" \
        "ota_block=$(cfg_value ota_block 0)" "log=$LOG"
 log "=== tweaks payload done ==="

@@ -213,6 +213,14 @@ grep -q 'ota_block=0' "$TMP/rw/config.conf"
 grep -q '^config_version=2$' "$TMP/rw/config.conf"
 grep -q '^deep_red=0$' "$TMP/rw/config.conf"
 
+# The daemon must run on the SMACK floor label `_` (the Battery-proven
+# context). `Privileged` has no micommanager/system-bus rule, which would
+# silently block every cluster CAN write.
+grep -q 'chsmack -e _ "$RW_DIR/tweaks_daemon"' "$ROOT/scripts/run_stuff.sh"
+grep -q 'chsmack -e _ "$RW_DIR/tweaks_persist"' "$ROOT/scripts/run_stuff.sh"
+! grep -q 'chsmack -e Privileged' "$ROOT/scripts/run_stuff.sh"
+grep -q ' smack=' "$TMP/usb/run_stuff_result.txt"
+
 # A legacy v1 config (zero-based CRTC pair) is migrated in place on the
 # next install, without touching deliberate custom values.
 sed -i 's/^config_version=2$/config_version=1/' "$TMP/rw/config.conf"
@@ -246,6 +254,27 @@ grep -q "variant=$EXPECT" "$TMP/usb/run_stuff_result.txt" || {
     cat "$TMP/usb/run_stuff_result.txt" >&2
     exit 1
 }
+
+# The persist helper is optional (SKIP_PERSIST builds). set -u must not abort
+# the final result when it is absent. Remove it from the payload and from the
+# manifest together.
+mv "$TMP/usb/payload/bin/tweaks_persist" "$TMP/tweaks_persist.bak"
+cp "$TMP/usb/manifest.md5" "$TMP/manifest.md5.bak"
+grep -v 'payload/bin/tweaks_persist$' "$TMP/manifest.md5.bak" > "$TMP/usb/manifest.md5"
+rm -f "$TMP/usb/run_stuff_result.txt"
+TWEAKS_QML_ROOT="$TMP/root/app/share/AppHomeScreen" \
+TWEAKS_RW_DIR="$TMP/rw" \
+TWEAKS_SERVICE="$TMP/etc/systemd/system/tweaks-daemon.service" \
+TWEAKS_STANDBY_ROOT="$TMP/root/app/share/AppStandbyClock" \
+TWEAKS_OFFLINE_STATUS="$TMP/root/update/offline_status" \
+TWEAKS_WRANDR="$TMP/root/usr/bin/wrandr" \
+TWEAKS_WRANDR_REAL="$TMP/root/usr/bin/wrandr.real" \
+USB_DIR="$TMP/usb" \
+sh "$TMP/install.sh"
+grep -q 'status=OK' "$TMP/usb/run_stuff_result.txt"
+grep -q 'persist_smack=absent' "$TMP/usb/run_stuff_result.txt"
+mv "$TMP/tweaks_persist.bak" "$TMP/usb/payload/bin/tweaks_persist"
+cp "$TMP/manifest.md5.bak" "$TMP/usb/manifest.md5"
 
 # Pretend the user enabled OTA blocking before restoring.
 printf '1' > "$TMP/rw/ota_block_owned"

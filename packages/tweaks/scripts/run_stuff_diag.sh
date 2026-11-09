@@ -94,18 +94,46 @@ echo "== persistence helper (stderr shows the registered app name) =="
 "$RW_DIR/tweaks_persist" read 2>&1 || true
 echo
 echo "== SMACK labels =="
+echo "diagnostic process label: $(cat /proc/self/attr/current 2>/dev/null || echo unknown)"
 if command -v getfattr >/dev/null 2>&1; then
-    for f in /usr/bin/wrandr /usr/bin/wrandr.real /usr/bin/pers_admin_svc \
+    for f in /usr/bin/wrandr /usr/bin/wrandr.real /usr/bin/dbus-send /usr/bin/pers_admin_svc \
              /app/bin/AppSetup /app/bin/TimeManager \
              "$RW_DIR/tweaks_daemon" "$RW_DIR/tweaks_persist" \
-             "$RW_DIR/cluster_gamma" "$RW_DIR/config.conf" \
+             "$RW_DIR/cluster_gamma" "$RW_DIR/config.conf" "$RW_DIR/status.json" \
              "$QML_DIR/HomeScreen/TweaksPage.qml"; do
         [ -e "$f" ] || continue
-        printf '%s: ' "$f"
-        getfattr -n security.SMACK64 -d "$f" 2>/dev/null | grep -o 'security.SMACK64=.*' || echo "(none)"
+        acc=$(getfattr -n security.SMACK64 --only-values "$f" 2>/dev/null || true)
+        ex=$(getfattr -n security.SMACK64EXEC --only-values "$f" 2>/dev/null || true)
+        printf '%s: SMACK64=%s SMACK64EXEC=%s\n' "$f" "${acc:-none}" "${ex:-none}"
+    done
+    for s in /var/run/dbus/system_bus_socket /run/dbus/system_bus_socket \
+             /var/run/user/root/wayland-0 /run/user/root/wayland-0; do
+        [ -S "$s" ] || continue
+        echo "$s: $(getfattr -n security.SMACK64 --only-values "$s" 2>/dev/null || echo none)"
     done
 else
     echo "(getfattr not available)"
+fi
+pid=$(pidof tweaks_daemon 2>/dev/null | awk '{print $1}')
+if [ -n "$pid" ]; then
+    echo "running tweaks_daemon pid=$pid label: $(cat "/proc/$pid/attr/current" 2>/dev/null || echo unknown)"
+else
+    echo "tweaks_daemon not running"
+fi
+echo
+echo "== micom D-Bus reachability (no CAN write; Introspect may activate) =="
+if command -v dbus-send >/dev/null 2>&1; then
+    names=$(dbus-send --system --print-reply --reply-timeout=4000 \
+        --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames 2>&1)
+    case "$names" in
+        *com.lge.car.micom*) echo "com.lge.car.micom registered" ;;
+        *) echo "com.lge.car.micom NOT registered (or bus access denied)" ;;
+    esac
+    dbus-send --system --print-reply --reply-timeout=4000 \
+        --dest=com.lge.car.micom /Can \
+        org.freedesktop.DBus.Introspectable.Introspect 2>&1 | head -12 || true
+else
+    echo "(dbus-send not available)"
 fi
 echo
 echo "== persistence RCT hunt =="

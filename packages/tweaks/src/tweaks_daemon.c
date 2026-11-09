@@ -591,6 +591,17 @@ static int is_neutral_gamma(const char *s)
     return s && !strcmp(s, "128:128:128");
 }
 
+/* SMACK label of this process, e.g. "_" (floor) or "Privileged". The daemon
+ * must run on the floor label to reach the micom service over the system bus;
+ * exposing it makes that check possible from /health and status.json. */
+static void current_smack(char *out, size_t size)
+{
+    if (read_file("/proc/self/attr/current", out, size) < 0 || !out[0])
+        snprintf(out, size, "unknown");
+    else if (!strcmp(out, "(null)"))
+        snprintf(out, size, "unknown");
+}
+
 /*
  * Effective night mode.
  *
@@ -2167,7 +2178,7 @@ static void build_status(char *out, size_t size)
 {
     char msg[512], err[512], ps[64];
     char zone[256], dststate[64], dsterr[512], otastate[64], otaerr[512];
-    char tzver[128];
+    char tzver[128], smack[128], smack_json[256];
     json_escape(rt.message, msg, sizeof(msg));
     json_escape(rt.last_error, err, sizeof(err));
     json_escape(rt.projection_source, ps, sizeof(ps));
@@ -2177,10 +2188,13 @@ static void build_status(char *out, size_t size)
     json_escape(rt.ota_state, otastate, sizeof(otastate));
     json_escape(rt.ota_error, otaerr, sizeof(otaerr));
     json_escape(rt.tzdata_version, tzver, sizeof(tzver));
+    current_smack(smack, sizeof(smack));
+    json_escape(smack, smack_json, sizeof(smack_json));
     snprintf(out, size,
              "{\"ok\":true,"
              "\"build\":\"%s\","
              "\"config_version\":%d,"
+             "\"smack\":\"%s\","
              "\"cluster_fix\":%d,"
              "\"infotainment_fix\":%d,"
              "\"deep_red\":%d,"
@@ -2223,6 +2237,7 @@ static void build_status(char *out, size_t size)
              "\"last_error\":\"%s\"}\n",
              TWEAKS_BUILD_ID,
              CONFIG_VERSION,
+             smack_json,
              cfg.cluster_fix ? 1 : 0,
              cfg.infotainment_fix ? 1 : 0,
              cfg.deep_red ? 1 : 0,
@@ -2609,9 +2624,13 @@ static void handle_http(int fd)
     trace_msg("http %s %s", method, decoded);
 
     if (!strcmp(decoded, "/health")) {
+        char smack[128], smack_json[256];
+        current_smack(smack, sizeof(smack));
+        json_escape(smack, smack_json, sizeof(smack_json));
         snprintf(body, sizeof(body),
-                 "{\"ok\":true,\"build\":\"%s\",\"config_version\":%d}\n",
-                 TWEAKS_BUILD_ID, CONFIG_VERSION);
+                 "{\"ok\":true,\"build\":\"%s\",\"config_version\":%d,"
+                 "\"smack\":\"%s\"}\n",
+                 TWEAKS_BUILD_ID, CONFIG_VERSION, smack_json);
         send_response(fd, 200, body);
     } else if (!strcmp(decoded, "/status")) {
         build_status(body, sizeof(body));

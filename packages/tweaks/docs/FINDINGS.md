@@ -227,6 +227,18 @@ was not recognized; the deep-red row was covered by the action buttons; and
 the combo installer could skip package stages or report `status=OK` after a
 failure. Regression tests cover each case.
 
+SMACK context for the cluster path (2026-11-10): the installer had stamped
+`tweaks_daemon`/`tweaks_persist` with `chsmack -e Privileged`. The vendor rule
+set (`/etc/smack/accesses.d/`) has no `Privileged` subject rules — that label
+is only the `onlycap` label-administration context. The floor label `_` is the
+vendor IPC context: `_ App::micommanager rwx---` plus same-label access to the
+system-bus/Wayland sockets and `/rw_data`. A `Privileged` daemon therefore
+cannot reach the micom service over the system bus, so the front display
+(vendor `App::manager` → wrandr wrapper) still tinted while every cluster CAN
+write failed. The car-proven Battery daemon uses `chsmack -e _` for exactly
+this reason; Tweaks now does the same and reports `smack=` in the install
+result and `/status`/`/health`.
+
 VM-only artifacts (not daemon bugs): the guest boots without loopback (the
 status server correctly fail-fasts; the test raises `lo` with the vendor
 busybox), `/etc/passwd` is a symlink to `/tmp/passwd`, and `/var` is a symlink
