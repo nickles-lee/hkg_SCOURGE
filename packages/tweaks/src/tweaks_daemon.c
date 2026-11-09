@@ -5,15 +5,9 @@
 /*
  * tweaks_daemon - Ioniq 5 Gen5W night-mode fix daemon.
  *
- * The instrument cluster's amber night tint is a DRM gamma LUT on the second
- * display output.  The vendor resets it with:
- *
- *   wrandr --crtc=1 --gamma=128:128:128 --brightness=128:128:128
- *
- * whenever the blue-light filter is disabled (which CarPlay/Android Auto
- * trigger).  This daemon keeps the cluster in sync with the vehicle's
- * blue-light filter and, separately, can apply the same Hyundai gamma to the
- * main display while a projection screen is foreground.
+ * Cluster amber is controlled by micom CAN 0x063F, not a head-unit CRTC.
+ * Front/projection tint uses wrandr's brightness channel on CRTC 1.
+ * Overrides have persistent ownership markers and are released explicitly.
  *
  * The daemon itself is static.  A small dynamically linked helper
  * (tweaks_persist) reads the vendor GENIVI persistence keys.
@@ -24,6 +18,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <mntent.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
@@ -50,10 +45,15 @@
 #define DEFAULT_DST_ZONE "Europe/Amsterdam"
 #define DEFAULT_DST_DIR "/rw_data/tweaks/zoneinfo"
 #define DEFAULT_XDG_RUNTIME_DIR "/var/run/user/root"
+#ifndef TWEAKS_BUILD_ID
+#define TWEAKS_BUILD_ID "tweaks-development"
+#endif
+#define CONFIG_VERSION 2
 /*
  * Vendor blue-light cluster signalling, verified in ApplicationManager:
  * MicomInterfaceM::setBLUStatus/setBLULevel send SetCANFixedMicomRecv on
- * the system bus (com.lge.car.micom.can /Can com.lge.car.micom) with CAN
+ * the system bus (destination com.lge.car.micom, /Can, interface
+ * com.lge.car.micom.can) with CAN
  * ID 0x063F:  status at bit 26, 2 bits (data 2 = on, 1 = off); warm level
  * at bit 12, 4 bits (1-9).  The instrument cluster ECU renders the amber
  * itself; it is not a head-unit CRTC.
@@ -88,6 +88,7 @@ static const char *GAMMA_TABLE[10] = {
 #define DEEP_RED_LEVEL 9
 
 typedef struct {
+    int config_version;
     int cluster_fix;
     int infotainment_fix;
     int cluster_crtc;
@@ -118,6 +119,7 @@ typedef struct {
 
 typedef struct {
     int filter_on;
+    int filter_known;
     int warmth_level;
     char gamma[32];
     int gamma_valid;
@@ -129,6 +131,7 @@ typedef struct {
     char projection_source[32];
     int cluster_applied;
     int main_applied;
+    int front_target;
     char last_cluster_gamma[32];
     char last_main_gamma[32];
     char message[256];
@@ -148,6 +151,7 @@ typedef struct {
     int dst_raw;
     int dst_expected;
     time_t dst_checked_at;
+    int64_t dst_checked_ms;
     time_t dst_written_at;
     int dst_last_value;
     /* OTA block */
@@ -188,7 +192,12 @@ typedef struct {
     int alive;
 } mon_t;
 
-static mon_t g_mon[2];   /* [0] = system bus, [1] = session bus */
+static mon_t g_mon[2] = {
+    {.pid = -1, .fd = -1, .is_session = 0},
+    {.pid = -1, .fd = -1, .is_session = 1},
+};
+static int g_monitor_enabled = 1;
+static int g_config_migrated;
 /* One-shot modes (--once/--status/--set) must not fork dbus-monitors: the
  * process exits right after the tick and would orphan the children. */
 static int g_once_mode;
@@ -205,12 +214,15 @@ static int64_t mono_ms(void)
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+static time_t mono_s(void) { return (time_t)(mono_ms() / 1000); }
+
 static int mon_carplay_play;
 static int mon_android_play;
 static int mon_front_app_id;
 static time_t mon_front_app_time;
 static int mon_carplay_app_id;   /* learned when carplay_play turns on */
 static int mon_android_app_id;   /* learned when android_auto_play turns on */
+static int64_t mon_carplay_started_ms, mon_android_started_ms;
 /* Signal receipt counters: prove on the car which bus carries them. */
 static int mon_sig_carplay;
 static int mon_sig_android;
@@ -236,6 +248,8 @@ static int clamp_int(int v, int lo, int hi)
 static void write_disclaimer_runtime(void);
 static void check_dst(time_t now, int force);
 static void check_ota(time_t now, int force);
+static int restore_main(void);
+static int front_owned(void);
 
 static void log_msg(const char *fmt, ...)
 {
@@ -260,6 +274,19 @@ static void log_msg(const char *fmt, ...)
     fclose(f);
 }
 
+/* Opt-in timing trace (TWEAKS_TRACE=1) for the single-threaded loop. */
+static void trace_msg(const char *fmt, ...)
+{
+    va_list ap;
+    if (!getenv("TWEAKS_TRACE"))
+        return;
+    va_start(ap, fmt);
+    char text[512];
+    vsnprintf(text, sizeof(text), fmt, ap);
+    va_end(ap);
+    log_msg("trace: %s", text);
+}
+
 /*
  * Failure log.  Every entry lands in /rw_data/tweaks/failures.log, and while
  * a USB stick is mounted it is also appended to <stick>/tweaks_failures.log
@@ -269,7 +296,7 @@ static void log_msg(const char *fmt, ...)
 static int usb_mount_point(char *out, size_t size)
 {
     FILE *f;
-    char line[1024];
+    struct mntent *entry;
 
     /* Test hook: force the "stick" location. */
     const char *env = getenv("TWEAKS_USB_DIR");
@@ -278,23 +305,27 @@ static int usb_mount_point(char *out, size_t size)
         return 0;
     }
 
-    f = fopen("/proc/mounts", "r");
+    const char *mounts = getenv("TWEAKS_MOUNTS_FILE");
+    int relaxed = mounts && *mounts;
+    if (!relaxed)
+        mounts = "/proc/mounts";
+
+    f = setmntent(mounts, "r");
     if (!f)
         return -1;
-    while (fgets(line, sizeof(line), f)) {
-        char dev[256], mp[512], fs[64];
-        if (sscanf(line, "%255s %511s %63s", dev, mp, fs) < 3)
-            continue;
+    while ((entry = getmntent(f)) != NULL) {
+        const char *fs = entry->mnt_type, *mp = entry->mnt_dir;
         if (strcasecmp(fs, "vfat") && strcasecmp(fs, "exfat") &&
-            strcasecmp(fs, "ntfs") && strcasecmp(fs, "msdos"))
+            strcasecmp(fs, "texfat") && strcasecmp(fs, "ntfs") &&
+            strcasecmp(fs, "msdos"))
             continue;
-        if (!strncmp(mp, "/media/", 7) || !strncmp(mp, "/mnt/", 5)) {
+        if (relaxed || !strncmp(mp, "/media/", 7) || !strncmp(mp, "/mnt/", 5)) {
             snprintf(out, size, "%s", mp);
-            fclose(f);
+            endmntent(f);
             return 0;
         }
     }
-    fclose(f);
+    endmntent(f);
     return -1;
 }
 
@@ -306,8 +337,9 @@ static void trim_failure_log(const char *path)
     FILE *f;
 
     f = fopen(path, "r");
-    if (!f)
+    if (!f) {
         return;
+    }
     fseek(f, 0, SEEK_END);
     size = ftell(f);
     if (size <= 200 * 1024) {
@@ -357,6 +389,7 @@ static void log_failure(const char *fmt, ...)
         fclose(f);
     }
     if (usb_mount_point(usb, sizeof(usb)) == 0) {
+        trace_msg("failure usb target=%s", usb);
         snprintf(path, sizeof(path), "%s/tweaks_failures.log", usb);
         f = fopen(path, "a");
         if (f) {
@@ -492,13 +525,22 @@ static int mkdir_p(const char *path)
 static int write_atomic(const char *path, const char *data)
 {
     char tmp[MAX_PATH];
+    struct stat st;
     FILE *f;
     snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", path, (long)getpid());
     f = fopen(tmp, "w");
     if (!f)
         return -1;
-    fputs(data, f);
-    fclose(f);
+    fchmod(fileno(f), stat(path, &st) == 0 ? (st.st_mode & 0777) : 0600);
+    int failed = fputs(data, f) == EOF;
+    if (fflush(f) != 0 || fsync(fileno(f)) != 0)
+        failed = 1;
+    if (fclose(f) != 0)
+        failed = 1;
+    if (failed) {
+        unlink(tmp);
+        return -1;
+    }
     if (rename(tmp, path) < 0) {
         unlink(tmp);
         return -1;
@@ -593,6 +635,7 @@ static void load_config(void)
 {
     char path[MAX_PATH], line[512];
     FILE *f;
+    int had_version = 0;
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.cluster_fix = 1;
@@ -631,8 +674,10 @@ static void load_config(void)
 
     snprintf(path, sizeof(path), "%s/config.conf", cfg.rw_dir);
     f = fopen(path, "r");
-    if (!f)
+    if (!f) {
+        cfg.config_version = CONFIG_VERSION;
         return;
+    }
     while (fgets(line, sizeof(line), f)) {
         char *eq, *k, *v;
         line[strcspn(line, "\r\n")] = 0;
@@ -644,7 +689,11 @@ static void load_config(void)
         *eq = 0;
         k = line;
         v = eq + 1;
-        if (!strcmp(k, "cluster_fix"))
+        if (!strcmp(k, "config_version")) {
+            cfg.config_version = atoi(v);
+            had_version = 1;
+        }
+        else if (!strcmp(k, "cluster_fix"))
             cfg.cluster_fix = parse_bool(v) == 1;
         else if (!strcmp(k, "infotainment_fix"))
             cfg.infotainment_fix = parse_bool(v) == 1;
@@ -696,6 +745,18 @@ static void load_config(void)
             snprintf(cfg.xdg_runtime_dir, sizeof(cfg.xdg_runtime_dir), "%s", v);
     }
     fclose(f);
+    /* Version 1 shipped these zero-based defaults. Only migrate the known
+     * legacy pair; retain valid, deliberately customized output numbers. */
+    if (cfg.config_version < CONFIG_VERSION &&
+        cfg.main_crtc == 0 && cfg.cluster_crtc == 1) {
+        cfg.main_crtc = 1;
+        cfg.cluster_crtc = 2;
+    }
+    if (cfg.main_crtc < 1)
+        cfg.main_crtc = 1;
+    if (!had_version || cfg.config_version < CONFIG_VERSION)
+        g_config_migrated = 1;
+    cfg.config_version = CONFIG_VERSION;
     if (cfg.poll_ms < 200)
         cfg.poll_ms = 200;
     if (cfg.poll_ms > 5000)
@@ -715,6 +776,7 @@ static void save_config(void)
     snprintf(path, sizeof(path), "%s/config.conf", cfg.rw_dir);
     snprintf(data, sizeof(data),
              "# Tweaks daemon configuration\n"
+             "config_version=2\n"
              "cluster_fix=%d\n"
              "infotainment_fix=%d\n"
              "cluster_crtc=%d\n"
@@ -751,18 +813,21 @@ static void save_config(void)
     write_atomic(path, data);
 }
 
-static int run_persist_helper(char *out, size_t out_size)
+/* Drain output through EOF, and reap exactly once. Child exit is not EOF:
+ * the final stdout block may still be in the pipe after waitpid succeeds. */
+static int capture_helper(char *const argv[], char *out, size_t out_size,
+                          int timeout_ms)
 {
     int pipefd[2];
     pid_t pid;
     size_t used = 0;
-    int status = 0;
-    time_t deadline;
+    int status = 0, reaped = 0, eof = 0, overflow = 0, timed_out = 0;
+    int64_t deadline = mono_ms() + timeout_ms;
 
     out[0] = 0;
     if (access(cfg.persist_helper, X_OK) < 0)
         return -1;
-    if (pipe(pipefd) < 0)
+    if (pipe2(pipefd, O_CLOEXEC) < 0)
         return -1;
     pid = fork();
     if (pid < 0) {
@@ -775,39 +840,63 @@ static int run_persist_helper(char *out, size_t out_size)
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[0]);
         close(pipefd[1]);
-        execl(cfg.persist_helper, cfg.persist_helper, "read", (char *)NULL);
+        execv(cfg.persist_helper, argv);
         _exit(127);
     }
     close(pipefd[1]);
     fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
 
-    deadline = time(NULL) + 2;
-    while (time(NULL) <= deadline && used + 1 < out_size) {
-        struct pollfd pfd;
-        int pr;
+    while (!reaped || !eof) {
+        char buf[1024];
         ssize_t n;
-        pfd.fd = pipefd[0];
-        pfd.events = POLLIN | POLLHUP;
-        pr = poll(&pfd, 1, 200);
-        if (pr > 0) {
-            n = read(pipefd[0], out + used, out_size - used - 1);
-            if (n > 0)
-                used += (size_t)n;
-            else if (n == 0)
+        while (!eof && (n = read(pipefd[0], buf, sizeof(buf))) >= 0) {
+            if (n == 0) {
+                eof = 1;
                 break;
+            }
+            size_t room = out_size - used - 1;
+            size_t take = (size_t)n < room ? (size_t)n : room;
+            memcpy(out + used, buf, take);
+            used += take;
+            if (take < (size_t)n)
+                overflow = 1;
         }
-        if (waitpid(pid, &status, WNOHANG) == pid)
+        if (!reaped) {
+            pid_t r = waitpid(pid, &status, WNOHANG);
+            if (r == pid)
+                reaped = 1;
+            else if (r < 0 && errno != EINTR) {
+                status = -1;
+                reaped = 1;
+            }
+        }
+        if (reaped && eof)
             break;
+        if (mono_ms() >= deadline) {
+            timed_out = 1;
+            break;
+        }
+        struct pollfd pfd = {.fd = eof ? -1 : pipefd[0],
+                             .events = POLLIN | POLLHUP};
+        poll(&pfd, 1, 20);
     }
     close(pipefd[0]);
-    if (waitpid(pid, &status, WNOHANG) == 0) {
+    if (!reaped) {
         kill(pid, SIGKILL);
-        waitpid(pid, &status, 0);
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
     }
     out[used] = 0;
-    if (used == 0)
-        return -1;
-    return (int)used;
+    return !timed_out && !overflow && status >= 0 &&
+           WIFEXITED(status) && WEXITSTATUS(status) == 0 ? (int)used : -1;
+}
+
+static int run_persist_helper(char *out, size_t out_size)
+{
+    char *args[] = {cfg.persist_helper, "read", NULL};
+    trace_msg("persist read start");
+    int n = capture_helper(args, out, out_size, 2500);
+    trace_msg("persist read done n=%d", n);
+    return n > 0 ? n : -1;
 }
 
 static int line_value(const char *out, const char *key, char *value, size_t value_size)
@@ -947,74 +1036,9 @@ static int read_dst_key(int *state, int *raw)
 static int run_persist_write(const char *key, const char *value,
                              char *out, size_t out_size)
 {
-    int pipefd[2];
-    pid_t pid;
-    size_t used = 0;
-    int status = 0;
-    time_t deadline;
-
-    out[0] = 0;
-    if (access(cfg.persist_helper, X_OK) < 0) {
-        snprintf(out, out_size, "helper missing: %s", cfg.persist_helper);
-        return -1;
-    }
-    if (pipe(pipefd) < 0)
-        return -1;
-    pid = fork();
-    if (pid < 0) {
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return -1;
-    }
-    if (pid == 0) {
-        dup2(pipefd[1], STDOUT_FILENO);
-        dup2(pipefd[1], STDERR_FILENO);
-        close(pipefd[0]);
-        close(pipefd[1]);
-        execl(cfg.persist_helper, cfg.persist_helper, "write", key, value, (char *)NULL);
-        _exit(127);
-    }
-    close(pipefd[1]);
-    fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
-
-    deadline = time(NULL) + 15;
-    while (time(NULL) <= deadline && used + 1 < out_size) {
-        struct pollfd pfd;
-        int pr;
-        ssize_t n;
-        pfd.fd = pipefd[0];
-        pfd.events = POLLIN | POLLHUP;
-        pr = poll(&pfd, 1, 200);
-        if (pr > 0) {
-            n = read(pipefd[0], out + used, out_size - used - 1);
-            if (n > 0)
-                used += (size_t)n;
-            else if (n == 0)
-                break;
-        }
-        if (waitpid(pid, &status, WNOHANG) == pid)
-            break;
-    }
-    close(pipefd[0]);
-    {
-        /* The child may have closed its output before fully exiting; give
-           it a moment before declaring a timeout, or a successful write
-           could be misreported as failed. */
-        time_t give_up = time(NULL) + 1;
-        while (time(NULL) <= give_up) {
-            if (waitpid(pid, &status, WNOHANG) == pid)
-                break;
-            usleep(20000);
-        }
-    }
-    if (waitpid(pid, &status, WNOHANG) == 0) {
-        kill(pid, SIGKILL);
-        waitpid(pid, &status, 0);
-        snprintf(out + used, out_size - used - 1, "(helper timed out)");
-        used = strlen(out);
-    }
-    out[used] = 0;
-    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
+    char *args[] = {cfg.persist_helper, "write", (char *)key,
+                    (char *)value, NULL};
+    return capture_helper(args, out, out_size, 15000) > 0 ? 0 : -1;
 }
 
 static void collapse_newlines(char *s)
@@ -1048,6 +1072,8 @@ static void check_dst(time_t now, int force)
     char tzpath[MAX_PATH + 2];
     struct tm tmv;
 
+    trace_msg("check_dst force=%d", force);
+
     if (!cfg.auto_dst) {
         snprintf(rt.dst_state, sizeof(rt.dst_state), "disabled");
         rt.dst_active = 0;
@@ -1055,11 +1081,12 @@ static void check_dst(time_t now, int force)
         rt.dst_checked_at = now;
         return;
     }
-    if (!force && rt.dst_checked_at != 0 &&
-        now - rt.dst_checked_at < cfg.dst_check_ms / 1000)
+    if (!force && rt.dst_checked_ms != 0 &&
+        mono_ms() - rt.dst_checked_ms < cfg.dst_check_ms)
         return;
 
     rt.dst_checked_at = now;
+    rt.dst_checked_ms = mono_ms();
     if (!zone_is_safe(cfg.dst_zone)) {
         snprintf(rt.dst_state, sizeof(rt.dst_state), "error");
         snprintf(rt.dst_error, sizeof(rt.dst_error), "invalid DST zone: %s", cfg.dst_zone);
@@ -1102,7 +1129,10 @@ static void check_dst(time_t now, int force)
     rt.dst_error[0] = 0;
 
     /* A read failure is not fatal: the write below may still repair the key. */
-    read_dst_key(&current, &rt.dst_raw);
+    if (read_dst_key(&current, &rt.dst_raw) < 0) {
+        snprintf(rt.dst_state, sizeof(rt.dst_state), "error");
+        return;
+    }
 
     if (current != expected) {
         char wout[4096];
@@ -1134,7 +1164,7 @@ static void check_dst(time_t now, int force)
             if (!verify_ok) {
                 /* The same-session read could not confirm: cross-check with
                  * a fresh read, allowing propagation time. */
-                for (int attempt = 0; attempt < 5; attempt++) {
+                for (int attempt = 0; attempt < 3; attempt++) {
                     int rv = read_dst_key(&verify, &verify_raw);
                     rt.dst_raw = verify_raw;
                     if (rv == 0) {
@@ -1145,7 +1175,7 @@ static void check_dst(time_t now, int force)
                     }
                     if (rv < 0)
                         break;
-                    usleep(500000);
+                    usleep(200000);
                 }
             } else {
                 /* Confirmed in-session.  One fresh read as a cross-check:
@@ -1296,7 +1326,7 @@ static int start_ota_call(int mode)
 
     have_bus = read_session_bus(bus, sizeof(bus)) == 0;
     snprintf(outpath, sizeof(outpath), "%s/ota_call.out", cfg.rw_dir);
-    fd = open(outpath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    fd = open(outpath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0) {
         snprintf(rt.ota_state, sizeof(rt.ota_state), "error");
         snprintf(rt.ota_error, sizeof(rt.ota_error), "cannot create %s", outpath);
@@ -1330,7 +1360,7 @@ static int start_ota_call(int mode)
     close(fd);
     rt.ota_child = pid;
     rt.ota_child_mode = mode;
-    rt.ota_child_started = time(NULL);
+    rt.ota_child_started = mono_s();
     snprintf(rt.ota_state, sizeof(rt.ota_state), "pending");
     log_msg("OTA: setOFFlineMode(%d) requested pid=%ld", mode, (long)pid);
     return 0;
@@ -1445,9 +1475,9 @@ static void check_ota(time_t now, int force)
 
 static void drain_ota_child(int seconds)
 {
-    time_t deadline = time(NULL) + seconds;
-    while (rt.ota_child > 0 && time(NULL) <= deadline) {
-        finish_ota_call(time(NULL));
+    int64_t deadline = mono_ms() + seconds * 1000;
+    while (rt.ota_child > 0 && mono_ms() <= deadline) {
+        finish_ota_call(mono_s());
         if (rt.ota_child > 0)
             usleep(100000);
     }
@@ -1455,11 +1485,13 @@ static void drain_ota_child(int seconds)
 
 static void save_last_gamma(void)
 {
-    char path[MAX_PATH];
-    if (!rt.gamma_valid || is_neutral_gamma(rt.last_gamma))
+    char path[MAX_PATH], saved[32];
+    if (!rt.gamma_valid || !valid_gamma(rt.last_gamma) ||
+        is_neutral_gamma(rt.last_gamma))
         return;
     snprintf(path, sizeof(path), "%s/last_gamma", cfg.rw_dir);
-    write_atomic(path, rt.last_gamma);
+    if (read_file(path, saved, sizeof(saved)) < 0 || strcmp(saved, rt.last_gamma))
+        write_atomic(path, rt.last_gamma);
 }
 
 static void load_last_gamma(void)
@@ -1474,7 +1506,7 @@ static void load_last_gamma(void)
 
 static void read_vendor_state(void)
 {
-    char out[4096], status[128], warm[128], gamma[128], bright[128];
+    char out[4096], status[128], warm[128], gamma[128] = "", bright[128] = "";
     int st = -1, level = -1;
     int have_gamma = 0, have_bright = 0;
 
@@ -1498,10 +1530,12 @@ static void read_vendor_state(void)
         st = 1;
 
     if (st < 0 && (have_gamma || have_bright))
-        st = (is_neutral_gamma(gamma) && is_neutral_gamma(bright)) ? 0 : 1;
+        st = ((have_gamma && !is_neutral_gamma(gamma)) ||
+              (have_bright && !is_neutral_gamma(bright))) ? 1 : 0;
 
     if (st < 0) {
-        rt.filter_on = 0;
+        if (rt.filter_known)
+            return; /* A transient PCL failure must not invent a new state. */
         rt.warmth_level = level > 0 ? level : 0;
         snprintf(rt.gamma, sizeof(rt.gamma), "128:128:128");
         rt.gamma_valid = 1;
@@ -1515,6 +1549,7 @@ static void read_vendor_state(void)
     }
 
     rt.filter_on = (st == 1);
+    rt.filter_known = 1;
     rt.warmth_level = (level >= 1 && level <= 9) ? level : 0;
 
     if (!rt.filter_on) {
@@ -1571,7 +1606,7 @@ static int run_wrandr(int crtc, const char *brightness)
 {
     pid_t pid;
     int status = 0;
-    time_t deadline;
+    int64_t deadline;
     char arg_crtc[64], arg_brightness[64];
 
     snprintf(arg_crtc, sizeof(arg_crtc), "--crtc=%d", crtc);
@@ -1598,8 +1633,8 @@ static int run_wrandr(int crtc, const char *brightness)
         _exit(127);
     }
 
-    deadline = time(NULL) + 2;
-    while (time(NULL) <= deadline) {
+    deadline = mono_ms() + 2500;
+    while (mono_ms() <= deadline) {
         pid_t r = waitpid(pid, &status, WNOHANG);
         if (r == pid)
             return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
@@ -1619,7 +1654,6 @@ static int apply_gamma(int crtc, const char *gamma, char *last, size_t last_size
                        int *applied, int force)
 {
     if (!gamma || !valid_gamma(gamma)) {
-        *applied = 0;
         return -1;
     }
     if (!force && *applied && !strcmp(last, gamma))
@@ -1629,7 +1663,6 @@ static int apply_gamma(int crtc, const char *gamma, char *last, size_t last_size
         *applied = 1;
         return 0;
     }
-    *applied = 0;
     set_error("wrandr failed on CRTC %d", crtc);
     return -1;
 }
@@ -1658,7 +1691,7 @@ static int send_blu_signal(int start_bit, int size, int data)
     snprintf(arg_size, sizeof(arg_size), "int32:%d", size);
     snprintf(arg_data, sizeof(arg_data), "int32:%d", data);
     snprintf(outpath, sizeof(outpath), "%s/blu_call.out", cfg.rw_dir);
-    fd = open(outpath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    fd = open(outpath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0)
         return -1;
     pid = fork();
@@ -1683,22 +1716,32 @@ static int send_blu_signal(int start_bit, int size, int data)
                               "exec %s failed: %s\n",
                               cfg.dbus_send_path, strerror(errno));
             if (len > 0)
-                (void)!write(STDOUT_FILENO, err, (size_t)len);
+                (void)!write(STDOUT_FILENO, err, strnlen(err, sizeof(err)));
         }
         _exit(127);
     }
     close(fd);
     {
         int status = 0;
-        time_t deadline = time(NULL) + 10;
-        while (time(NULL) <= deadline) {
-            if (waitpid(pid, &status, WNOHANG) == pid)
-                return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
+        int64_t deadline = mono_ms() + 10000;
+        while (mono_ms() <= deadline) {
+            if (waitpid(pid, &status, WNOHANG) == pid) {
+                if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+                    return 0;
+                char detail[512] = "";
+                read_file(outpath, detail, sizeof(detail));
+                collapse_newlines(detail);
+                log_failure("micom BLU failed bit=%d size=%d data=%d: %s",
+                            start_bit, size, data, detail);
+                return -1;
+            }
             usleep(50000);
         }
         kill(pid, SIGKILL);
         waitpid(pid, &status, 0);
     }
+    log_failure("micom BLU timed out bit=%d size=%d data=%d",
+                start_bit, size, data);
     return -1;
 }
 
@@ -1720,14 +1763,13 @@ static int blu_forced_marker(void)
     return access(path, F_OK) == 0;
 }
 
-static void set_blu_forced_marker(int on)
+static int set_blu_forced_marker(int on)
 {
     char path[MAX_PATH];
     snprintf(path, sizeof(path), "%s/blu_forced", cfg.rw_dir);
     if (on)
-        write_atomic(path, "1");
-    else
-        unlink(path);
+        return write_atomic(path, "1");
+    return unlink(path) == 0 || errno == ENOENT ? 0 : -1;
 }
 
 /*
@@ -1746,68 +1788,90 @@ static int effective_level(void)
 static void check_cluster_blu(time_t now)
 {
     static int initialized;
-    int want_forced = cfg.cluster_fix && rt.projection_active && !rt.filter_on;
+    int want_forced = cfg.cluster_fix && night_mode_on() &&
+                      (cfg.deep_red || (rt.projection_active && !rt.filter_on));
     int level = effective_level();
 
     if (!initialized) {
         /* A previous daemon run may have left the cluster forced on. */
         if (blu_forced_marker()) {
             rt.blu_forced = 1;
-            rt.blu_status_sent = BLU_STATUS_ON;
+            /* Marker means we MAY have changed hardware, not an ACK. */
         }
         initialized = 1;
     }
 
+    if (!rt.filter_known) {
+        if (want_forced || rt.blu_forced)
+            set_error("cluster restore/override waiting for vehicle state");
+        return;
+    }
+
     if (want_forced) {
+        if (level < 1 || level > 9) {
+            set_error("cluster warmth level unavailable");
+            return;
+        }
         int need = (rt.blu_status_sent != BLU_STATUS_ON) ||
                    (rt.blu_level_sent != level);
         if (!need && rt.blu_last_send &&
             now - rt.blu_last_send >= BLU_KEEPALIVE_S)
             need = 1;   /* keepalive: the vendor may re-assert its own state */
         if (need) {
-            int ok = send_blu_status(1);
-            if (level >= 1 && level <= 9)
-                ok |= send_blu_level(level);
-            if (ok == 0) {
+            /* Persist ownership BEFORE the first side effect. A partial
+             * write or power loss must still leave a recovery obligation. */
+            if (!rt.blu_forced && set_blu_forced_marker(1) < 0) {
+                set_error("cannot record cluster override ownership");
+                return;
+            }
+            rt.blu_forced = 1;
+            int status_ok = send_blu_status(1) == 0;
+            if (status_ok)
                 rt.blu_status_sent = BLU_STATUS_ON;
+            int level_ok = send_blu_level(level) == 0;
+            if (level_ok)
                 rt.blu_level_sent = level;
+            if (status_ok && level_ok) {
                 rt.blu_last_send = now;
                 rt.cluster_applied = 1;
                 rt.blu_forced = 1;
-                set_blu_forced_marker(1);
                 log_msg("cluster BLU: forced on via CAN 0x063F (level %d)",
                         level);
             } else {
                 set_error("micom blue-light send failed");
             }
         }
-        rt.blu_forced = 1;
     } else if (rt.blu_forced) {
-        /* Force period over.  If the vendor filter is still off, restore
-         * the cluster to the vendor state; if the vendor restored the
-         * filter it will have sent its own state already. */
-        rt.blu_forced = 0;
-        set_blu_forced_marker(0);
-        if (!rt.filter_on && rt.blu_status_sent == BLU_STATUS_ON) {
-            if (send_blu_status(0) == 0) {
-                rt.blu_status_sent = BLU_STATUS_OFF;
-                rt.blu_last_send = now;
-                rt.cluster_applied = 0;
-                log_msg("cluster BLU: force ended, restored off");
-            }
-        } else {
-            rt.blu_status_sent = 0;
+        /* Restore both fields. In particular, release deep-red level 9
+         * even if the vendor filter became active without a level change. */
+        int level_ok = rt.warmth_level >= 1 && rt.warmth_level <= 9;
+        if (level_ok) {
+            level_ok = send_blu_level(rt.warmth_level) == 0;
+            if (level_ok)
+                rt.blu_level_sent = rt.warmth_level;
+        } else if (!rt.filter_on) {
+            level_ok = 1; /* off is safe even when no level is available */
+        }
+        int status_ok = send_blu_status(rt.filter_on) == 0;
+        if (status_ok)
+            rt.blu_status_sent = rt.filter_on ? BLU_STATUS_ON : BLU_STATUS_OFF;
+        if (level_ok && status_ok && set_blu_forced_marker(0) == 0) {
+            rt.blu_forced = 0;
             rt.cluster_applied = 0;
+            log_msg("cluster BLU: restored vendor state status=%d level=%d",
+                    rt.blu_status_sent, rt.blu_level_sent);
+        } else {
+            set_error("cluster restore pending; will retry");
         }
     } else {
-        rt.cluster_applied = rt.filter_on ? 1 : 0;
+        /* Vendor owns the cluster state while no override is active. */
+        rt.cluster_applied = rt.filter_on;
     }
 }
 
 static void write_cluster_desired(void)
 {
-    static char last[64];
-    char path[MAX_PATH], value[64];
+    char path[MAX_PATH], value[64], current[64];
     snprintf(path, sizeof(path), "%s/cluster_gamma", cfg.rw_dir);
     if (cfg.infotainment_fix && night_mode_on()) {
         effective_warmth(value, sizeof(value));
@@ -1815,10 +1879,9 @@ static void write_cluster_desired(void)
         snprintf(value, sizeof(value), "off");
     }
     /* /rw_data lives on flash; only rewrite the file when it changes. */
-    if (!strcmp(last, value))
+    if (read_file(path, current, sizeof(current)) >= 0 && !strcmp(current, value))
         return;
-    if (write_atomic(path, value) == 0)
-        snprintf(last, sizeof(last), "%s", value);
+    write_atomic(path, value);
 }
 
 static void monitor_stop_slot(mon_t *m)
@@ -1852,7 +1915,7 @@ static void monitor_start_slot(mon_t *m)
     pid_t pid;
     char addr[MAX_PATH];
 
-    if (m->pid > 0 || cfg.projection_always)
+    if (!g_monitor_enabled || g_once_mode || m->pid > 0 || cfg.projection_always)
         return;
     if (m->is_session) {
         if (read_session_bus(addr, sizeof(addr)) < 0) {
@@ -1867,7 +1930,7 @@ static void monitor_start_slot(mon_t *m)
                 *guid = '\0';
         }
     }
-    if (pipe(pipefd) < 0)
+    if (pipe2(pipefd, O_CLOEXEC) < 0)
         return;
     pid = fork();
     if (pid < 0) {
@@ -1941,8 +2004,15 @@ static void process_monitor_line(mon_t *m, const char *line)
     if (strstr(line, "int32 ")) {
         int id = atoi(strstr(line, "int32 ") + 6);
         if (id >= 0 && !strcmp(m->member, "front_drawing_application")) {
+            int changed = id != mon_front_app_id;
             mon_front_app_id = id;
             mon_front_app_time = time(NULL);
+            if (changed && id > 0 && mon_carplay_play && !mon_carplay_app_id &&
+                mono_ms() - mon_carplay_started_ms < 2000)
+                mon_carplay_app_id = id;
+            if (changed && id > 0 && mon_android_play && !mon_android_app_id &&
+                mono_ms() - mon_android_started_ms < 2000)
+                mon_android_app_id = id;
             mon_sig_front++;
             mon_last_bus = bus;
         }
@@ -1956,8 +2026,12 @@ static void process_monitor_line(mon_t *m, const char *line)
              * Never relearn from a later front-app signal, which may be a
              * different app (e.g. Setup opened while CarPlay audio plays).
              */
-            if (on && !mon_carplay_play && mon_front_app_id > 0)
-                mon_carplay_app_id = mon_front_app_id;
+            /* The last foreground sample can still be Home/Setup. Wait for
+             * a NEW front event after play-enable before learning an id. */
+            if (on && !mon_carplay_play) {
+                mon_carplay_app_id = 0;
+                mon_carplay_started_ms = mono_ms();
+            }
             if (on != mon_carplay_play) {
                 log_msg("projection signal: carplay_play=%d (%s bus)",
                         on, m->is_session ? "session" : "system");
@@ -1967,8 +2041,10 @@ static void process_monitor_line(mon_t *m, const char *line)
             mon_carplay_play = on;
             mon_sig_carplay++;
         } else if (!strcmp(m->member, "android_auto_play_enable_status")) {
-            if (on && !mon_android_play && mon_front_app_id > 0)
-                mon_android_app_id = mon_front_app_id;
+            if (on && !mon_android_play) {
+                mon_android_app_id = 0;
+                mon_android_started_ms = mono_ms();
+            }
             if (on != mon_android_play) {
                 log_msg("projection signal: android_auto_play=%d (%s bus)",
                         on, m->is_session ? "session" : "system");
@@ -2103,6 +2179,8 @@ static void build_status(char *out, size_t size)
     json_escape(rt.tzdata_version, tzver, sizeof(tzver));
     snprintf(out, size,
              "{\"ok\":true,"
+             "\"build\":\"%s\","
+             "\"config_version\":%d,"
              "\"cluster_fix\":%d,"
              "\"infotainment_fix\":%d,"
              "\"deep_red\":%d,"
@@ -2121,6 +2199,7 @@ static void build_status(char *out, size_t size)
              "\"main_crtc\":%d,"
              "\"cluster_applied\":%d,"
              "\"main_applied\":%d,"
+             "\"front_override\":%d,"
              "\"night_forced\":%d,"
              "\"brightness\":\"%s\","
              "\"blu_forced\":%d,"
@@ -2142,6 +2221,8 @@ static void build_status(char *out, size_t size)
              "\"ota_error\":\"%s\","
              "\"message\":\"%s\","
              "\"last_error\":\"%s\"}\n",
+             TWEAKS_BUILD_ID,
+             CONFIG_VERSION,
              cfg.cluster_fix ? 1 : 0,
              cfg.infotainment_fix ? 1 : 0,
              cfg.deep_red ? 1 : 0,
@@ -2160,6 +2241,7 @@ static void build_status(char *out, size_t size)
              cfg.main_crtc,
              rt.cluster_applied ? 1 : 0,
              rt.main_applied ? 1 : 0,
+             front_owned() ? 1 : 0,
              rt.night_forced ? 1 : 0,
              valid_gamma(rt.brightness) ? rt.brightness : "128:128:128",
              rt.blu_forced ? 1 : 0,
@@ -2195,14 +2277,86 @@ static void write_status(void)
         snprintf(last, sizeof(last), "%s", json);
 }
 
-static void restore_main(void)
+/* Front ownership survives crashes and service restarts. Do not confuse a
+ * programmed output with the transient 'last applied' optimization. */
+static void vendor_brightness(char *out, size_t size)
 {
-    if (rt.main_applied) {
-        if (apply_gamma(cfg.main_crtc, "128:128:128",
-                        rt.last_main_gamma, sizeof(rt.last_main_gamma),
-                        &rt.main_applied, 0) == 0)
-            rt.main_applied = 0;
+    snprintf(out, size, "%s", rt.filter_on && valid_gamma(rt.brightness)
+             ? rt.brightness : "128:128:128");
+}
+
+static int front_owned(void)
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%s/front_override", cfg.rw_dir);
+    return access(path, F_OK) == 0;
+}
+
+static void load_front_override(void)
+{
+    char path[MAX_PATH], value[128], target[32];
+    snprintf(path, sizeof(path), "%s/front_override", cfg.rw_dir);
+    if (read_file(path, value, sizeof(value)) > 0 &&
+        line_value(value, "crtc", target, sizeof(target)) && atoi(target) > 0) {
+        rt.front_target = atoi(target);
+        rt.main_applied = 1;
     }
+}
+
+static int apply_front(const char *brightness)
+{
+    char path[MAX_PATH], state[128], base[32];
+    if (rt.main_applied && rt.front_target != cfg.main_crtc && restore_main() < 0)
+        return -1;
+    if (!front_owned()) {
+        vendor_brightness(base, sizeof(base));
+        snprintf(path, sizeof(path), "%s/front_override", cfg.rw_dir);
+        snprintf(state, sizeof(state), "crtc=%d\nrestore=%s\n", cfg.main_crtc, base);
+        if (write_atomic(path, state) < 0) {
+            set_error("cannot record front override ownership");
+            return -1;
+        }
+    }
+    rt.front_target = cfg.main_crtc;
+    /* Even a failed client invocation may have changed the output. */
+    rt.main_applied = 1;
+    return apply_gamma(rt.front_target, brightness, rt.last_main_gamma,
+                       sizeof(rt.last_main_gamma), &rt.main_applied, 1);
+}
+
+static int restore_main(void)
+{
+    char path[MAX_PATH], base[32], state[128], saved[32];
+    if (!rt.main_applied && !front_owned())
+        return 0;
+    snprintf(path, sizeof(path), "%s/cluster_gamma", cfg.rw_dir);
+    if (write_atomic(path, "off") < 0)
+        return -1;
+    vendor_brightness(base, sizeof(base));
+    snprintf(path, sizeof(path), "%s/front_override", cfg.rw_dir);
+    if (!rt.filter_known && read_file(path, state, sizeof(state)) > 0 &&
+        line_value(state, "restore", saved, sizeof(saved)) && valid_gamma(saved))
+        snprintf(base, sizeof(base), "%s", saved);
+    if (run_wrandr(rt.front_target > 0 ? rt.front_target : cfg.main_crtc, base) != 0) {
+        set_error("front restore pending; will retry");
+        return -1;
+    }
+    rt.main_applied = 0;
+    rt.last_main_gamma[0] = 0;
+    if (unlink(path) < 0 && errno != ENOENT)
+        return -1;
+    return 0;
+}
+
+static int release_overrides(void)
+{
+    rt.identify_crtc = -1;
+    int cluster_enabled = cfg.cluster_fix;
+    cfg.cluster_fix = 0;
+    check_cluster_blu(mono_s());
+    cfg.cluster_fix = cluster_enabled;
+    int front_ok = restore_main() == 0;
+    return front_ok && !rt.blu_forced ? 0 : -1;
 }
 
 /*
@@ -2230,9 +2384,11 @@ static void log_night_transitions(void)
 
 static void tick(void)
 {
-    time_t now = time(NULL);
+    time_t now = mono_s();
     char warmth[32];
     int night_on;
+
+    trace_msg("tick enter");
 
     for (int i = 0; i < 2; i++) {
         int st;
@@ -2250,7 +2406,7 @@ static void tick(void)
              * drop the amber tint; the next signal refreshes the state. */
         }
     }
-    if (!g_once_mode)
+    if (!g_once_mode && g_monitor_enabled)
         start_dbus_monitor();
     if (g_last_vendor_read == 0 || now - g_last_vendor_read >= 2) {
         read_vendor_state();
@@ -2268,14 +2424,10 @@ static void tick(void)
     effective_warmth(warmth, sizeof(warmth));
 
     check_cluster_blu(now);
-    write_cluster_desired();
 
     if (rt.identify_crtc >= 0 && rt.identify_until <= now) {
-        /* Keep last_*_gamma / *_applied as they are: when the identify write
-         * targeted the main (or cluster) CRTC, they now read "255:0:0 is on
-         * screen", which is exactly what lets restore_main() rewrite the
-         * display on the next tick.  Clearing them here left the red in place
-         * until reboot in daytime (restore_main no-ops when applied==0). */
+        /* Keep front ownership intact; restore_main() rewrites the output
+         * on this tick because front_override is still on disk. */
         rt.identify_crtc = -1;
     }
 
@@ -2289,35 +2441,20 @@ static void tick(void)
      */
     if (!identifying_main) {
         if (cfg.infotainment_fix && night_on) {
-            apply_gamma(cfg.main_crtc, warmth,
-                        rt.last_main_gamma, sizeof(rt.last_main_gamma),
-                        &rt.main_applied, 1);
+            apply_front(warmth);
         } else {
             restore_main();
         }
     }
 
     if (rt.identify_crtc >= 0) {
-        /* Write the red through the tracked state for known CRTCs so the
-         * daemon knows the display currently shows red and can restore it
-         * when the identify window ends. */
-        char red[32] = "255:0:0";
         if (rt.identify_crtc == cfg.main_crtc)
-            apply_gamma(rt.identify_crtc, red,
-                        rt.last_main_gamma, sizeof(rt.last_main_gamma),
-                        &rt.main_applied, 1);
-        else if (rt.identify_crtc == cfg.cluster_crtc)
-            apply_gamma(rt.identify_crtc, red,
-                        rt.last_cluster_gamma, sizeof(rt.last_cluster_gamma),
-                        &rt.cluster_applied, 1);
-        else {
-            char scratch[32];
-            int applied = 0;
-            apply_gamma(rt.identify_crtc, red, scratch, sizeof(scratch),
-                        &applied, 1);
-        }
+            apply_front("255:0:0");
+        else
+            rt.identify_crtc = -1;
     }
 
+    write_cluster_desired();
     save_last_gamma();
     if (!rt.last_error[0])
         set_message("Cluster fix %s; infotainment fix %s; projection %s",
@@ -2325,6 +2462,7 @@ static void tick(void)
                     cfg.infotainment_fix ? "on" : "off",
                     rt.projection_active ? "active" : "idle");
     write_status();
+    trace_msg("tick exit");
 }
 
 static void send_all(int fd, const char *data)
@@ -2468,8 +2606,14 @@ static void handle_http(int fd)
         query[0] = 0;
     }
     url_decode(path, decoded, sizeof(decoded));
+    trace_msg("http %s %s", method, decoded);
 
-    if (!strcmp(decoded, "/status") || !strcmp(decoded, "/health")) {
+    if (!strcmp(decoded, "/health")) {
+        snprintf(body, sizeof(body),
+                 "{\"ok\":true,\"build\":\"%s\",\"config_version\":%d}\n",
+                 TWEAKS_BUILD_ID, CONFIG_VERSION);
+        send_response(fd, 200, body);
+    } else if (!strcmp(decoded, "/status")) {
         build_status(body, sizeof(body));
         send_response(fd, 200, body);
     } else if (!strcmp(decoded, "/set") && !strcmp(method, "POST")) {
@@ -2493,6 +2637,7 @@ static void handle_http(int fd)
             rt.last_cluster_gamma[0] = 0;
             rt.last_main_gamma[0] = 0;
             rt.dst_checked_at = 0;
+            rt.dst_checked_ms = 0;
             rt.ota_last_attempt = 0;
             rt.ota_client_pid = 0;
             tick();
@@ -2510,32 +2655,39 @@ static void handle_http(int fd)
         cfg.infotainment_fix = 0;
         cfg.deep_red = 0;
         save_config();
-        restore_main();
-        if (rt.cluster_applied)
-            apply_gamma(cfg.cluster_crtc, "128:128:128",
-                        rt.last_cluster_gamma, sizeof(rt.last_cluster_gamma),
-                        &rt.cluster_applied, 0);
+        release_overrides();
         write_cluster_desired();
         write_status();
         build_status(body, sizeof(body));
         send_response(fd, 200, body);
     } else if (!strcmp(decoded, "/identify") && !strcmp(method, "POST")) {
-        int crtc = 0, seconds = 3;
+        int crtc, seconds = 3;
         if (query_param(query, "crtc", val, sizeof(val)))
             crtc = atoi(val);
-        if (crtc < 0)
-            crtc = 0;
+        else
+            crtc = cfg.main_crtc;
         if (query_param(query, "seconds", val, sizeof(val)))
             seconds = atoi(val);
         if (seconds < 1)
             seconds = 1;
         if (seconds > 10)
             seconds = 10;
-        rt.identify_crtc = crtc;
-        rt.identify_until = time(NULL) + seconds;
-        tick();
-        snprintf(body, sizeof(body), "{\"ok\":true,\"crtc\":%d,\"seconds\":%d}\n", crtc, seconds);
-        send_response(fd, 200, body);
+        /* Only the front display is a wrandr output. The cluster is driven
+         * by micom CAN; painting a "cluster CRTC" is not a valid diagnostic. */
+        if (crtc != cfg.main_crtc) {
+            snprintf(body, sizeof(body),
+                     "{\"ok\":false,\"error\":\"CRTC %d is not the front display "
+                     "(main_crtc=%d); the cluster is CAN-driven\"}\n",
+                     crtc, cfg.main_crtc);
+            send_response(fd, 400, body);
+        } else {
+            rt.identify_crtc = crtc;
+            rt.identify_until = mono_s() + seconds;
+            tick();
+            snprintf(body, sizeof(body),
+                     "{\"ok\":true,\"crtc\":%d,\"seconds\":%d}\n", crtc, seconds);
+            send_response(fd, 200, body);
+        }
     } else if (!strcmp(decoded, "/logs")) {
         char logpath[MAX_PATH];
         int got;
@@ -2642,7 +2794,10 @@ int main(int argc, char **argv)
         snprintf(g_rw_override, sizeof(g_rw_override), "%s", rw_override);
     load_config();
     mkdir_p(cfg.rw_dir);
+    if (g_config_migrated)
+        save_config();
     load_last_gamma();
+    load_front_override();
     load_tzdata_version();
     write_disclaimer_runtime();
 
@@ -2656,6 +2811,7 @@ int main(int argc, char **argv)
         read_vendor_state();
         update_projection();
         rt.dst_checked_at = 0;
+        rt.dst_checked_ms = 0;
         rt.ota_last_attempt = 0;
         rt.ota_client_pid = 0;
         tick();
@@ -2682,8 +2838,10 @@ int main(int argc, char **argv)
     }
 
     if (!no_dbus) {
-        g_mon[1].is_session = 1;
+        g_monitor_enabled = 1;
         start_dbus_monitor();
+    } else {
+        g_monitor_enabled = 0;
     }
 
     signal(SIGTERM, on_signal);
@@ -2711,7 +2869,7 @@ int main(int argc, char **argv)
                 nfds++;
             }
         }
-        pr = poll(fds, nfds, cfg.poll_ms);
+        pr = poll(fds, (nfds_t)nfds, cfg.poll_ms);
         if (pr > 0) {
             if (fds[0].revents & POLLIN) {
                 int cfd = accept(listen_fd, NULL, NULL);
@@ -2729,6 +2887,7 @@ int main(int argc, char **argv)
     }
 
     log_msg("tweaks daemon stopping");
+    release_overrides();
     monitor_cleanup();
     if (rt.ota_child > 0) {
         kill(rt.ota_child, SIGTERM);

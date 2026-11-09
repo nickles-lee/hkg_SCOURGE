@@ -72,20 +72,30 @@ HDMI1 1920x720   main infotainment
 HDMI2 1280x720   second display / cluster
 ```
 
-`wrandr --crtc=1` is the second output (cluster) in the vendor code. The
-diagnostic script and `Identify display` buttons confirm this on the car.
+`wrandr` numbers CRTCs from **1**: CRTC 1 is the front display (HDMI1,
+1920x720), which the vendor's `setFrontBrightnessRGBValue` targets. The
+instrument cluster is **not** a head-unit CRTC — it is driven exclusively by
+the micom CAN 0x063F signals above. `Identify CRTC 2` was therefore never a
+valid cluster diagnostic and has been removed.
 
 ## 5. Fix strategy
 
-- Cluster: while the fix is on and projection is active while the vendor has
-  flipped the filter off, re-assert the vendor's own blue-light CAN signals
-  (0x063F status=on + level) through the micom D-Bus service, and restore the
-  vendor state when the force ends. A marker file survives daemon restarts.
-- Front display: apply the same warmth via `wrandr --crtc=1 --brightness=…`
-  with the session's `XDG_RUNTIME_DIR`, re-applying every tick; the wrandr
-  wrapper also rewrites the vendor's neutral `--brightness=128:128:128`
-  reset instantly.
-- Both are independent switches in the Tweaks app.
+- Cluster: while the Tweaks cluster fix is on, assert the desired BLU state
+  through the vendor's own micom D-Bus signals (0x063F status + level).
+  Deep-red night mode asserts the vendor maximum level 9 whenever night mode
+  is effective; toggling it off restores the vehicle's own level. Two
+  independent ownership markers (`blu_forced`, `front_override`) survive
+  crashes and power loss, and each side is released only after its restore
+  write succeeds.
+- Front display: apply warmth via `wrandr --crtc=1 --brightness=…`
+  with the session's `XDG_RUNTIME_DIR`, re-applying every tick while night
+  mode is effective; the wrandr wrapper also rewrites the vendor's neutral
+  `--brightness=128:128:128` reset instantly. The pre-override vendor
+  brightness is recorded in `front_override` and restored by the daemon on
+  shutdown/`/restore` and by the uninstall script.
+- Both are independent switches in the Tweaks app. `main_crtc` defaults to
+  the vendor's front CRTC (1); pre-release installs that still carry the old
+  zero-based pair (0/1) are migrated on the next install.
 
 ## 6. Disclaimer and DST
 
@@ -200,11 +210,22 @@ Found on the car (2026-11-08) and fixed:
 Deep red night mode (added 2026-11-08): `deep_red=1` makes `effective_warmth()`
 return a fixed `128:32:16` for the front/projection display (applied per tick
 and via the wrapper's `cluster_gamma`), and `effective_level()` return 9 —
-the vendor maximum — for the cluster CAN 0x063F level while forcing. The
-vendor's exact cluster protocol was re-verified in the ApplicationManager
-disassembly: `SetCANFixedMicomRecv(ay={0x06,0x3f}, 26, 2, on+1)` for status
-and `(ay={0x06,0x3f}, 12, 4, level)` for level, system bus, dest
+the vendor maximum — for the cluster CAN 0x063F level while night mode is
+effective (not only during projection). Disabling it restores the vehicle's
+own level, including when the vehicle filter is still on. The vendor's exact
+cluster protocol was re-verified in the ApplicationManager disassembly:
+`SetCANFixedMicomRecv(ay={0x06,0x3f}, 26, 2, on+1)` for status and
+`(ay={0x06,0x3f}, 12, 4, level)` for level, system bus, dest
 `com.lge.car.micom`, path `/Can`, interface `com.lge.car.micom.can`.
+
+Static review (2026-11-09) fixed additional defects: monitor descriptors were
+zero-initialized (stdin) and could block one-shot modes; `--no-dbus` still
+started monitors via `tick()`; partial CAN writes could lose their restore
+obligation; the front override had no crash/uninstall recovery; legacy
+`main_crtc=0` configs were never migrated; `texfat` (the car's Tuxedo exFAT)
+was not recognized; the deep-red row was covered by the action buttons; and
+the combo installer could skip package stages or report `status=OK` after a
+failure. Regression tests cover each case.
 
 VM-only artifacts (not daemon bugs): the guest boots without loopback (the
 status server correctly fail-fasts; the test raises `lo` with the vendor

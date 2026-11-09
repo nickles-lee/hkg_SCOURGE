@@ -71,6 +71,27 @@ test -f "$COMP/TweaksZonePicker.qml"
 
 grep -q 'anchors.horizontalCenter: parent.horizontalCenter' "$COMP/TweaksTile.qml" || {
     echo "Tweaks tile icon is not horizontally centered" >&2; exit 1; }
+python3 - "$ADV/TweaksPage.qml" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+
+def pos(name):
+    m = re.search(r"id:\s*" + name + r"\b", text)
+    assert m, "missing " + name
+    seg = text[m.start():m.start() + 600]
+    y = int(re.search(r"\by:\s*(\d+)", seg).group(1))
+    h = re.search(r"\bheight:\s*(\d+)", seg)
+    return y, (int(h.group(1)) if h else None)
+
+dy, dh = pos("deepRedCard")
+ay, _ = pos("actions")
+dgy, _ = pos("diag")
+assert dh is not None and dy + dh <= ay, ("deep red overlaps actions", dy, dh, ay)
+assert ay + 44 <= dgy, ("actions overlap diagnostics", ay, dgy)
+assert dgy <= 610, ("diagnostics below content", dgy)
+assert "Identify CRTC 2" not in text, "cluster is not a CRTC; remove that button"
+assert "Identify front" in text and '"/identify?crtc=" + root.mainCrtc' in text, "missing front identify"
+PY
 grep -q 'y: ConstantModel.MENU_BAR_Y' "$ADV/TweaksPage.qml" || {
     echo "Tweaks page does not respect the status bar" >&2; exit 1; }
 grep -q 'height: DEVICE_HEIGHT - ConstantModel.MENU_BAR_Y' "$ADV/TweaksPage.qml" || {

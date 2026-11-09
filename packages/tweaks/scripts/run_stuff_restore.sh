@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
 # SPDX-License-Identifier: AGPL-3.0-only
 # TWEAKS_PAYLOAD_RESTORE=1
+# TWEAKS_PAYLOAD_ID=dev
 # Removes the Tweaks app and restores the QML/wrandr present before install.
 # Rename/copy this file to run_stuff.sh on the USB root, then plug it in.
 set -u
@@ -135,6 +136,24 @@ if [ -f "$RW_DIR/blu_forced" ] && command -v dbus-send >/dev/null 2>&1; then
     log "restored cluster blue-light off"
 fi
 
+# Release the front-display brightness override. The wrandr wrapper has
+# already been restored to the vendor binary above, so this talks to the
+# real compositor; the marker records the vendor brightness captured before
+# the first override.
+if [ -f "$RW_DIR/front_override" ]; then
+    fcrtc=$(sed -n 's/^crtc=//p' "$RW_DIR/front_override" 2>/dev/null | tail -n 1)
+    frestore=$(sed -n 's/^restore=//p' "$RW_DIR/front_override" 2>/dev/null | tail -n 1)
+    [ -n "$fcrtc" ] || fcrtc=1
+    [ -n "$frestore" ] || frestore=128:128:128
+    printf 'off' > "$RW_DIR/cluster_gamma" 2>/dev/null || true
+    WRANDR_BIN="${TWEAKS_WRANDR:-/usr/bin/wrandr}"
+    if [ -x "$WRANDR_BIN" ]; then
+        XDG_RUNTIME_DIR="${TWEAKS_XDG_RUNTIME_DIR:-/var/run/user/root}" \
+            "$WRANDR_BIN" --crtc="$fcrtc" --brightness="$frestore" >> "$LOG" 2>&1 || true
+    fi
+    log "restored front display crtc=$fcrtc brightness=$frestore"
+fi
+
 # Remove runtime pieces, keep backups.  failures.log is deliberately kept
 # for post-mortem after an uninstall.
 rm -f "$RW_DIR/tweaks_daemon" "$RW_DIR/tweaks_persist" \
@@ -143,7 +162,8 @@ rm -f "$RW_DIR/tweaks_daemon" "$RW_DIR/tweaks_persist" \
       "$RW_DIR/disclaimer_auto" "$RW_DIR/disclaimer_timeout_ms" \
       "$RW_DIR/zones.txt" "$RW_DIR/tzdata_version" "$RW_DIR/ota_call.out" \
       "$RW_DIR/dst_write_failed" "$RW_DIR/pcl_write_app" \
-      "$RW_DIR/blu_forced" "$RW_DIR/blu_call.out" 2>/dev/null || true
+      "$RW_DIR/blu_forced" "$RW_DIR/blu_call.out" \
+      "$RW_DIR/front_override" 2>/dev/null || true
 rm -rf "$RW_DIR/zoneinfo" "$RW_DIR/zoneinfo.new" 2>/dev/null || true
 
 # Release the vendor OTA offline flag only if Tweaks set it.

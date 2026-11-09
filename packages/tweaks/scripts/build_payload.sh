@@ -7,7 +7,7 @@ set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(dirname "$HERE")
 OUT=${1:-"$ROOT/out/usb"}
-ROOTFS="${SCOURGE_ROOTFS:-$(dirname "$0")/../../work/rootfs}"
+ROOTFS="${SCOURGE_ROOTFS:-$(dirname "$0")/../../../work/rootfs}"
 export IONIQ_ROOTFS="$ROOTFS"
 QML_SRC="$ROOT/artifacts/qml/AppHomeScreen/qml_eco3.0"
 
@@ -140,6 +140,16 @@ EOF
 
 # Manifest covers payload/ only; the loader md5-gates run_stuff.sh itself.
 ( cd "$OUT" && find payload -type f -print0 | sort -z | xargs -0 md5sum > manifest.md5 )
+
+# Bake a payload digest into the loader scripts so a same-selection rebuild
+# with different package bytes changes the loader's md5 gate and re-runs.
+PAYLOAD_ID=$(md5sum "$OUT/manifest.md5" | cut -d' ' -f1 | cut -c1-16)
+for f in "$OUT/run_stuff.sh" "$OUT/do_stuff.sh" \
+         "$OUT/run_stuff_restore.sh" "$OUT/do_stuff_restore.sh"; do
+    [ -f "$f" ] || continue
+    sed -i "s/^# TWEAKS_PAYLOAD_ID=.*/# TWEAKS_PAYLOAD_ID=$PAYLOAD_ID/" "$f"
+done
+echo "payload id: $PAYLOAD_ID"
 
 if command -v zip >/dev/null 2>&1; then
     rm -f "$ROOT/out/tweaks_app_usb.zip"

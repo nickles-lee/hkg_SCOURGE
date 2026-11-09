@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 [Unit]
 Description=Tweaks night-mode daemon (Ioniq 5 Gen5W)
-After=multi-user.target
 ConditionPathExists=/rw_data/tweaks/tweaks_daemon
 
 [Service]

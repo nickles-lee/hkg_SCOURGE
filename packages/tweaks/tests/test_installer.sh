@@ -127,7 +127,11 @@ cp "$M" "$TMP/root/app/share/AppHomeScreen/qml_eco3.0/HomeScreen/Screen_HomeScre
 cp "$S" "$TMP/root/app/share/AppHomeScreen/qml_eco3.0/HomeScreen/Screen_HomeScreen_Submenu_Setup.qml"
 cp "$C" "$TMP/root/app/share/AppHomeScreen/qml_eco3.0/component/QCustomizedMenuListAllowEmpty.qml"
 cp "$B/stock/component/common/Q_ThemeImage.qml" "$TMP/root/app/share/AppHomeScreen/qml_eco3.0/component/common/Q_ThemeImage.qml"
-printf '#!/bin/sh\n# fake vendor wrandr\nexit 0\n' > "$TMP/root/usr/bin/wrandr"
+cat > "$TMP/root/usr/bin/wrandr" <<EOF
+#!/bin/sh
+echo "\$@" >> "$TMP/wrandr.log"
+exit 0
+EOF
 chmod 755 "$TMP/root/usr/bin/wrandr"
 for f in main.qml Screen_AppStandbyClock_Confirm.qml Screen_AppStandbyClock_Confirm_Profile.qml; do
     printf '// STOCK_STANDBY_260128\n' > "$TMP/root/app/share/AppStandbyClock/qml_eco3.0/$f"
@@ -206,6 +210,26 @@ test -f "$TMP/rw/tzdata_version"
 test -f "$TMP/rw/zoneinfo/Europe/Amsterdam"
 grep -q 'auto_dst=1' "$TMP/rw/config.conf"
 grep -q 'ota_block=0' "$TMP/rw/config.conf"
+grep -q '^config_version=2$' "$TMP/rw/config.conf"
+grep -q '^deep_red=0$' "$TMP/rw/config.conf"
+
+# A legacy v1 config (zero-based CRTC pair) is migrated in place on the
+# next install, without touching deliberate custom values.
+sed -i 's/^config_version=2$/config_version=1/' "$TMP/rw/config.conf"
+sed -i 's/^main_crtc=.*/main_crtc=0/' "$TMP/rw/config.conf"
+sed -i 's/^cluster_crtc=.*/cluster_crtc=1/' "$TMP/rw/config.conf"
+TWEAKS_QML_ROOT="$TMP/root/app/share/AppHomeScreen" \
+TWEAKS_RW_DIR="$TMP/rw" \
+TWEAKS_SERVICE="$TMP/etc/systemd/system/tweaks-daemon.service" \
+TWEAKS_STANDBY_ROOT="$TMP/root/app/share/AppStandbyClock" \
+TWEAKS_OFFLINE_STATUS="$TMP/root/update/offline_status" \
+TWEAKS_WRANDR="$TMP/root/usr/bin/wrandr" \
+TWEAKS_WRANDR_REAL="$TMP/root/usr/bin/wrandr.real" \
+USB_DIR="$TMP/usb" \
+sh "$TMP/install.sh"
+grep -q '^config_version=2$' "$TMP/rw/config.conf"
+grep -q '^main_crtc=1$' "$TMP/rw/config.conf"
+grep -q '^cluster_crtc=2$' "$TMP/rw/config.conf"
 
 # Reinstall over an existing Tweaks install must keep the same variant.
 TWEAKS_QML_ROOT="$TMP/root/app/share/AppHomeScreen" \
@@ -226,6 +250,9 @@ grep -q "variant=$EXPECT" "$TMP/usb/run_stuff_result.txt" || {
 # Pretend the user enabled OTA blocking before restoring.
 printf '1' > "$TMP/rw/ota_block_owned"
 printf '1' > "$TMP/root/update/offline_status"
+# Pretend the daemon left a front-display override behind (crash case).
+printf 'crtc=1\nrestore=128:120:112\n' > "$TMP/rw/front_override"
+: > "$TMP/wrandr.log"
 
 TWEAKS_QML_ROOT="$TMP/root/app/share/AppHomeScreen" \
 TWEAKS_RW_DIR="$TMP/rw" \
@@ -235,9 +262,12 @@ TWEAKS_OFFLINE_STATUS="$TMP/root/update/offline_status" \
 TWEAKS_WRANDR="$TMP/root/usr/bin/wrandr" \
 TWEAKS_WRANDR_REAL="$TMP/root/usr/bin/wrandr.real" \
 USB_DIR="$TMP/usb" \
+PATH="$TMP/root/usr/bin:$PATH" \
 sh "$TMP/restore.sh"
 
 grep -q 'status=OK' "$TMP/usb/run_stuff_result.txt"
+grep -q -- '--crtc=1 --brightness=128:120:112' "$TMP/wrandr.log"
+test ! -f "$TMP/rw/front_override"
 test ! -f "$Q/HomeScreen/TweaksPage.qml"
 test ! -f "$Q/component/TweaksTile.qml"
 test ! -f "$Q/component/TweaksZonePicker.qml"

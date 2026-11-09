@@ -81,14 +81,18 @@ Brightness is kept at `128:128:128`.
 
 - Daemon reads `APP_SETTING_DISP_BLUE_LIGHT_STATUS` and
   `APP_SETTING_DISP_BLUE_LIGHT_WARM_LEVEL`.
-- When the filter is on, it writes the desired gamma to
-  `/rw_data/tweaks/cluster_gamma`.
-- `ApplicationManager` resets the cluster with
-  `wrandr --crtc=1 --gamma=128:128:128 --brightness=128:128:128`.
-- The wrapper detects exactly that neutral reset and substitutes the desired
-  gamma.
-- When the filter is off, or the Tweaks switch is off, the daemon writes
-  `off` and the wrapper passes the vendor command through.
+- The instrument cluster is **not** a head-unit CRTC. Amber is rendered by
+  the cluster ECU from micom CAN **0x063F**: status bit 26 / 2 bits
+  (2=on, 1=off), level bit 12 / 4 bits (1–9), sent with the vendor's own
+  `SetCANFixedMicomRecv` call (system bus, `com.lge.car.micom`, `/Can`,
+  `com.lge.car.micom.can`).
+- While the cluster fix is on and night mode is effective, the daemon asserts
+  the vehicle's level; deep-red night mode asserts level 9. Disabling the
+  override restores the vehicle's status and level.
+- Ownership markers (`blu_forced`) survive daemon crashes. A restore is only
+  considered complete when both writes succeed; otherwise it is retried.
+- `cluster_gamma` remains the wrapper's desired front-display value; the
+  wrapper rewrites only the vendor's neutral `--brightness=128:128:128` form.
 
 ## 7. Infotainment fix
 
@@ -101,15 +105,16 @@ Brightness is kept at `128:128:128`.
 - `status.json` exposes `mon_system`, `mon_session`, `sig_carplay`,
   `sig_android`, `sig_front` and `sig_bus` so a test drive proves which bus
   delivered the signals, plus `deep_red` for the deep-red night mode toggle.
-- The CarPlay and Android Auto app IDs are learned separately, each from the
-  `front_drawing_application` value at the moment its play-enable flag turns
-  on (0→1). A later front-app signal never overwrites the learned ID, so
-  opening Setup during playback cannot poison it.
-- While the playing source's app is foreground and the filter is on, the
-  daemon applies the same gamma to `main_crtc` (default 0). If a source's app
-  ID is still unknown (e.g. the daemon started mid-playback), playback alone
-  enables the tint as a fallback.
-- When projection leaves, the daemon restores neutral on the main CRTC.
+- The CarPlay and Android Auto app IDs are learned separately from the first
+  `front_drawing_application` event after the play-enable flag turns on; a
+  stale foreground sample from before play-enable is never adopted.
+- While the playing source's app is foreground and night mode is effective,
+  the daemon applies the same warmth to `main_crtc` (default **1**, the
+  vendor front display). If a source's app ID is still unknown (e.g. the
+  daemon started mid-playback), playback alone enables the tint as a fallback.
+- When projection leaves, the daemon restores the front display using the
+  brightness recorded in `front_override`; the marker also covers daemon
+  crashes and uninstall.
 - The feature is independent of the cluster switch.
 
 ## 8. Safety disclaimer auto-accept
@@ -155,7 +160,7 @@ Brightness is kept at `128:128:128`.
 | Method | Path | Meaning |
 |---|---|---|
 | GET | `/status` | state JSON |
-| GET | `/health` | liveness |
+| GET | `/health` | liveness + build id/config version |
 | GET | `/logs` | log tail |
 | POST | `/set?cluster_fix=0\|1` | cluster toggle |
 | POST | `/set?infotainment_fix=0\|1` | projection toggle |
@@ -166,8 +171,8 @@ Brightness is kept at `128:128:128`.
 | POST | `/set?dst_zone=<IANA>` | DST timezone |
 | POST | `/set?ota_block=0\|1` | Hyundai OTA block |
 | POST | `/apply` | apply immediately |
-| POST | `/restore` | disable night fixes and restore neutral |
-| POST | `/identify?crtc=N&seconds=3` | identify a display |
+| POST | `/restore` | disable night fixes and release front/cluster overrides |
+| POST | `/identify?crtc=N&seconds=3` | identify the front display (only `main_crtc`) |
 
 ## 12. QML integration
 
@@ -235,9 +240,10 @@ tzdata, and releases the OTA offline flag.
 1. `tweaks_persist` depends on the vendor GENIVI PCL and D-Bus environment.
    If it fails, the daemon reports the error and does not guess the filter
    state; `force_filter_on`/`warmth_override` can be used for testing.
-2. The main-display gamma path may not cover the `mfxsink` IVI surface on
-   every firmware; that is what the `Identify main` diagnostic and the
-   independent toggle are for.
+2. The front-display brightness path may not cover the `mfxsink` IVI surface
+   on every firmware; that is what the `Identify front` diagnostic and the
+   independent toggle are for. The instrument cluster is not a CRTC; it is
+   driven by micom CAN 0x063F.
 3. Firmware updates overwrite `/usr/bin/wrandr` and the QML; rerun the
    sideload installer.
 4. Gamma applies to the whole cluster panel; the vehicle's own warmth levels

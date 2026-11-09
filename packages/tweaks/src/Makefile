@@ -3,11 +3,13 @@
 CC ?= gcc
 CFLAGS ?= -O2 -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation
 LDFLAGS ?= -static
+BUILD_ID ?= $(shell sha256sum tweaks_daemon.c | cut -c1-12)
+CPPFLAGS += -DTWEAKS_BUILD_ID='"$(BUILD_ID)"'
 
 all: tweaks_daemon wrandr_wrapper
 
 tweaks_daemon: tweaks_daemon.c
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $<
 
 wrandr_wrapper: wrandr_wrapper.c
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<

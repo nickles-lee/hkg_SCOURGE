@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
 # SPDX-License-Identifier: AGPL-3.0-only
 # TWEAKS_PAYLOAD_REV=1
+# TWEAKS_PAYLOAD_ID=dev
 # Tweaks / night-mode fixes for Ioniq 5 Gen5W (260128).
 #
 # Copy the contents of the USB tree to the root of a FAT/exFAT stick.  The
@@ -302,6 +303,7 @@ chown 0:0 "$SERVICE" 2>/dev/null || true
 if [ ! -f "$RW_DIR/config.conf" ]; then
     cat > "$RW_DIR/config.conf" <<EOF
 # Tweaks daemon configuration
+config_version=2
 cluster_fix=1
 infotainment_fix=1
 cluster_crtc=2
@@ -342,13 +344,40 @@ if [ -d "$PAYLOAD/tzdata/zoneinfo" ]; then
     chmod -R a+rX "$RW_DIR/zoneinfo" 2>/dev/null || true
 fi
 
-# Mirror the two disclaimer settings as small files for AppStandbyClock.
+set_conf_key() {
+    ck="$1"
+    cv="$2"
+    cf="$3"
+    awk -v k="$ck" -v v="$cv" '
+        BEGIN { done = 0 }
+        index($0, k "=") == 1 { print k "=" v; done = 1; next }
+        { print }
+        END { if (!done) print k "=" v }
+    ' "$cf" > "$cf.tmp.$$" && mv -f "$cf.tmp.$$" "$cf"
+}
+
+# Migrate the v1 configuration in place. Only the exact legacy pair is
+# rewritten; deliberate custom CRTC numbers are preserved.
 cfg_value() {
     key="$1"
     fallback="$2"
     value=$(sed -n "s/^${key}=//p" "$RW_DIR/config.conf" 2>/dev/null | tail -n 1)
     [ -n "$value" ] && printf '%s' "$value" || printf '%s' "$fallback"
 }
+if ! grep -q '^config_version=2$' "$RW_DIR/config.conf" 2>/dev/null; then
+    if [ "$(cfg_value main_crtc 1)" = "0" ] && \
+       [ "$(cfg_value cluster_crtc 2)" = "1" ]; then
+        set_conf_key main_crtc 1 "$RW_DIR/config.conf"
+        set_conf_key cluster_crtc 2 "$RW_DIR/config.conf"
+        log "config migrated: legacy CRTC pair 0/1 -> 1/2"
+    fi
+    set_conf_key config_version 2 "$RW_DIR/config.conf"
+fi
+if ! grep -q '^xdg_runtime_dir=' "$RW_DIR/config.conf" 2>/dev/null; then
+    set_conf_key xdg_runtime_dir /var/run/user/root "$RW_DIR/config.conf"
+fi
+
+# Mirror the two disclaimer settings as small files for AppStandbyClock.
 printf '%s' "$(cfg_value disclaimer_auto 1)" > "$RW_DIR/disclaimer_auto"
 printf '%s' "$(cfg_value disclaimer_timeout_ms 2000)" > "$RW_DIR/disclaimer_timeout_ms"
 chmod 600 "$RW_DIR/disclaimer_auto" "$RW_DIR/disclaimer_timeout_ms" 2>/dev/null || true

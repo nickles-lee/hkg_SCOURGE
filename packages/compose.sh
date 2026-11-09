@@ -115,6 +115,13 @@ done
 
 # --- master run_stuff.sh (MODE= pattern) -------------------------------------------
 ORDER=$(echo "$SELECTED" | tr ' ' ',')
+ORDER_SPACES="$SELECTED"
+
+# Digest of every staged installer/manifest. The loader re-runs the master
+# script when its bytes change, so a same-selection rebuild with different
+# package payloads still triggers an install on the next plug-in.
+PAYLOAD_ID=$(find "$STAGE/combo" -type f \( -name manifest.md5 -o -name stage.sh -o -name restore.sh \) -print0 \
+    | sort -z | xargs -0 md5sum | md5sum | cut -c1-16)
 
 cat > "$STAGE/run_stuff.sh" <<EOF
 #!/bin/sh
@@ -124,6 +131,10 @@ cat > "$STAGE/run_stuff.sh" <<EOF
 #
 # Put this file and combo/ at the ROOT of a FAT/exFAT USB stick. The
 # initial-root failsafe runs it as root within ~8 s of a content change.
+#
+# PAYLOAD_ID is a digest of the selected stage installers + manifests. It is
+# part of this file, so a rebuilt package changes the loader's md5 gate.
+PAYLOAD_ID="$PAYLOAD_ID"
 #
 # MODE (edit the line below; the md5 change makes the loader re-run it):
 #   all       every selected package, in dependency-safe order (default)
@@ -148,6 +159,7 @@ result(){
         echo "usb=\$USB_DIR"
         echo "uid=\$(id -u 2>/dev/null)"
         echo "mode=\$MODE"
+        echo "payload_id=\$PAYLOAD_ID"
         cat "\$STAGES_LOG" 2>/dev/null
         echo "status=\$1"
     } > "\$USB_DIR/run_stuff_result.txt" 2>&1
@@ -157,12 +169,14 @@ result(){
 
 STAGES_LOG="\$RW_DIR/stages.log"
 : > "\$STAGES_LOG" 2>/dev/null
+FAILED=""
 
 run_stage(){
     name="\$1"; script="\$2"
     log "=== stage \$name ==="
     if [ ! -f "\$script" ]; then
         echo "stage_\$name=status=missing" >> "\$STAGES_LOG"
+        FAILED="\$FAILED \$name"
         return 1
     fi
     # Per-package installers honor USB_DIR; point them at their own subtree.
@@ -171,12 +185,13 @@ run_stage(){
         return 0
     else
         echo "stage_\$name=status=FAIL" >> "\$STAGES_LOG"
+        FAILED="\$FAILED \$name"
         return 1
     fi
 }
 
 case "\$MODE" in
-  all)     for s in $ORDER; do run_stage "\$s" "\$COMBO/\$s/stage.sh" || true; done ;;
+  all)     for s in $ORDER_SPACES; do run_stage "\$s" "\$COMBO/\$s/stage.sh" || true; done ;;
 EOF
 
 # restore runs in reverse
@@ -195,6 +210,10 @@ cat >> "$STAGE/run_stuff.sh" <<'EOF'
   *) echo "unknown MODE: $MODE" >> "$STAGES_LOG" ;;
 esac
 
+if [ -n "$FAILED" ]; then
+    result "FAIL"
+    exit 1
+fi
 result "OK"
 exit 0
 EOF

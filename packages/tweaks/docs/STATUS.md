@@ -73,6 +73,6 @@
 2. Install.
 3. Open Tweaks; both switches should be on.
 4. Start CarPlay/Android Auto; cluster should stay amber.
-5. Use `Identify main` to confirm the main CRTC.
+5. Use `Identify front` to confirm the front-display CRTC.
 6. Toggle the infotainment fix and check the projection screen.
 7. Restore and confirm stock behaviour.

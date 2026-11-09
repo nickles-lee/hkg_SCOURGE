@@ -10,7 +10,7 @@
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(dirname "$HERE")
-R=${IONIQ_ROOTFS:-${SCOURGE_ROOTFS:-$(dirname "$0")/../../work/rootfs}}
+R=${IONIQ_ROOTFS:-${SCOURGE_ROOTFS:-$(dirname "$0")/../../../work/rootfs}}
 BUILD="$ROOT/build/persist"
 OUT="$ROOT/src/tweaks_persist"
 CC=${CC:-gcc}

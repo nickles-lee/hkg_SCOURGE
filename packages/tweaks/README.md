@@ -34,22 +34,20 @@ setting and use Hyundai's own gamma table. There is no new warmth slider.
 
 ## Why this exists
 
-The cluster's amber tint is a DRM gamma LUT on the second display output. The
-vendor resets it with:
-
-```sh
-wrandr --crtc=1 --gamma=128:128:128 --brightness=128:128:128
-```
-
-when the blue-light filter is disabled. CarPlay and Android Auto force that
-disable path, so the cluster loses its tint too.
+The cluster's amber tint is driven by the micom service over CAN **0x063F**
+(status bit 26, level bit 12) — the instrument cluster is its own ECU-driven
+display, not a head-unit CRTC. The vendor flips that setting off when CarPlay
+or Android Auto takes over, which loses the cluster tint as collateral damage.
 
 The Infotainment side is separate: projection renders on its own IVI surface
-(`mfxsink`, surface `4010`), so the native UI tint does not cover it.
+(`mfxsink`, surface `4010`), so the native UI tint does not cover it. The
+vendor tints the front display through
+`wrandr --crtc=1 --brightness=<r:g:b>`.
 
-The app fixes the cluster by intercepting the neutral reset and substituting
-the current Hyundai warmth. The infotainment fix applies the same gamma to the
-main display while projection is foreground.
+The app keeps the cluster asserted through the same micom CAN signals the
+vendor uses, and applies the same Hyundai warmth to the front display while
+projection is foreground. Deep red night mode asserts the vendor maximum
+cluster level (9) and a deep-red front brightness.
 
 ## Firmware evidence
 
@@ -187,30 +185,33 @@ Bound to `127.0.0.1:8091`.
 | Method | Path | Meaning |
 |---|---|---|
 | GET | `/status` | state JSON |
-| GET | `/health` | liveness |
+| GET | `/health` | liveness + build id/config version |
 | GET | `/logs` | daemon log tail |
 | POST | `/set?cluster_fix=0\|1` | cluster toggle |
 | POST | `/set?infotainment_fix=0\|1` | projection toggle |
+| POST | `/set?deep_red=0\|1` | deep red night mode (front 128:32:16, cluster level 9) |
 | POST | `/set?disclaimer_auto=0\|1` | safety disclaimer auto-accept |
 | POST | `/set?disclaimer_timeout_ms=1000..10000` | auto-accept delay |
 | POST | `/set?auto_dst=0\|1` | automatic DST |
 | POST | `/set?dst_zone=Europe%2FAmsterdam` | IANA zone used for DST |
 | POST | `/set?ota_block=0\|1` | block Hyundai OTA |
 | POST | `/apply` | re-apply immediately |
-| POST | `/restore` | turn both night fixes off and restore stock gamma |
-| POST | `/identify?crtc=N&seconds=3` | briefly tint a CRTC red |
+| POST | `/restore` | turn both night fixes off and release front/cluster overrides |
+| POST | `/identify?crtc=N&seconds=3` | briefly tint the front display red (only `main_crtc`) |
 
 ## Config
 
 `/rw_data/tweaks/config.conf`:
 
 ```ini
+config_version=2
 cluster_fix=1
 infotainment_fix=1
-cluster_crtc=1
-main_crtc=0
+cluster_crtc=2
+main_crtc=1
 warmth_override=0     # 0 = follow vehicle
 force_filter_on=0
+deep_red=0
 projection_always=0
 projection_app_id=0   # 0 = learn from D-Bus
 poll_ms=1000
@@ -228,6 +229,7 @@ tzdata_version_file=/rw_data/tweaks/tzdata_version
 offline_status_path=/update/offline_status
 session_bus_file=/tmp/session_appmgr
 dbus_send_path=/usr/bin/dbus-send
+xdg_runtime_dir=/var/run/user/root
 ```
 
 ## Tests
@@ -247,9 +249,14 @@ Battery, WiFi and combined bases.
   could not initialise the vendor PCL. Run the diagnostic script and check
   `tweaks_persist read`. On the car PCL needs the system D-Bus and
   `pers_admin_svc` running.
-- **Infotainment fix reports “main display not applied”** — CRTC 0 did not
-  accept the gamma on this display path. Use `Identify main` to confirm the
-  CRTC, or change `main_crtc` in the config.
+- **Infotainment fix reports “main display not applied”** — the front display
+  rejected the brightness write. Use `Identify front` to confirm the output,
+  or change `main_crtc` in the config (defaults to the vendor front CRTC 1;
+  old 0-based configs are migrated on the next install).
+- **Deep red shows no cluster change** — it asserts CAN level 9 whenever the
+  cluster fix is on and night mode is effective (filter on, or projection
+  active). Check `blu_level_sent`/`blu_forced` in `status.json` and the
+  `micom BLU` lines in `failures.log` if the micom write was rejected.
 - **Testing projection manually** — write `1` or `0` to
   `/rw_data/tweaks/projection_state`; the daemon prefers that file over the
   D-Bus detector.

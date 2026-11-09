@@ -294,7 +294,7 @@ Item {
             x: 0
             y: 78
             width: 570
-            height: 140
+            height: 120
             radius: 14
             color: "#1B1B1B"
             border.color: root.clusterFix ? "#2E7D32" : "#333333"
@@ -321,7 +321,7 @@ Item {
 
             QText {
                 x: 20
-                y: 108
+                y: 94
                 width: 390
                 text: root.clusterFix
                       ? (root.filterActive
@@ -348,7 +348,7 @@ Item {
             x: 0
             y: 226
             width: 570
-            height: 140
+            height: 120
             radius: 14
             color: "#1B1B1B"
             border.color: root.infotainmentFix ? "#2E7D32" : "#333333"
@@ -375,7 +375,7 @@ Item {
 
             QText {
                 x: 20
-                y: 108
+                y: 94
                 width: 390
                 text: root.infotainmentFix
                       ? (root.projectionActive
@@ -402,7 +402,7 @@ Item {
             x: 0
             y: 374
             width: 570
-            height: 140
+            height: 120
             radius: 14
             color: "#1B1B1B"
             border.color: "#333333"
@@ -440,9 +440,9 @@ Item {
         Rectangle {
             id: deepRedCard
             x: 0
-            y: 522
+            y: 498
             width: 570
-            height: 44
+            height: 40
             radius: 10
             color: "#1B1B1B"
             border.color: root.deepRed ? "#8E2424" : "#333333"
@@ -682,7 +682,7 @@ Item {
         Row {
             id: actions
             x: 0
-            y: 522
+            y: 542
             spacing: 8
 
             TweaksButton {
@@ -709,23 +709,16 @@ Item {
             TweaksButton {
                 width: 170
                 height: 44
-                label: "Identify CRTC 2"
+                label: "Identify front"
                 buttonEnabled: root.serviceOk
-                onClicked: root.post("/identify?crtc=2&seconds=3")
-            }
-            TweaksButton {
-                width: 160
-                height: 44
-                label: "Identify CRTC 1"
-                buttonEnabled: root.serviceOk
-                onClicked: root.post("/identify?crtc=1&seconds=3")
+                onClicked: root.post("/identify?crtc=" + root.mainCrtc + "&seconds=3")
             }
         }
 
         QText {
             id: diag
             x: 0
-            y: 572
+            y: 590
             width: 1180
             text: "Cluster CAN 0x063F \u00b7 Front CRTC " + root.mainCrtc
                   + " \u00b7 projection " + (root.projectionActive ? "active" : "idle")
@@ -741,7 +734,7 @@ Item {
         QText {
             id: message
             x: 0
-            y: 596
+            y: 610
             width: 1180
             text: root.daemonMessage
             font.pixelSize: 15

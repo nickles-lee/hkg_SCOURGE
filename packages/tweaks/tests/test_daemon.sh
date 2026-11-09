@@ -423,4 +423,162 @@ test "$(cat "$TMP/update2/offline_status")" = "0"
 test ! -f "$TMP/rw2/ota_block_owned"
 grep -q 'setOFFlineMode int32:0' "$TMP/dbus.log"
 
+# ---- legacy config migration (v1 defaults were zero-based) -------------
+mkdir -p "$TMP/rw5"
+cat > "$TMP/rw5/config.conf" <<EOF
+cluster_fix=1
+infotainment_fix=1
+cluster_crtc=1
+main_crtc=0
+wrandr_path=$TMP/fake-wrandr
+persist_helper=$TMP/rw/missing-helper
+dbus_send_path=$TMP/fake-dbus
+EOF
+out=$("$BIN" --rw-dir "$TMP/rw5" --status --no-dbus)
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["main_crtc"] == 1, d; assert d["cluster_crtc"] == 2, d; assert d["config_version"] == 2, d'
+grep -q '^config_version=2$' "$TMP/rw5/config.conf"
+grep -q '^main_crtc=1$' "$TMP/rw5/config.conf"
+
+# ---- deep red keeps cluster level 9 with the vehicle filter ON ---------
+# (the ordinary night case: filter on, projection idle)
+mkdir -p "$TMP/rw6"
+cat > "$TMP/persist-state" <<EOF
+#!/bin/sh
+case "\$1" in
+read)
+    echo "APP_SETTING_DISP_BLUE_LIGHT_STATUS=\$(cat "$TMP/filter-state" 2>/dev/null || echo 1)"
+    echo "APP_SETTING_DISP_BLUE_LIGHT_WARM_LEVEL=\$(cat "$TMP/level-state" 2>/dev/null || echo 5)"
+    echo "APP_SETTING_DISP_GAMMA_R_G_B=128:116:104"
+    echo "APP_SETTING_DISP_BRIGHTNESS_R_G_B=128:116:104"
+    echo "APP_SETTING_CLOCK_DAYLIGHTSAVETIME=0"
+    ;;
+esac
+EOF
+chmod +x "$TMP/persist-state"
+cat > "$TMP/rw6/config.conf" <<EOF
+cluster_fix=1
+infotainment_fix=1
+cluster_crtc=2
+main_crtc=1
+deep_red=1
+poll_ms=1000
+wrandr_path=$TMP/fake-wrandr
+persist_helper=$TMP/persist-state
+tzdata_dir=/usr/share/zoneinfo
+tzdata_version_file=$TMP/rw6/tzdata_version
+offline_status_path=$TMP/offline-dr2
+dbus_send_path=$TMP/fake-dbus
+EOF
+echo 2026f > "$TMP/rw6/tzdata_version"
+echo 1 > "$TMP/filter-state"
+echo 5 > "$TMP/level-state"
+rm -f "$TMP/rw6/projection_state"
+: > "$TMP/wrandr.log"
+: > "$TMP/dbus.log"
+out=$("$BIN" --rw-dir "$TMP/rw6" --once --no-dbus)
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["filter_active"] == 1, d; assert d["deep_red"] == 1, d; assert d["blu_forced"] == 1, d; assert d["blu_level_sent"] == 9, d; assert d["night_forced"] == 0, d'
+grep -q -- 'array:byte:0x06,0x3f int32:26 int32:2 int32:2' "$TMP/dbus.log"
+grep -q -- 'array:byte:0x06,0x3f int32:12 int32:4 int32:9' "$TMP/dbus.log"
+grep -q -- '--crtc=1 --brightness=128:32:16' "$TMP/wrandr.log"
+test -f "$TMP/rw6/blu_forced"
+test -f "$TMP/rw6/front_override"
+grep -q '^crtc=1$' "$TMP/rw6/front_override"
+
+# Deep red off while the filter is still on: release the level-9 override
+# and restore the vehicle's own level and front brightness. The --set path
+# runs a full tick, so its own JSON is the authoritative result.
+: > "$TMP/wrandr.log"
+: > "$TMP/dbus.log"
+out=$("$BIN" --rw-dir "$TMP/rw6" --set deep_red=0)
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["deep_red"] == 0, d; assert d["blu_forced"] == 0, d; assert d["blu_level_sent"] == 5, d; assert d["blu_status_sent"] == 2, d'
+grep -q -- 'array:byte:0x06,0x3f int32:12 int32:4 int32:5' "$TMP/dbus.log"
+grep -q -- '--crtc=1 --brightness=128:116:104' "$TMP/wrandr.log"
+test ! -f "$TMP/rw6/blu_forced"
+# The front display is still owned by the ordinary night-mode tint.
+test -f "$TMP/rw6/front_override"
+
+# A crash-restart (markers left on disk, no in-memory state) must release
+# the level-9 override and restore the front display from the marker.
+echo 0 > "$TMP/filter-state"
+echo 1 > "$TMP/rw6/projection_state"
+"$BIN" --rw-dir "$TMP/rw6" --set deep_red=1 >/dev/null
+test -f "$TMP/rw6/front_override"
+test -f "$TMP/rw6/blu_forced"
+sed -i 's/^deep_red=.*/deep_red=0/' "$TMP/rw6/config.conf"
+: > "$TMP/wrandr.log"
+: > "$TMP/dbus.log"
+echo 0 > "$TMP/rw6/projection_state"
+echo 0 > "$TMP/filter-state"
+out=$("$BIN" --rw-dir "$TMP/rw6" --once --no-dbus)
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["filter_active"] == 0, d; assert d["main_applied"] == 0, d; assert d["front_override"] == 0, d; assert d["blu_forced"] == 0, d; assert d["blu_level_sent"] == 5, d; assert d["blu_status_sent"] == 1, d'
+grep -q -- '--crtc=1 --brightness=128:128:128' "$TMP/wrandr.log"
+test ! -f "$TMP/rw6/front_override"
+test ! -f "$TMP/rw6/blu_forced"
+
+# ---- texfat (Tuxera exFAT on the car) is detected as a USB stick -------
+mkdir -p "$TMP/usb-texfat"
+printf 'dev %s texfat rw 0 0\n' "$TMP/usb-texfat" > "$TMP/fake-mounts"
+mkdir -p "$TMP/rw7"
+cat > "$TMP/rw7/config.conf" <<EOF
+cluster_fix=0
+infotainment_fix=0
+auto_dst=1
+dst_zone=Europe/Amsterdam
+dst_check_ms=60000
+wrandr_path=$TMP/fake-wrandr
+persist_helper=$TMP/rw2/persist-reject
+tzdata_dir=/usr/share/zoneinfo
+tzdata_version_file=$TMP/rw7/tzdata_version
+offline_status_path=$TMP/offline-texfat
+dbus_send_path=$TMP/fake-dbus
+EOF
+echo 2026f > "$TMP/rw7/tzdata_version"
+echo 0 > "$TMP/dst"
+TWEAKS_MOUNTS_FILE="$TMP/fake-mounts" "$BIN" --rw-dir "$TMP/rw7" --once --no-dbus --dst-at "$winter" >/dev/null
+test -f "$TMP/usb-texfat/tweaks_failures.log"
+grep -q 'write FAILED' "$TMP/usb-texfat/tweaks_failures.log"
+
+# ---- /health carries a build id and config version ---------------------
+"$BIN" --rw-dir "$TMP/rw6" --port 18093 --no-dbus >/dev/null 2>&1 &
+pidh=$!
+sleep 0.5
+python3 - <<'PY'
+import json,urllib.request
+d=json.load(urllib.request.urlopen("http://127.0.0.1:18093/health", timeout=3))
+assert d["ok"] is True and d["config_version"] == 2, d
+assert d["build"], d
+PY
+kill "$pidh" 2>/dev/null || true
+wait "$pidh" 2>/dev/null || true
+
+# ---- one-shot modes must not hang on an inherited stdin ----------------
+mkfifo "$TMP/stdin-fifo"
+(sleep 10 > "$TMP/stdin-fifo" &) 2>/dev/null
+start=$(date +%s)
+timeout 5 "$BIN" --rw-dir "$TMP/rw5" --status --no-dbus < "$TMP/stdin-fifo" >/dev/null
+rc=$?
+elapsed=$(($(date +%s) - start))
+[ "$rc" -ne 124 ] || { echo "one-shot mode blocked on stdin" >&2; exit 1; }
+[ "$elapsed" -lt 5 ] || { echo "one-shot mode too slow: ${elapsed}s" >&2; exit 1; }
+
+# ---- identify only accepts the front display ---------------------------
+"$BIN" --rw-dir "$TMP/rw3" --port 18094 --no-dbus >/dev/null 2>&1 &
+pidi=$!
+sleep 0.5
+python3 - <<'PY'
+import json,urllib.request,urllib.error
+base="http://127.0.0.1:18094"
+try:
+    req=urllib.request.Request(base+"/identify?crtc=2&seconds=1", method="POST")
+    urllib.request.urlopen(req, timeout=3)
+    raise SystemExit("CRTC 2 identify must be rejected")
+except urllib.error.HTTPError as e:
+    assert e.code == 400, e
+req=urllib.request.Request(base+"/identify?crtc=1&seconds=1", method="POST")
+d=json.load(urllib.request.urlopen(req, timeout=3))
+assert d["ok"] is True and d["crtc"] == 1, d
+PY
+kill "$pidi" 2>/dev/null || true
+wait "$pidi" 2>/dev/null || true
+
 echo "PASS: daemon smoke test"
