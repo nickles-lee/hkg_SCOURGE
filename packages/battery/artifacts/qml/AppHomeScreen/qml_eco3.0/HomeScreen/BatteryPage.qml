@@ -170,8 +170,9 @@ Item {
     readonly property bool preheatOn: preheatPending || preheatRequested || heaterActive
     readonly property bool socLow: socValid && socPct < 20
     readonly property bool tempHigh: battValid && battMin >= 21
-    readonly property bool doorAllowed: serviceOk && gearKnown && park
-                                        && !(cableKnown && cable)
+    // The gear/Park signal (0x036) is unreliable; only an observed cable
+    // vetoes the charge door for now.
+    readonly property bool doorAllowed: serviceOk && !(cableKnown && cable)
     readonly property bool doorOpen: doorKnown && doorState === 1
 
     readonly property string outsideTemp: {
@@ -359,8 +360,8 @@ Item {
 
     function toggleDoor() {
         if (!doorAllowed || doorBusy) return
-        if (doorOpen) post("/chargedoor/close?park=1")
-        else post("/chargedoor/open?park=1")
+        if (doorOpen) post("/chargedoor/close")
+        else post("/chargedoor/open")
     }
 
     function heaterText() {
@@ -388,8 +389,6 @@ Item {
     function doorSubText() {
         if (!serviceOk) return "Service unavailable"
         if (doorBlockReason) return "Blocked: " + doorBlockReason
-        if (!gearKnown) return "Gear position unavailable"
-        if (!park) return "Shift to Park to use the charge door"
         if (cableKnown && cable) return "Unplug the charging cable first"
         if (!cableKnown) return "Cable state unknown \u2014 allowed"
         if (doorBusy) return doorMessage === "closing" ? "Closing\u2026" : "Opening\u2026"

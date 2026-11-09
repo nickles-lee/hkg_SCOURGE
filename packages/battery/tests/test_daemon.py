@@ -5,7 +5,7 @@
 
 Covers the I-CAN reads (0x2FC temperature/SoC, 0x326 cable), the micom
 commands (0x0C7 preheat, 0x4ED dash, 0x4A2 charge door), the charge-door
-park override, optimistic feedback, the session-bus Home/Star monitor,
+gear-gate-disabled door, optimistic feedback, the session-bus Home/Star monitor,
 and the bus sniffer.
 """
 import json
@@ -369,14 +369,23 @@ def main():
         assert st["door_state"] == 2 and st["door_source"] == "can", st
         print("door close CAN feedback ok")
 
-        # Park veto: QML says park, but the bus says Drive.
+        # The 0x036 gear signal is unreliable and no longer gates the door.
         send(s, 0x036, GEAR_DRIVE)
         time.sleep(0.2)
-        expect_409("/chargedoor/open?park=1", "not_park")
-        print("door park veto ok")
+        r = http("/chargedoor/open?park=1", "POST")
+        assert r["ok"] is True and r["door"] == "opening", r
+        st = wait_door("open", timeout=4.0)
+        assert st["door_source"] == "command", st
+        print("door open with gear=Drive ok (gear gate disabled)")
 
-        # Cable gate.
-        send(s, 0x036, GEAR_PARK)
+        # Park unknown (stale 0x036) also does not gate it.
+        time.sleep(2.5)
+        r = http("/chargedoor/close", "POST")
+        assert r["ok"] is True and r["door"] == "closing", r
+        st = wait_door("closed", timeout=4.0)
+        print("door close with gear unknown ok (gear gate disabled)")
+
+        # Cable gate (still enforced when a cable is actually observed).
         send(s, 0x326, CABLE_PLUGGED)
         time.sleep(0.2)
         expect_409("/chargedoor/open?park=1", "cable_plugged")
@@ -385,19 +394,13 @@ def main():
         expect_409("/chargedoor/open?park=1", "cable_plugged")
         print("door cable/charging gate ok")
 
-        # Park unknown without the QML override.
+        # Unknown cable (aged out) is advisory and allows the command.
         time.sleep(2.5)
-        expect_409("/chargedoor/open", "park_unknown")
-        print("door park-unknown gate ok")
-
-        # Park unknown with the QML override and no cable -> allowed.
-        send(s, 0x326, CABLE_NONE)
-        time.sleep(0.1)
         r = http("/chargedoor/open?park=1", "POST")
-        assert r["ok"] is True, r
+        assert r["ok"] is True and r["door"] == "opening", r
         st = wait_door("open", timeout=4.0)
         assert st["door_source"] == "command", st
-        print("door park override + optimistic feedback ok")
+        print("door with unknown cable allowed ok")
 
         # dbus-send failure -> retry once -> send_failed.
         time.sleep(0.6)
@@ -425,7 +428,7 @@ def main():
         assert r["ok"] is True and r["door"] == "opening", r
         st = wait_door("open", timeout=4.0)
         assert st["door_source"] == "command", st
-        print("door with unknown cable allowed ok")
+        print("door close+open with unknown cable allowed ok")
 
         # ---- door send failure must not be masked by dash frames ------
         # Regression: the door feedback used to read a child-exit status

@@ -56,7 +56,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BATTERY_DAEMON_VERSION "2026-11-10.1"
+#define BATTERY_DAEMON_VERSION "2026-11-10.2"
 
 #define IFACE_DEFAULT "can0"
 #define HTTP_PORT 8088
@@ -497,20 +497,13 @@ static const char *door_state_name(void)
     return "unknown";
 }
 
-static const char *door_block_reason(bool park_override)
+static const char *door_block_reason(void)
 {
     int64_t now = now_ms();
-    bool park_fresh = g_park_known && now - g_gear_ms <= DOOR_SIGNAL_STALE_MS;
-    if (!park_override) {
-        if (!park_fresh) return "park_unknown";
-        if (!g_park) return "not_park";
-    } else if (park_fresh && !g_park) {
-        /* The QML says Park, but the bus says otherwise: trust the bus. */
-        return "not_park";
-    }
-    /* The cable state (0x326) is invisible on some cars, so an UNKNOWN
-     * cable is advisory only and does not block the door.  A cable that
-     * is actually observed connected still vetoes the command. */
+    /* The gear/Park signal (0x036) is not reliable on this car yet, so it
+     * does not gate the charge door.  The cable state (0x326) is invisible
+     * on some cars, so an UNKNOWN cable is advisory only and does not block
+     * the door.  A cable that is actually observed connected still vetoes. */
     bool cable_fresh = g_cable_known && now - g_cable_ms <= DOOR_SIGNAL_STALE_MS;
     if (cable_fresh && g_cable)
         return "cable_plugged";
@@ -697,10 +690,10 @@ static void monitor_tick(void)
     }
 }
 
-static int request_chargedoor(int target, bool park_override)
+static int request_chargedoor(int target)
 {
     int64_t now = now_ms();
-    const char *why = door_block_reason(park_override);
+    const char *why = door_block_reason();
     if (why[0]) {
         snprintf(g_door_msg, sizeof(g_door_msg), "%s", why);
         return -1;
@@ -1197,7 +1190,7 @@ static size_t build_status(char *buf, size_t sz)
         if (elapsed < STARTED_TIMEOUT_MS) eta = (int)((STARTED_TIMEOUT_MS - elapsed) / 1000);
     }
     int blocked = blocked_reason()[0] ? 1 : 0;
-    const char *door_reason = door_block_reason(false);
+    const char *door_reason = door_block_reason();
     bool park_fresh = g_park_known && now_ms() - g_gear_ms <= DOOR_SIGNAL_STALE_MS;
     bool cable_fresh = g_cable_known && now_ms() - g_cable_ms <= DOOR_SIGNAL_STALE_MS;
     bool door_fresh = door_state_fresh();
@@ -1318,12 +1311,9 @@ static void http_handle(int fd)
         return;
     }
 
-    bool park_override = false;
     char *q = strchr(path, '?');
-    if (q) {
+    if (q)
         *q = '\0';
-        if (strstr(q + 1, "park=1")) park_override = true;
-    }
 
     char body[2048];
     int code = 200;
@@ -1364,14 +1354,14 @@ static void http_handle(int fd)
             target = (door_state_fresh() && g_door_state == DOOR_STATE_OPEN)
                      ? DOOR_STATE_CLOSED : DOOR_STATE_OPEN;
         }
-        const char *why = door_block_reason(park_override);
+        const char *why = door_block_reason();
         if (why[0]) {
             snprintf(g_door_msg, sizeof(g_door_msg), "%s", why);
             code = 409;
             snprintf(body, sizeof(body),
                      "{\"ok\":false,\"error\":\"blocked\",\"reason\":\"%s\","
                      "\"door\":\"%s\"}\n", why, door_state_name());
-        } else if (request_chargedoor(target, park_override) == 0) {
+        } else if (request_chargedoor(target) == 0) {
             snprintf(body, sizeof(body),
                      "{\"ok\":true,\"door\":\"%s\",\"state\":\"%s\"}\n",
                      g_door_msg, door_state_name());
@@ -1524,11 +1514,10 @@ int main(int argc, char **argv)
     if (one_shot) {
         bool door_op = (op == OS_DOOR_OPEN || op == OS_DOOR_CLOSE || op == OS_DOOR_TOGGLE);
         if (door_op) {
-            /* On a live bus the gate frames arrive continuously.  Wait briefly
-             * for them so the CLI command is not rejected as unknown. */
+            /* On a live bus the cable frame arrives continuously.  Wait
+             * briefly so the CLI sees the latest observed-cable gate. */
             int64_t wait_until = now_ms() + 2000;
-            while (now_ms() < wait_until &&
-                   !(g_park_known && g_cable_known)) {
+            while (now_ms() < wait_until && !g_cable_known) {
                 struct pollfd pfd = {.fd = g_can_fd, .events = POLLIN};
                 poll(&pfd, 1, 50);
                 if (pfd.revents & POLLIN) {
@@ -1543,11 +1532,11 @@ int main(int argc, char **argv)
         case OS_STOP: request_stop(); break;
         case OS_DASH_ON: g_dash_override = true; g_display_next_ms = 0; break;
         case OS_DASH_OFF: g_dash_override = false; break;
-        case OS_DOOR_OPEN: request_chargedoor(DOOR_STATE_OPEN, false); break;
-        case OS_DOOR_CLOSE: request_chargedoor(DOOR_STATE_CLOSED, false); break;
+        case OS_DOOR_OPEN: request_chargedoor(DOOR_STATE_OPEN); break;
+        case OS_DOOR_CLOSE: request_chargedoor(DOOR_STATE_CLOSED); break;
         case OS_DOOR_TOGGLE:
             request_chargedoor((door_state_fresh() && g_door_state == DOOR_STATE_OPEN)
-                               ? DOOR_STATE_CLOSED : DOOR_STATE_OPEN, false);
+                               ? DOOR_STATE_CLOSED : DOOR_STATE_OPEN);
             break;
         default: break;
         }

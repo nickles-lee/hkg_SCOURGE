@@ -17,8 +17,8 @@ updater, bootloader and partitions are untouched.
 - Battery heater state (Off / Preparing / Active / Requested) and heater power
 - An **Engage battery preheater** toggle
 - A **Show battery preheat on dash** toggle, enabled while preheating
-- An **Open/Close charge door** toggle, enabled only in Park with no charging
-  cable plugged in
+- An **Open/Close charge door** toggle, enabled whenever no charging cable is
+  observed.  Gear/Park is advisory only for now (`0x036` is unreliable).
 - Advisory notes for SoC < 20%, utility mode, vehicle-not-ready, start
   timeout, and vehicle-initiated stop
 - Preheat is blocked when the minimum battery temperature is above 21 °C
@@ -133,9 +133,9 @@ Bound to `127.0.0.1:8088` only.
 | POST | `/chargedoor/close` | close the charge door (micom `0x4C5`) |
 | POST | `/chargedoor/toggle` | toggle the charge door |
 
-The charge-door endpoints accept `?park=1`. The QML passes it when
-`AppNModeModel` says Park; the daemon still vetoes if its own `0x036` frame says
-otherwise.
+The charge-door endpoints still accept a legacy `?park=1` query but ignore it.
+Gear/Park is not a gate at the moment because `0x036` is unreliable; only an
+observed charging cable vetoes the command.
 
 The daemon also writes `/rw_data/battery/status.json` once per second; the QML
 page falls back to that file if HTTP is unavailable. `/status` includes
@@ -179,8 +179,9 @@ dbus-send --system --type=method_call --dest=com.lge.car.micom /Can \
 - Preheating is refused when the minimum battery temperature is above 21 °C.
 - Start and stop bursts retry at most four times, then stop.
 - The daemon never starts preconditioning on its own at boot.
-- The charge door is refused unless the car is in Park and no charging cable
-  is plugged in; stale park/cable signals also block it.
+- The charge door is refused only when a charging cable is observed; an
+  unknown/stale cable state is advisory.  Gear/Park no longer blocks it while
+  the `0x036` decode is unsettled.
 - The charge door command is skipped when the door is already in the requested
   state, and a 500 ms cooldown prevents double taps.
 - The charge-door state falls back to the commanded state when `0x3AA` is not
@@ -189,7 +190,8 @@ dbus-send --system --type=method_call --dest=com.lge.car.micom /Can \
 ## Test evidence
 
 - `python3 tests/test_daemon.py` on `vcan0`: `0x2FC` temperature, micom
-  `0x0C7`/`0x4ED`/`0x4A2` arrays, the charge-door gates, the park override,
+  `0x0C7`/`0x4ED`/`0x4A2` arrays, the charge-door cable gate (gear gate
+  disabled), 
   optimistic feedback, the send-failed path, the session-bus Home/Star
   monitor, the WiCAN sequence tests (assume-active, cleanup stop, cluster
   display), and the bus sniffer all pass.

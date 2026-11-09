@@ -30,8 +30,9 @@ through `com.lge.car.micom` `/Can` `SetCANMicomRecv`.
 5. Show advisory conditions (not READY, utility mode, SoC < 20 %) without
    falsely blocking the BMS, and block preheat when the minimum battery
    temperature is above 21 °C.
-6. Provide an **Open/Close charge door** toggle, gated on Park and on no
-   charging cable being plugged in.
+6. Provide an **Open/Close charge door** toggle, gated on no observed
+   charging cable.  The gear/Park signal is advisory only for now because
+   `0x036` is not reliable on this car.
 7. Install and restore through the verified USB harness, coexisting with the
    Hello app if it is installed.
 
@@ -166,7 +167,7 @@ exactly:
 
 ```
 IDLE
-  open/close request + Park + no cable -> OPENING/CLOSING
+  open/close request + no observed cable -> OPENING/CLOSING
 OPENING
   door state 1 -> "open"
   no 0x3AA on this bus + the door's own dbus-send exited 0 after 1.2 s -> "open" (commanded)
@@ -181,8 +182,6 @@ Gate:
 
 | Condition | Reason string |
 |---|---|
-| Park signal missing/older than 2 s and no QML override | `park_unknown` |
-| bus gear is not P (even with QML override) | `not_park` |
 | cable observed connected or charging (fresh) | `cable_plugged` |
 
 An **unknown** cable state no longer blocks the door: `0x326` is invisible on
@@ -198,11 +197,9 @@ itself is the confirmation. Every distinct `0x2AD` value is logged
 Door frames are byte-identical to the decompiled factory TmsRemoteApp
 (`EVRemoteChargeDoorOpen/Close`): open = all-FF `0x4A2` then `0x4A2` with
 `DF` in data[3]; close = `0x4C5` all-zero. The factory applies no Park/cable
-gate in the send path (only a remote-service-state whitelist); our Park/cable
-gates are stricter than stock and stay.
-
-The QML passes `?park=1` when `AppNModeModel` says the car is in Park. The
-daemon still vetoes if its own `0x036` frame says otherwise. The command is
+gate in the send path (only a remote-service-state whitelist).  Battery still
+vetoes an observed charging cable, but the gear/Park check is disabled for now
+because `0x036` is not reliable; the QML no longer sends a Park assertion. The command is
 skipped when the door is already in the requested state; a 500 ms cooldown
 prevents double taps. The door tracks the exit status of **its own**
 `dbus-send` child (the burst/dash sends fork separate children whose status
@@ -219,9 +216,9 @@ POST /start
 POST /stop
 POST /dash/on
 POST /dash/off
-POST /chargedoor/open[?park=1]
-POST /chargedoor/close[?park=1]
-POST /chargedoor/toggle[?park=1]
+POST /chargedoor/open
+POST /chargedoor/close
+POST /chargedoor/toggle
 ```
 
 `/status` fields: `state`, `precond_raw`, `batt_min_c`, `batt_valid`,
@@ -336,8 +333,8 @@ The `QListViewHomePage` model and page count are unchanged.
 | exterior temperature | `appClimateModel.ambienTemp` |
 
 All factory-model reads are guarded with `typeof`. The charge-door switch is
-enabled only when Park is known, the car is in Park, the cable state is known,
-and no cable is connected.
+enabled when the service is up and no charging cable is observed.  An unknown
+cable state is advisory; the gear/Park signal is not a gate for now.
 
 ## 7. Installer
 

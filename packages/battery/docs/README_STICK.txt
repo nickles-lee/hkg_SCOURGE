@@ -42,5 +42,6 @@ Notes
 - The daemon and its dbus-send/dbus-monitor helpers are stamped with the
   installer's own SMACK label (normally the floor label "_"). The install
   aborts if chsmack/getfattr cannot apply and read that label back.
-- The charge-door toggle is greyed out unless the car is in Park and no
-  charging cable is plugged in. It uses the factory micom D-Bus path.
+- The charge-door toggle is greyed out only when a charging cable is observed.
+  The gear/Park signal is advisory for now (0x036 is unreliable). It uses the
+  factory micom D-Bus path.
