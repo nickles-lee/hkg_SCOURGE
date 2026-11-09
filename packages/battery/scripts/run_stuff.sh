@@ -32,6 +32,10 @@ RW_DIR="${BATTERY_RW_DIR:-/rw_data/battery}"
 LOG="$RW_DIR/install.log"
 OUT="$USB_DIR/run_stuff_result.txt"
 SERVICE="${BATTERY_SERVICE:-/etc/systemd/system/battery-daemon.service}"
+# The daemon and its helpers are stamped with this exact label.  On the car
+# this is read from the installer's own /proc/self/attr/current ("_" in the
+# normal initial-root/USB flow); BATTERY_SMACK_SELF is a test-only override.
+SMACK_SELF="${BATTERY_SMACK_SELF:-}"
 
 ADV="HomeScreen/QHMI_HomeScreenMain_Advanced.qml"
 NEW_FILES="HomeScreen/BatteryPage.qml
@@ -53,6 +57,7 @@ result() {
         echo "usb=$USB_DIR"
         echo "qml_dir=$QML_DIR"
         echo "uid=$(id -u 2>/dev/null)"
+        echo "smack_self=${SMACK_SELF:-}"
         echo "$@"
     } > "$OUT" 2>&1
     cp -f "$OUT" "$RW_DIR/result.txt" 2>/dev/null
@@ -62,6 +67,30 @@ fail() {
     log "FAIL: $*"
     result "status=FAIL" "error=$*"
     exit 1
+}
+
+# The privileged side of the app runs in the installer's own SMACK context.
+# This is not best-effort: a failed label would silently leave the daemon
+# (and every dbus helper it forks) unable to reach App::micommanager.
+smack_init() {
+    if [ -n "${BATTERY_SMACK_SELF:-}" ]; then
+        SMACK_SELF=$BATTERY_SMACK_SELF
+        log "SMACK: using override label '$SMACK_SELF'"
+        return 0
+    fi
+    grep -q ' smackfs ' /proc/mounts 2>/dev/null || fail "smackfs is not mounted (SMACK is required)"
+    SMACK_SELF=$(cat /proc/self/attr/current 2>/dev/null | tr -d '\r\n')
+    [ -n "$SMACK_SELF" ] || fail "cannot read /proc/self/attr/current"
+    log "SMACK: installer label '$SMACK_SELF'"
+}
+
+set_exec_label() {
+    _bin=$1
+    command -v chsmack >/dev/null 2>&1 || fail "chsmack missing (SMACK is required)"
+    chsmack -e "$SMACK_SELF" "$_bin" >> "$LOG" 2>&1 || fail "exec label failed: $_bin"
+    _actual=$(getfattr -n security.SMACK64EXEC --only-values "$_bin" 2>/dev/null || true)
+    [ "$_actual" = "$SMACK_SELF" ] || fail "exec label readback failed: $_bin (expected '$SMACK_SELF', got '${_actual:-none}')"
+    log "exec label ok: $_bin = $SMACK_SELF"
 }
 
 # Copy a QML file, retrying after unlinking the destination. A reinstall can
@@ -92,6 +121,7 @@ copy_qml_file() {
 mount -o remount,rw "$USB_DIR" 2>/dev/null || true
 
 log "=== battery payload start usb=$USB_DIR ==="
+smack_init
 
 [ -d "$PAYLOAD" ] || fail "payload directory missing: $PAYLOAD"
 [ -d "$BACKUP" ] || fail "backup directory missing: $BACKUP"
@@ -180,15 +210,35 @@ for f in "$PAYLOAD/assets/battery/"*; do
 done
 chmod 644 "$ASSET_DIR/"* 2>/dev/null || true
 
-# Daemon.
+# Daemon.  Remove the old file first: cp -f onto an existing inode keeps its
+# extended attributes, including a stale SMACK64EXEC from an older install.
 mkdir -p "$RW_DIR" 2>/dev/null || fail "cannot create $RW_DIR"
+rm -f "$RW_DIR/battery_daemon" 2>/dev/null || true
 cp -f "$PAYLOAD/bin/battery_daemon" "$RW_DIR/battery_daemon" || fail "daemon copy failed"
 chmod 755 "$RW_DIR/battery_daemon" 2>/dev/null || true
 chown root:root "$RW_DIR/battery_daemon" 2>/dev/null || true
-# /rw_data is the SMACK floor label; the daemon inherits it. The floor label
-# has rwx access to App::micommanager, which the charge-door D-Bus call needs.
-# Do not use a Privileged exec label here: it has no micommanager access rule.
-command -v chsmack >/dev/null 2>&1 && chsmack -e _ "$RW_DIR/battery_daemon" 2>/dev/null || true
+set_exec_label "$RW_DIR/battery_daemon"
+
+# D-Bus helpers.  Copy them under /rw_data and stamp the same exec label, so
+# the daemon's children never depend on how the vendor labeled /usr/bin/dbus-*.
+HELPER_DIR="$RW_DIR/bin"
+mkdir -p "$HELPER_DIR" 2>/dev/null || fail "cannot create $HELPER_DIR"
+for _tool in dbus-send dbus-monitor; do
+    _src=$(command -v "$_tool" 2>/dev/null || true)
+    [ -n "$_src" ] && [ -x "$_src" ] || fail "helper not found: $_tool"
+    rm -f "$HELPER_DIR/$_tool" 2>/dev/null || true
+    cp -f "$_src" "$HELPER_DIR/$_tool" || fail "helper copy failed: $_tool"
+    chmod 755 "$HELPER_DIR/$_tool" 2>/dev/null || true
+    chown root:root "$HELPER_DIR/$_tool" 2>/dev/null || true
+    set_exec_label "$HELPER_DIR/$_tool"
+done
+
+# Expected label for the daemon's self-check, and fresh runtime files so an
+# old labeled status/log cannot block the new process or the QML file path.
+printf '%s\n' "$SMACK_SELF" > "$RW_DIR/smack_expected" || fail "cannot write smack_expected"
+chmod 644 "$RW_DIR/smack_expected" 2>/dev/null || true
+chown root:root "$RW_DIR/smack_expected" 2>/dev/null || true
+rm -f "$RW_DIR/status.json" "$RW_DIR/daemon.log" 2>/dev/null || true
 
 # systemd unit.
 cp -f "$PAYLOAD/systemd/battery-daemon.service" "$SERVICE" || fail "service copy failed"
@@ -258,7 +308,10 @@ if [ "$daemon_status" != "systemd-ok" ]; then
     if [ -x "$RW_DIR/battery_daemon" ]; then
         if ! pidof battery_daemon >/dev/null 2>&1; then
             ( "$RW_DIR/battery_daemon" --iface can0 --port 8088 \
-                --status-file "$RW_DIR/status.json" >> "$RW_DIR/daemon.log" 2>&1 & ) 2>/dev/null || true
+                --status-file "$RW_DIR/status.json" \
+                --dbus-send "$RW_DIR/bin/dbus-send" \
+                --dbus-monitor "$RW_DIR/bin/dbus-monitor" \
+                >> "$RW_DIR/daemon.log" 2>&1 & ) 2>/dev/null || true
             sleep 1
         fi
         if pidof battery_daemon >/dev/null 2>&1; then
@@ -303,7 +356,10 @@ if [ -n "$payload_daemon_md5" ] && command -v md5sum >/dev/null 2>&1; then
         fi
         if ! pidof battery_daemon >/dev/null 2>&1 && [ -x "$RW_DIR/battery_daemon" ]; then
             ( "$RW_DIR/battery_daemon" --iface can0 --port 8088 \
-                --status-file "$RW_DIR/status.json" >> "$RW_DIR/daemon.log" 2>&1 & ) 2>/dev/null || true
+                --status-file "$RW_DIR/status.json" \
+                --dbus-send "$RW_DIR/bin/dbus-send" \
+                --dbus-monitor "$RW_DIR/bin/dbus-monitor" \
+                >> "$RW_DIR/daemon.log" 2>&1 & ) 2>/dev/null || true
             sleep 1
         fi
         daemon_fresh=$(daemon_check_fresh)
@@ -313,6 +369,30 @@ if [ -n "$payload_daemon_md5" ] && command -v md5sum >/dev/null 2>&1; then
     fi
 fi
 log "daemon=$daemon_status fresh=$daemon_fresh"
+
+# Prove the process actually runs in the installer's context.  The file label
+# gate above already guarantees the exec transition; this catches a systemd /
+# shell path that bypassed it.  BATTERY_DAEMON_SMACK is a test-only override.
+daemon_smack="${BATTERY_DAEMON_SMACK:-}"
+if [ -z "$daemon_smack" ]; then
+    for p in /proc/[0-9]*; do
+        [ -r "$p/comm" ] || continue
+        if [ "$(cat "$p/comm" 2>/dev/null)" = "battery_daemon" ]; then
+            daemon_smack=$(cat "$p/attr/current" 2>/dev/null | tr -d '\r\n')
+            break
+        fi
+    done
+fi
+smack_check=unknown
+if [ -n "$daemon_smack" ]; then
+    if [ "$daemon_smack" = "$SMACK_SELF" ]; then
+        smack_check=ok
+    else
+        smack_check=mismatch
+        log "SMACK MISMATCH: daemon='$daemon_smack' expected='$SMACK_SELF'"
+    fi
+fi
+log "smack self=$SMACK_SELF daemon=${daemon_smack:-none} check=$smack_check"
 
 if [ "$was_ro" = 1 ]; then
     mount -o remount,ro / 2>/dev/null || true
@@ -369,10 +449,15 @@ fi
 log "restart=$restart"
 sync
 
-result "status=OK" "already_patched=$already" "variant=$variant" \
+final_status=OK
+[ "$smack_check" = "mismatch" ] && final_status=FAIL
+result "status=$final_status" "already_patched=$already" "variant=$variant" \
        "hello_mismatch=$hello_mismatch" \
        "backup=$BACKUP_HU" "installed=$installed" "daemon=$daemon_status" \
        "daemon_fresh=$daemon_fresh" \
+       "daemon_smack=${daemon_smack:-none}" \
+       "smack_check=$smack_check" \
        "restart=$restart" "log=$LOG"
 log "=== battery payload done ==="
+[ "$final_status" = "OK" ] || exit 1
 exit 0

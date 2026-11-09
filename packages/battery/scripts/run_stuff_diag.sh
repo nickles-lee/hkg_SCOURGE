@@ -13,6 +13,22 @@ RW_DIR="/rw_data/battery"
     echo "time=$(date -u 2>/dev/null)"
     echo "usb=$USB_DIR"
     echo "uid=$(id -u 2>/dev/null)"
+    echo "smack_self=$(cat /proc/self/attr/current 2>/dev/null)"
+    echo
+    echo "== SMACK state =="
+    grep ' smackfs ' /proc/mounts 2>/dev/null || echo "smackfs: not mounted"
+    echo "onlycap=$(cat /sys/fs/smackfs/onlycap 2>/dev/null)"
+    for f in /rw_data/battery/battery_daemon \
+             /rw_data/battery/bin/dbus-send \
+             /rw_data/battery/bin/dbus-monitor \
+             /rw_data/battery/status.json \
+             /rw_data/battery/daemon.log \
+             /rw_data/battery/smack_expected \
+             /usr/bin/dbus-send /usr/bin/dbus-monitor /bin/sh /bin/busybox; do
+        echo "-- $f"
+        getfattr -n security.SMACK64 --only-values "$f" 2>/dev/null || echo "SMACK64=(none)"
+        getfattr -n security.SMACK64EXEC --only-values "$f" 2>/dev/null || echo "SMACK64EXEC=(none)"
+    done
     echo
     echo "== can interfaces =="
     ip -details link show 2>/dev/null | sed -n '/can/,+3p'
@@ -24,9 +40,10 @@ RW_DIR="/rw_data/battery"
     for p in /proc/[0-9]*; do
         [ -r "$p/comm" ] || continue
         if [ "$(cat "$p/comm" 2>/dev/null)" = "battery_daemon" ]; then
-            echo "pid=${p#/proc/}"
+            echo "pid=${p#/proc/} smack=$(cat "$p/attr/current" 2>/dev/null)"
             tr '\0' ' ' < "$p/cmdline" 2>/dev/null
             echo
+            grep -E '^(Name|Pid|PPid|Uid|Gid|CapEff):' "$p/status" 2>/dev/null
         fi
     done
     echo
@@ -35,6 +52,7 @@ RW_DIR="/rw_data/battery"
     echo
     echo "== daemon version / freshness =="
     grep -o '"ver":"[^"]*"' "$RW_DIR/status.json" 2>/dev/null
+    grep -o '"smack":"[^"]*"\|"smack_expected":"[^"]*"\|"smack_ok":[a-z]*' "$RW_DIR/status.json" 2>/dev/null
     if [ -x "$RW_DIR/battery_daemon" ]; then
         echo "installed md5: $(md5sum "$RW_DIR/battery_daemon" 2>/dev/null | cut -d' ' -f1)"
     fi
@@ -60,10 +78,6 @@ RW_DIR="/rw_data/battery"
     echo
     echo "== install log tail =="
     tail -30 "$RW_DIR/install.log" 2>/dev/null
-    echo
-    echo "== charge door dependencies =="
-    ls -l /usr/bin/dbus-send 2>/dev/null
-    getfattr -n security.SMACK64EXEC --only-values "$RW_DIR/battery_daemon" 2>/dev/null
     echo
     echo "== QML hashes =="
     md5sum /app/share/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.qml \

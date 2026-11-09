@@ -19,7 +19,8 @@ Install
 2. Plug the stick into the head unit USB port.
 3. Wait about 15 seconds. The initial-root failsafe runs run_stuff.sh as root.
 4. Remove the stick and read run_stuff_result.txt from its root.
-   Expected: status=OK, restart=dbus-ok, daemon=systemd-ok.
+   Expected: status=OK, restart=dbus-ok, daemon=systemd-ok,
+   smack_self=_, daemon_smack=_, smack_check=ok.
 5. Swipe to page 2. Tap the "Battery" tile. The page opens as a full-screen
    overlay; use the Home button or the system back button to close it.
 
@@ -38,5 +39,8 @@ Notes
   reference, a Hello-patched file, or a previous Battery install.
 - Nothing is flashed. The updater, bootloader and partitions are untouched.
 - The daemon listens only on 127.0.0.1:8088 and writes /rw_data/battery/.
+- The daemon and its dbus-send/dbus-monitor helpers are stamped with the
+  installer's own SMACK label (normally the floor label "_"). The install
+  aborts if chsmack/getfattr cannot apply and read that label back.
 - The charge-door toggle is greyed out unless the car is in Park and no
   charging cable is plugged in. It uses the factory micom D-Bus path.

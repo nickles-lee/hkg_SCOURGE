@@ -52,10 +52,11 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 
-#define BATTERY_DAEMON_VERSION "2026-11-08.1"
+#define BATTERY_DAEMON_VERSION "2026-11-10.1"
 
 #define IFACE_DEFAULT "can0"
 #define HTTP_PORT 8088
@@ -250,11 +251,96 @@ static char g_mon_member[48] = "";
 static char g_message[160] = "idle";
 static const char *g_status_path = STATUS_PATH;
 
+/* SMACK diagnostics.  The installer stamps SMACK64EXEC on the daemon and its
+ * helpers with its own label (normally the floor label "_"), and writes the
+ * expected value next to the status file.  The daemon reports both so the QML
+ * and the USB diagnostic can prove the privileged side really runs in the
+ * installer context. */
+static char g_smack[64] = "unknown";
+static char g_smack_expected[64] = "";
+static bool g_smack_ok = true;
+static char g_smack_send[64] = "unknown";
+static char g_smack_monitor[64] = "unknown";
+
 static int64_t now_ms(void)
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void trim_label(char *s)
+{
+    char *p = s;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (p != s) memmove(s, p, strlen(p) + 1);
+    size_t n = strlen(s);
+    while (n > 0 && (s[n-1] == ' ' || s[n-1] == '\t' ||
+                     s[n-1] == '\r' || s[n-1] == '\n'))
+        s[--n] = '\0';
+}
+
+static void read_label(const char *path, char *out, size_t sz, const char *fallback)
+{
+    out[0] = '\0';
+    int fd = open(path, O_RDONLY);
+    if (fd >= 0) {
+        ssize_t n = read(fd, out, sz - 1);
+        close(fd);
+        if (n > 0) {
+            out[n] = '\0';
+            trim_label(out);
+        }
+    }
+    if (out[0] == '\0')
+        snprintf(out, sz, "%s", fallback ? fallback : "unknown");
+}
+
+static void helper_label(const char *path, char *out, size_t sz)
+{
+    char val[128];
+    ssize_t n = getxattr(path, "security.SMACK64EXEC", val, sizeof(val) - 1);
+    if (n > 0) {
+        val[n] = '\0';
+        trim_label(val);
+        if (val[0]) {
+            size_t len = strlen(val);
+            if (len >= sz) len = sz - 1;
+            memcpy(out, val, len);
+            out[len] = '\0';
+            return;
+        }
+    }
+    /* No exec label: the helper inherits the daemon's label. */
+    snprintf(out, sz, "inherited");
+}
+
+static void init_smack_diag(void)
+{
+    read_label("/proc/self/attr/current", g_smack, sizeof(g_smack), "unknown");
+
+    char path[256];
+    path[0] = '\0';
+    const char *slash = strrchr(g_status_path, '/');
+    if (slash)
+        snprintf(path, sizeof(path), "%.*s/smack_expected",
+                 (int)(slash - g_status_path), g_status_path);
+    if (path[0])
+        read_label(path, g_smack_expected, sizeof(g_smack_expected), "");
+    g_smack_ok = (g_smack_expected[0] == '\0' ||
+                  strcmp(g_smack, g_smack_expected) == 0);
+
+    helper_label(g_dbus_send, g_smack_send, sizeof(g_smack_send));
+    helper_label(g_dbus_monitor, g_smack_monitor, sizeof(g_smack_monitor));
+
+    fprintf(stderr,
+            "battery_daemon: smack=%s expected=%s ok=%s "
+            "helper_send=%s helper_monitor=%s\n",
+            g_smack,
+            g_smack_expected[0] ? g_smack_expected : "(none)",
+            g_smack_ok ? "true" : "false",
+            g_smack_send, g_smack_monitor);
+    fflush(stderr);
 }
 
 static void on_signal(int sig)
@@ -1118,6 +1204,11 @@ static size_t build_status(char *buf, size_t sz)
     int door_state = door_fresh ? g_door_state : DOOR_STATE_UNKNOWN;
     char raw[32] = "";
     char gear_raw[32] = "";
+    char sm[64], se[64], ss[64], smon[64];
+    json_escape(sm, sizeof(sm), g_smack);
+    json_escape(se, sizeof(se), g_smack_expected);
+    json_escape(ss, sizeof(ss), g_smack_send);
+    json_escape(smon, sizeof(smon), g_smack_monitor);
     if (g_soc_frame_valid) {
         snprintf(raw, sizeof(raw), "%02X %02X %02X %02X %02X %02X %02X %02X",
                  g_soc_frame[0], g_soc_frame[1], g_soc_frame[2], g_soc_frame[3],
@@ -1149,6 +1240,8 @@ static size_t build_status(char *buf, size_t sz)
         "\"door_message\":\"%s\",\"last_tx\":\"%s\","
         "\"batt_cond\":%d,\"batt_cond_known\":%s,"
         "\"gear_raw\":\"%s\",\"gear_b3\":%d,\"gear_b4\":%d,"
+        "\"smack\":\"%s\",\"smack_expected\":\"%s\",\"smack_ok\":%s,"
+        "\"smack_send\":\"%s\",\"smack_monitor\":\"%s\","
         "\"home_seq\":%d,\"home_source\":\"%s\",\"last_app_key\":%d,"
         "\"home_monitor\":%s}\n",
         state_name(), g_precond_raw,
@@ -1179,13 +1272,14 @@ static size_t build_status(char *buf, size_t sz)
         gear_raw,
         g_gear_frame_valid ? (int)(g_gear_frame[3] & 0x03) : -1,
         g_gear_frame_valid ? (int)(g_gear_frame[4] & 0x0F) : -1,
+        sm, se, g_smack_ok ? "true" : "false", ss, smon,
         g_home_seq, g_home_source, g_last_app_key,
         g_home_monitor ? "true" : "false");
 }
 
 static void write_status_file(void)
 {
-    char buf[1536];
+    char buf[2048];
     build_status(buf, sizeof(buf));
     int fd = open(g_status_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return;
@@ -1231,7 +1325,7 @@ static void http_handle(int fd)
         if (strstr(q + 1, "park=1")) park_override = true;
     }
 
-    char body[1536];
+    char body[2048];
     int code = 200;
 
     if (!strcmp(method, "GET") && !strcmp(path, "/health")) {
@@ -1354,7 +1448,7 @@ static void usage(const char *argv0)
             "       %s [--session-bus-file PATH] [--dbus-monitor PATH]"
             " [--no-session-monitor]\n"
             "       %s [--retry-ms N] [--started-timeout-ms N]"
-            " [--version]\n"
+            " [--smack] [--version]\n"
             "       %s --start|--stop|--dash-on|--dash-off|"
             "--door-open|--door-close|--door-toggle|--status|--sniff [seconds]\n",
             argv0, argv0, argv0, argv0);
@@ -1364,6 +1458,7 @@ int main(int argc, char **argv)
 {
     int port = HTTP_PORT;
     bool one_shot = false;
+    bool smack_info = false;
     enum { OS_NONE, OS_START, OS_STOP, OS_DASH_ON, OS_DASH_OFF,
            OS_DOOR_OPEN, OS_DOOR_CLOSE, OS_DOOR_TOGGLE, OS_STATUS,
            OS_SNIFF } op = OS_NONE;
@@ -1381,6 +1476,7 @@ int main(int argc, char **argv)
             g_stop_retry_ms = g_start_retry_ms;
         }
         else if (!strcmp(argv[i], "--started-timeout-ms") && i + 1 < argc) g_started_timeout_ms = atoll(argv[++i]);
+        else if (!strcmp(argv[i], "--smack")) smack_info = true;
         else if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-v")) {
             printf("battery_daemon %s\n", BATTERY_DAEMON_VERSION);
             return 0;
@@ -1398,6 +1494,15 @@ int main(int argc, char **argv)
             if (i + 1 < argc && argv[i + 1][0] != '-') g_sniff_seconds = atoi(argv[++i]);
         }
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(argv[0]); return 0; }
+    }
+
+    init_smack_diag();
+    if (smack_info) {
+        printf("smack=%s\nexpected=%s\nok=%s\nsend=%s\nmonitor=%s\n",
+               g_smack, g_smack_expected[0] ? g_smack_expected : "",
+               g_smack_ok ? "true" : "false",
+               g_smack_send, g_smack_monitor);
+        return 0;
     }
 
     signal(SIGINT, on_signal);
@@ -1461,7 +1566,7 @@ int main(int argc, char **argv)
             tick_state(now_ms());
             tick_chargedoor(now_ms());
         }
-        char buf[1536];
+        char buf[2048];
         build_status(buf, sizeof(buf));
         fputs(buf, stdout);
         close(g_can_fd);

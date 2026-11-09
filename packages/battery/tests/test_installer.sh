@@ -16,12 +16,18 @@ mkdir -p "$QML/HomeScreen" "$QML/component" "$FAKE/etc/systemd/system"
 cp "$HERE/backup/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.qml" \
    "$QML/HomeScreen/"
 
-for t in systemctl dbus-send pidof chsmack; do
+for t in systemctl dbus-send dbus-monitor pidof; do
     printf '#!/bin/sh\nexit 0\n' > "$STUB/$t"
     chmod +x "$STUB/$t"
 done
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$CHSMACK_LOG"\nexit 0\n' > "$STUB/chsmack"
+printf '#!/bin/sh\nif [ "${BAD_LABEL:-0}" = 1 ]; then echo Privileged; else echo _; fi\n' > "$STUB/getfattr"
+chmod +x "$STUB/chsmack" "$STUB/getfattr"
 
 run() {
+    CHSMACK_LOG="$STUB/chsmack.log" \
+    BATTERY_SMACK_SELF="${TEST_SMACK_SELF:-_}" \
+    BATTERY_DAEMON_SMACK="${TEST_DAEMON_SMACK:-_}" \
     BATTERY_PATH="$STUB:/usr/bin:/bin" \
     BATTERY_QML_ROOT="$FAKE/app/share/AppHomeScreen" \
     BATTERY_RW_DIR="$RW" \
@@ -41,6 +47,16 @@ test -f "$QML/component/BatterySwitch.qml"
 test -f "$QML/component/BatteryTile.qml"
 test -f "$FAKE/app/share/AppHomeScreen/battery/battery_icon_n.png"
 test -f "$RW/battery_daemon"
+test -f "$RW/bin/dbus-send"
+test -f "$RW/bin/dbus-monitor"
+test -f "$RW/smack_expected"
+[ "$(cat "$RW/smack_expected")" = _ ]
+grep -q "smack_self=_" "$USB/run_stuff_result.txt"
+grep -q "daemon_smack=_" "$USB/run_stuff_result.txt"
+grep -q "smack_check=ok" "$USB/run_stuff_result.txt"
+grep -q -- "-e _ $RW/battery_daemon" "$STUB/chsmack.log"
+grep -q -- "-e _ $RW/bin/dbus-send" "$STUB/chsmack.log"
+grep -q -- "-e _ $RW/bin/dbus-monitor" "$STUB/chsmack.log"
 test -f "$SVC"
 echo "first install OK"
 
@@ -113,5 +129,23 @@ if grep -q 'BATTERY_PAYLOAD_260128' "$QML/HomeScreen/QHMI_HomeScreenMain_Advance
 fi
 echo "wifi restore OK"
 fi
+
+echo "== smack label gate (negative) =="
+if BAD_LABEL=1 run "$USB/run_stuff.sh"; then
+    echo "installer accepted a wrong SMACK exec label" >&2
+    exit 1
+fi
+grep -q 'status=FAIL' "$USB/run_stuff_result.txt"
+grep -q 'exec label readback failed' "$USB/run_stuff_result.txt"
+echo "smack gate OK"
+
+echo "== smack runtime gate (negative) =="
+if TEST_DAEMON_SMACK=Privileged run "$USB/run_stuff.sh"; then
+    echo "installer accepted a daemon running outside the installer label" >&2
+    exit 1
+fi
+grep -q 'status=FAIL' "$USB/run_stuff_result.txt"
+grep -q 'smack_check=mismatch' "$USB/run_stuff_result.txt"
+echo "smack runtime gate OK"
 
 echo "ALL INSTALLER TESTS PASSED"

@@ -579,6 +579,15 @@ def main():
             except subprocess.TimeoutExpired:
                 proc2.kill()
 
+        # ---- SMACK self-report --------------------------------------
+        st = http("/status")
+        assert st.get("smack"), st
+        assert "smack_expected" in st and "smack_ok" in st, st
+        assert st["smack_ok"] is True, st
+        assert st.get("smack_send") and st.get("smack_monitor"), st
+        print("smack self-report ok:", st["smack"],
+              "send:", st["smack_send"], "monitor:", st["smack_monitor"])
+
         # ---- 0x25D EV_BatteryConditioning + gear raw ----------------
         send(s, 0x25D, [0, 0, 0x11, 0, 0, 0x40, 0, 0])   # data[5]=0x40 -> cond 1
         time.sleep(0.1)

@@ -231,7 +231,8 @@ POST /chargedoor/toggle[?park=1]
 `charging`, `door_state`, `door_state_name`, `door_known`, `door_source`,
 `door_warn`, `door_opt`, `door_busy`, `door_allowed`, `door_block_reason`,
 `door_message`, `batt_cond`, `batt_cond_known`, `gear_raw`, `gear_b3`,
-`gear_b4`, `home_seq`, `home_source`, `last_app_key`, `home_monitor`,
+`gear_b4`, `smack`, `smack_expected`, `smack_ok`, `smack_send`,
+`smack_monitor`, `home_seq`, `home_source`, `last_app_key`, `home_monitor`,
 `ver`, `send_ok`, `send_fail`, `last_send`.
 
 The daemon also mirrors the JSON to `/rw_data/battery/status.json` every second.
@@ -351,16 +352,32 @@ and no cable is connected.
    - otherwise abort.
 3. Back up the current Advanced QML; keep the first pre-install file as
    `backup/latest` even across reinstalls.
-4. Remount `/` rw, install assets, daemon, service and QML, preserve SMACK
-   labels where possible. The daemon keeps the `/rw_data` floor label (`_`),
-   which has `rwx` access to `App::micommanager` for the D-Bus calls.
+4. Remount `/` rw, install assets, daemon, service and QML.
+   - Read the installer's own SMACK label from `/proc/self/attr/current`
+     (`_` in the normal initial-root/USB flow) and stamp it as
+     `security.SMACK64EXEC` on the daemon and on copies of `dbus-send` /
+     `dbus-monitor` under `/rw_data/battery/bin/`. The readback must match or
+     the install fails; there is no silent fallback.
+   - Remove each destination before copying: `cp -f` keeps the destination
+     inode and its xattrs, so a stale exec label would otherwise survive.
+   - Write the expected label to `/rw_data/battery/smack_expected`; the
+     daemon reports `smack`, `smack_expected`, `smack_ok`, `smack_send` and
+     `smack_monitor` in `/status`.
+   - After starting the service, read the live daemon's
+     `/proc/<pid>/attr/current` into `daemon_smack`; a mismatch is reported
+     as `smack_check=mismatch` and fails the install.
+   - `SmackProcessLabel=` is deliberately not used: the vendor 4.1.27 kernel
+     only implements the `current` procattr, so systemd 225 fails with
+     status 237/SMACK_PROCESS_LABEL.
 5. Clear QML caches.
 6. Enable and start `battery-daemon.service` while `/` is still rw.
 7. Remount `/` ro.
 8. Restart `AppHomeScreen` via AppLauncher app ID 11.
 
 Environment overrides used by the offline test:
-`BATTERY_PATH`, `BATTERY_QML_ROOT`, `BATTERY_RW_DIR`, `BATTERY_SERVICE`.
+`BATTERY_PATH`, `BATTERY_QML_ROOT`, `BATTERY_RW_DIR`, `BATTERY_SERVICE`,
+`BATTERY_SMACK_SELF` (force the expected label), `BATTERY_DAEMON_SMACK`
+(force the runtime readback). The live path never sets the last two.
 
 ## 8. Coexistence with Hello
 

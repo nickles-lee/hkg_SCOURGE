@@ -86,6 +86,8 @@ rm -f "$QML_DIR/component/BatterySwitch.qml" 2>/dev/null || true
 rm -f "$QML_DIR/component/BatteryTile.qml" 2>/dev/null || true
 rm -rf "$ASSET_DIR" 2>/dev/null || true
 rm -f "$RW_DIR/battery_daemon" 2>/dev/null || true
+rm -rf "$RW_DIR/bin" 2>/dev/null || true
+rm -f "$RW_DIR/smack_expected" 2>/dev/null || true
 
 rm -rf /root/.cache/qtshadercache 2>/dev/null || true
 rm -rf /root/.cache/AppHomeScreen 2>/dev/null || true

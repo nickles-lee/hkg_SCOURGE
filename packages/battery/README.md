@@ -106,6 +106,10 @@ The installer:
 4. Installs the QML, icons, daemon and systemd unit. On a reinstall, a failed
    QML copy is retried after unlinking the destination (and remounting `/`
    rw if it went ro); the original `cp` error is kept in the install log.
+   The daemon and the copied `dbus-send`/`dbus-monitor` helpers are stamped
+   with the installer's own SMACK label (`_` in the normal USB flow). The
+   install fails if the `SMACK64EXEC` readback does not match, and reports
+   the live daemon label as `daemon_smack` in `run_stuff_result.txt`.
 5. Starts and enables `battery-daemon.service`.
 6. Restarts `AppHomeScreen` through AppLauncher app ID 11.
 
@@ -126,7 +130,7 @@ Bound to `127.0.0.1:8088` only.
 | POST | `/dash/on` | enable synthetic `0x4ED` (micom) |
 | POST | `/dash/off` | disable synthetic `0x4ED` |
 | POST | `/chargedoor/open` | open the charge door (micom `0x4A2`) |
-| POST | `/chargedoor/close` | close the charge door (micom `0x4A2`) |
+| POST | `/chargedoor/close` | close the charge door (micom `0x4C5`) |
 | POST | `/chargedoor/toggle` | toggle the charge door |
 
 The charge-door endpoints accept `?park=1`. The QML passes it when
@@ -134,7 +138,9 @@ The charge-door endpoints accept `?park=1`. The QML passes it when
 otherwise.
 
 The daemon also writes `/rw_data/battery/status.json` once per second; the QML
-page falls back to that file if HTTP is unavailable.
+page falls back to that file if HTTP is unavailable. `/status` includes
+`smack`, `smack_expected`, `smack_ok`, `smack_send`, `smack_monitor` so the
+privileged daemon and its helpers can be verified without a shell.
 
 ## Commands
 

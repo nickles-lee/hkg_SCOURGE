@@ -98,6 +98,11 @@ Item {
     property string gearRaw: ""
     property int gearB3: -1
     property int gearB4: -1
+    property string smack: ""
+    property string smackExpected: ""
+    property bool smackOk: true
+    property string smackSend: ""
+    property string smackMonitor: ""
 
     // ---- optimistic preheat ------------------------------------------
     property string blockReason: ""
@@ -252,6 +257,11 @@ Item {
         gearRaw = d.gear_raw || ""
         gearB3 = (typeof d.gear_b3 === "number") ? d.gear_b3 : -1
         gearB4 = (typeof d.gear_b4 === "number") ? d.gear_b4 : -1
+        smack = d.smack || ""
+        smackExpected = d.smack_expected || ""
+        smackOk = d.smack_ok !== false
+        smackSend = d.smack_send || ""
+        smackMonitor = d.smack_monitor || ""
         homeSeq = (typeof d.home_seq === "number") ? d.home_seq : 0
         homeSource = d.home_source || "none"
         lastAppKey = (typeof d.last_app_key === "number") ? d.last_app_key : -1
@@ -834,7 +844,11 @@ Item {
                 var fg = root.atOtherApp ? "other" : "home"
                 var mon = root.homeMonitor ? "on" : "off"
                 var cond = root.battCondKnown ? ("Cond " + root.battCond) : "Cond ?"
+                var smack = root.smack ? root.smack : "?"
+                if (!root.smackOk && root.smackExpected)
+                    smack += " (want " + root.smackExpected + ")"
                 var line = "FG " + fg + "   \u00b7   " + cond
+                           + "   \u00b7   Smack " + smack
                            + "   \u00b7   Gear " + gear
                            + " (raw " + root.rawGear
                            + " b3=" + root.gearB3 + " b4=" + root.gearB4 + ")"
@@ -849,6 +863,10 @@ Item {
                 if (root.battRaw) line += "   \u00b7   2FC " + root.battRaw
                 if (root.gearRaw) line += "   \u00b7   036 " + root.gearRaw
                 if (root.lastTx) line += "   \u00b7   TX " + root.lastTx
+                if (root.smackSend && root.smackSend !== "inherited")
+                    line += "   \u00b7   SendLabel " + root.smackSend
+                if (root.smackMonitor && root.smackMonitor !== "inherited")
+                    line += "   \u00b7   MonLabel " + root.smackMonitor
                 line += "   \u00b7   Send " + root.sendOk + " ok"
                 if (root.sendFail > 0)
                     line += "/" + root.sendFail + " FAIL"
@@ -857,7 +875,7 @@ Item {
                 return line
             }
             font.pixelSize: ConstantModel.FONT_SIZE_15
-            color: HomeThemeHelper.disableTextColor
+            color: root.smackOk ? HomeThemeHelper.disableTextColor : "#FFB300"
         }
     }
 }
