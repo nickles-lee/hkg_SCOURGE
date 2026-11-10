@@ -70,9 +70,9 @@ STOP  0x0C7:  00 C7 08 00 00 00 00 00 00 00 00   x3
 CLUSTER 0x4E8: 04 E8 08 <tenths|unit> 00 00 00 <dist lo> <dist hi> <flag> 00  (100 ms)
        0x4CC: 04 CC 08 02 00 00 00 00 00 00 00                        (with every 0x4E8)
 
-DOOR  0x4A2:  04 A2 08 FF FF FF FF FF FF FF FF   (open, all-FF)
+DOOR  0x4A2:  04 A2 08 FF FF FF FF FF FF FF FF   (arm, all-FF)
               04 A2 08 FF FF FF DF FF FF FF FF   (open, commit)
-      0x4C5:  04 C5 08 00 00 00 00 00 00 00 00   (close — distinct ID)
+              04 A2 08 FF FF FF EF FF FF FF FF   (close, commit)
 ```
 
 D-Bus call:
@@ -196,7 +196,9 @@ itself is the confirmation. Every distinct `0x2AD` value is logged
 
 Door frames are byte-identical to the decompiled factory TmsRemoteApp
 (`EVRemoteChargeDoorOpen/Close`): open = all-FF `0x4A2` then `0x4A2` with
-`DF` in data[3]; close = `0x4C5` all-zero. The factory applies no Park/cable
+`DF` in data[3]; close = `0x4A2` all-FF then `0x4A2` with `EF` in data[3].
+0x4C5 is not a door command (it belongs to the target-SoC path). The factory
+applies no Park/cable
 gate in the send path (only a remote-service-state whitelist).  Battery still
 vetoes an observed charging cable, but the gear/Park check is disabled for now
 because `0x036` is not reliable; the QML no longer sends a Park assertion. The command is
@@ -219,6 +221,8 @@ POST /dash/off
 POST /chargedoor/open
 POST /chargedoor/close
 POST /chargedoor/toggle
+GET  /logs?source=daemon|install|restore
+POST /logs/dump
 ```
 
 `/status` fields: `state`, `precond_raw`, `batt_min_c`, `batt_valid`,
@@ -229,7 +233,8 @@ POST /chargedoor/toggle
 `door_warn`, `door_opt`, `door_busy`, `door_allowed`, `door_block_reason`,
 `door_message`, `batt_cond`, `batt_cond_known`, `gear_raw`, `gear_b3`,
 `gear_b4`, `smack`, `smack_expected`, `smack_ok`, `smack_send`,
-`smack_monitor`, `home_seq`, `home_source`, `last_app_key`, `home_monitor`,
+`smack_monitor`, `dump_state`, `dump_message`, `dump_dir`,
+`home_seq`, `home_source`, `last_app_key`, `home_monitor`,
 `ver`, `send_ok`, `send_fail`, `last_send`.
 
 The daemon also mirrors the JSON to `/rw_data/battery/status.json` every second.
@@ -279,6 +284,45 @@ stripped so the monitor reconnects after a bus restart. Options:
 `battery_daemon --sniff [seconds]` opens `can0` without a filter and prints the
 IDs seen, frame counts, and last payloads. Use it to confirm which bus the head
 unit exposes.
+
+### 5.8 Logging and USB dumps
+
+The QML overlay has a **Save logs** button and, on wide (1920) layouts, a
+**Live log** console with Daemon/Install tabs (2 s refresh of the last 16 KB
+through `GET /logs`).  On 1280 layouts the console is hidden; the button stays.
+
+`POST /logs/dump` queues a bundle and returns 202.  `battery_daemon
+--dump-logs [--usb DIR] [--reason TEXT]` runs the same code in one shot.  The
+daemon forks itself for the dump, so the HTTP server stays responsive; the
+parent reaps the child and reports `dump_state` (`idle|saving|ok|error`),
+`dump_message` and `dump_dir` in `/status`.
+
+Each bundle is `battery_logs_<UTC>/` on the stick and contains:
+
+- `daemon.log`, `install.log`, `restore.log`, `manifest-check.log` (last
+  256 KB), `result.txt`, `status.json`, `smack_expected`
+- `state.txt`: version/reason, `uname`, mounts, date/uptime, filtered `ps`,
+  `systemctl status/is-enabled battery-daemon`, `ip -details -statistics link
+  show can0`, `/proc/net/can/*`, daemon/helper `SMACK64`/`SMACK64EXEC`, live
+  `/proc/<pid>/attr/current`, `onlycap`, QML md5s/markers, `journalctl -b |
+  grep -i battery`, `dmesg | tail`, the micom D-Bus name list, and a 2 s
+  `battery_daemon --sniff` capture.
+
+The stick is found through `/proc/mounts` under `/media/usb`, `/media/*` or
+`/run/media/*`, preferring removable devices.  There is no filesystem-type
+whitelist: the car's exFAT is Tuxera `texfat`.  The mount is remounted rw
+before writing.  Only the newest 5 bundles are kept; pruning is symlink-safe.
+
+Triggers:
+
+- Manual: header button, console **Dump**, `POST /logs/dump`, `--dump-logs`.
+- Error: micom send failure, preheat start/stop failure, charge-door send
+  failure.  Error dumps are limited to **once per 10 minutes**, persisted in
+  `last_error_dump` so a daemon restart cannot bypass it.  Manual dumps are
+  not throttled.
+
+Test hooks: `BATTERY_USB_ROOT`, `BATTERY_MOUNTS_FILE`,
+`BATTERY_ERROR_DUMP_THROTTLE_MS`.
 
 ## 6. QML integration
 
@@ -389,7 +433,8 @@ Environment overrides used by the offline test:
 
 | Test | Result |
 |---|---|
-| `tests/test_daemon.py` on `vcan0` | pass (0x2FC temp, micom 0x0C7 at 40 ms, 0x4E8/0x4CC cluster display, assume-active, cleanup stop burst, factory door frames 0x4A2/0x4C5, door gates, optimistic feedback, door send-fail not masked by dash frames, BMS 0x00 stop exit, cluster display without preheat, unknown-cable door, 0x25D batt_cond, 0x036 raw gear, session-bus Home/Star monitor, sniff) |
+| `tests/test_daemon.py` on `vcan0` | pass (0x2FC temp, micom 0x0C7 at 40 ms, 0x4E8/0x4CC cluster display, assume-active, cleanup stop burst, factory door frames 0x4A2 (arm/open/close), door gates, optimistic feedback, door send-fail not masked by dash frames, BMS 0x00 stop exit, cluster display without preheat, unknown-cable door, 0x25D batt_cond, 0x036 raw gear, session-bus Home/Star monitor, `/logs` tail, manual USB dump, error dump + 10 min rate limit, sniff) |
+| `tests/test_logdump.sh` | pass (bundle contents, reason, pruning to 5, no-USB failure) |
 | `tests/test_installer.sh` | pass (install, reinstall, restore, Hello, restore-after-Hello) |
 | `qmllint` (vendor Qt 5.4, 260128 VM) | pass for all five QML files |
 | daemon `--help` on vendor 4.1.27 kernel | pass |

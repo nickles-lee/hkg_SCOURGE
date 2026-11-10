@@ -125,12 +125,14 @@ Bound to `127.0.0.1:8088` only.
 |---|---|---|
 | GET | `/status` | full JSON state |
 | GET | `/health` | liveness |
+| GET | `/logs?source=daemon\|install\|restore` | last 16 KB of the selected log |
+| POST | `/logs/dump` | queue a log bundle to the USB stick |
 | POST | `/start` | start preconditioning (micom `0x0C7`) |
 | POST | `/stop` | stop preconditioning (micom `0x0C7`) |
 | POST | `/dash/on` | enable synthetic `0x4ED` (micom) |
 | POST | `/dash/off` | disable synthetic `0x4ED` |
 | POST | `/chargedoor/open` | open the charge door (micom `0x4A2`) |
-| POST | `/chargedoor/close` | close the charge door (micom `0x4C5`) |
+| POST | `/chargedoor/close` | close the charge door (micom `0x4A2`) |
 | POST | `/chargedoor/toggle` | toggle the charge door |
 
 The charge-door endpoints still accept a legacy `?park=1` query but ignore it.
@@ -141,6 +143,27 @@ The daemon also writes `/rw_data/battery/status.json` once per second; the QML
 page falls back to that file if HTTP is unavailable. `/status` includes
 `smack`, `smack_expected`, `smack_ok`, `smack_send`, `smack_monitor` so the
 privileged daemon and its helpers can be verified without a shell.
+
+### Live console and USB log dumps
+
+On wide (1920) layouts the Battery overlay gets a **Live log** console on the
+right with **Daemon** and **Install** tabs, a 2 s refresh, and a **Dump**
+button.  On 1280 layouts the console is hidden; a **Save logs** button next to
+Home is always available.
+
+`battery_daemon --dump-logs [--usb DIR] [--reason TEXT]` writes
+`battery_logs_<UTC>/` to the stick with the daemon/install/restore logs, the
+last status, `smack_expected`, and a `state.txt` snapshot (mounts, process and
+SMACK state, CAN interface, QML hashes, journal, dmesg, and a 2 s CAN sniff).
+The daemon does the same in a forked child for `POST /logs/dump`.
+Only the newest 5 bundles are kept.  The stick is found via `/proc/mounts`
+under `/media/*` or `/run/media/*` with no filesystem-type whitelist (the car
+uses Tuxera `texfat`), and is remounted rw first.
+
+Error dumps are automatic on micom/preheat/charge-door send failures, at most
+**once per 10 minutes** (the timestamp persists across daemon restarts).
+Manual dumps are unlimited.  `/status` reports `dump_state`, `dump_message`
+and `dump_dir`.
 
 ## Commands
 
@@ -156,7 +179,9 @@ dbus-send --system --type=method_call --dest=com.lge.car.micom /Can \
 - Preheat stop: `0x0C7` all zero ×3, then `E0 07` ×3.
 - Dash: `0x4ED` `00 00 00 00 00 10 A0 00` at 5 Hz.
 - Charge door, factory frames: open = `0x4A2` all-FF then `0x4A2` with `DF`
-  in data[3]; close = `0x4C5` all-zero (from the decompiled TmsRemoteApp).
+  in data[3]; close = `0x4A2` all-FF then `0x4A2` with `EF` in data[3]
+  (from the decompiled TmsRemoteApp `EVRemoteChargeDoorOpen/Close`).
+  `0x4C5` is not a door command; it belongs to the target-SoC path.
   An unknown cable state (no `0x326` on the bus) is advisory and no longer
   blocks the door.
 - Full WiCAN sequence mimicry: the `0x0C7` burst at 40 ms pacing plus the
@@ -191,10 +216,12 @@ dbus-send --system --type=method_call --dest=com.lge.car.micom /Can \
 
 - `python3 tests/test_daemon.py` on `vcan0`: `0x2FC` temperature, micom
   `0x0C7`/`0x4ED`/`0x4A2` arrays, the charge-door cable gate (gear gate
-  disabled), 
-  optimistic feedback, the send-failed path, the session-bus Home/Star
-  monitor, the WiCAN sequence tests (assume-active, cleanup stop, cluster
-  display), and the bus sniffer all pass.
+  disabled), optimistic feedback, the send-failed path, the session-bus
+  Home/Star monitor, the WiCAN sequence tests (assume-active, cleanup stop,
+  cluster display), the `/logs` tail, the manual USB dump, the error dump
+  with its 10-minute rate limit, and the bus sniffer all pass.
+- `sh tests/test_logdump.sh`: bundle contents/reason, pruning to five, and
+  the no-USB failure all pass.
 - `sh tests/test_installer.sh /tmp/battery_usb`: first install, reinstall,
   restore, Hello coexistence, and restore-after-Hello all pass.
 - QML files pass the vendor Qt 5.4 `qmllint` inside the 260128 VM.

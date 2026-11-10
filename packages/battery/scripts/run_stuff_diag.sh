@@ -89,6 +89,12 @@ RW_DIR="/rw_data/battery"
     grep -l 'HELLO_PAYLOAD_260128' /app/share/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.qml 2>/dev/null
     grep -l 'BATTERY_PAYLOAD_260128' /app/share/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.qml 2>/dev/null
     echo
+    echo "== log dump =="
+    if [ -x "$RW_DIR/battery_daemon" ]; then
+        "$RW_DIR/battery_daemon" --dump-logs --usb "$USB_DIR" \
+            --status-file "$RW_DIR/status.json" --reason diag 2>&1 | tail -3
+    fi
+    echo
     echo "== install result =="
     cat "$RW_DIR/result.txt" 2>/dev/null
 } > "$OUT" 2>&1

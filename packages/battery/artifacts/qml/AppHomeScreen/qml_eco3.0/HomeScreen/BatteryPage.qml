@@ -103,6 +103,13 @@ Item {
     property bool smackOk: true
     property string smackSend: ""
     property string smackMonitor: ""
+    // ---- live log console + USB dump ---------------------------------
+    readonly property bool showConsole: width >= 1700
+    property string consoleSource: "daemon"
+    property string dumpState: "idle"
+    property string dumpMessage: ""
+    property string dumpDir: ""
+    readonly property bool dumpBusy: dumpState === "saving"
 
     // ---- optimistic preheat ------------------------------------------
     property string blockReason: ""
@@ -263,6 +270,9 @@ Item {
         smackOk = d.smack_ok !== false
         smackSend = d.smack_send || ""
         smackMonitor = d.smack_monitor || ""
+        dumpState = d.dump_state || "idle"
+        dumpMessage = d.dump_message || ""
+        dumpDir = d.dump_dir || ""
         homeSeq = (typeof d.home_seq === "number") ? d.home_seq : 0
         homeSource = d.home_source || "none"
         lastAppKey = (typeof d.last_app_key === "number") ? d.last_app_key : -1
@@ -306,6 +316,28 @@ Item {
             }
         }
         xhr.open("GET", "http://127.0.0.1:8088/status")
+        xhr.send()
+    }
+
+    function refreshConsole() {
+        if (!showConsole) return
+        var xhr = new XMLHttpRequest()
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState !== XMLHttpRequest.DONE) return
+            if (xhr.status !== 200) return
+            try {
+                var d = JSON.parse(xhr.responseText)
+                var t = d.log || ""
+                var lines = t.split("\n")
+                var start = Math.max(0, lines.length - 40)
+                consoleModel.clear()
+                for (var i = start; i < lines.length; i++) {
+                    if (lines[i].length > 0)
+                        consoleModel.append({ line: lines[i] })
+                }
+            } catch (e) {}
+        }
+        xhr.open("GET", "http://127.0.0.1:8088/logs?source=" + consoleSource)
         xhr.send()
     }
 
@@ -467,7 +499,7 @@ Item {
         z: 2
         width: 1180
         height: 630
-        anchors.horizontalCenter: parent.horizontalCenter
+        x: root.showConsole ? 16 : (root.width - width) / 2
 
         Image {
             id: headerIcon
@@ -501,6 +533,43 @@ Item {
             }
             font.pixelSize: ConstantModel.FONT_SIZE_21
             color: HomeThemeHelper.normalTextColor
+        }
+
+        Rectangle {
+            id: saveLogsButton
+            property bool pressActive: false
+            anchors.right: homeButton.left
+            anchors.rightMargin: 12
+            y: 8
+            width: 170
+            height: 50
+            radius: 25
+            color: saveLogsMouse.pressed && pressActive
+                   ? ConstantModel.GENERAL_COLOR_FOCUS_GREY
+                   : ConstantModel.GENERAL_COLOR_BUTTON_GREY
+            border.color: ConstantModel.GENERAL_COLOR_FOCUS_GREY
+            border.width: 1
+            opacity: (root.serviceOk && !root.dumpBusy) ? 1.0 : 0.55
+
+            QText {
+                anchors.centerIn: parent
+                text: root.dumpBusy ? "Saving\u2026" : "Save logs"
+                font.pixelSize: ConstantModel.FONT_SIZE_21
+                color: HomeThemeHelper.normalTextColor
+            }
+
+            MouseArea {
+                id: saveLogsMouse
+                anchors.fill: parent
+                onPressed: saveLogsButton.pressActive = true
+                onPositionChanged:
+                    if (!containsMouse) saveLogsButton.pressActive = false
+                onReleased: {
+                    if (saveLogsButton.pressActive && root.serviceOk && !root.dumpBusy)
+                        root.post("/logs/dump")
+                    saveLogsButton.pressActive = false
+                }
+            }
         }
 
         Rectangle {
@@ -870,11 +939,157 @@ Item {
                 if (root.sendFail > 0)
                     line += "/" + root.sendFail + " FAIL"
                 if (root.daemonVer) line += "   \u00b7   v" + root.daemonVer
+                if (root.dumpState && root.dumpState !== "idle") {
+                    line += "   \u00b7   Dump " + root.dumpState
+                    if (root.dumpState === "error" && root.dumpMessage)
+                        line += " (" + root.dumpMessage + ")"
+                }
                 line += "   \u00b7   Bus " + mon
                 return line
             }
             font.pixelSize: ConstantModel.FONT_SIZE_15
-            color: root.smackOk ? HomeThemeHelper.disableTextColor : "#FFB300"
+            color: (root.smackOk && root.dumpState !== "error")
+                   ? HomeThemeHelper.disableTextColor : "#FFB300"
         }
+    }
+
+    // ---- live log console (wide layouts) -----------------------------
+    Rectangle {
+        id: consolePanel
+        visible: root.showConsole
+        x: root.width - 436
+        y: 20
+        width: 420
+        height: 600
+        radius: 12
+        color: "#0B0B0B"
+        border.color: "#333333"
+        border.width: 1
+        z: 5
+
+        QText {
+            x: 16
+            y: 18
+            text: "Live log" + (root.dumpState !== "idle"
+                                ? "   \u00b7   " + root.dumpState : "")
+            font.pixelSize: ConstantModel.FONT_SIZE_21
+            color: "#9A9A9A"
+        }
+
+        Row {
+            x: 16
+            y: 56
+            spacing: 8
+
+            Rectangle {
+                width: 120
+                height: 42
+                radius: 21
+                color: root.consoleSource === "daemon" ? "#3A3A3A" : "#1E1E1E"
+                border.color: root.consoleSource === "daemon" ? "#777777" : "#333333"
+                border.width: 1
+                QText {
+                    anchors.centerIn: parent
+                    text: "Daemon"
+                    font.pixelSize: ConstantModel.FONT_SIZE_18
+                    color: "#DDDDDD"
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: {
+                        root.consoleSource = "daemon"
+                        root.refreshConsole()
+                    }
+                }
+            }
+
+            Rectangle {
+                width: 120
+                height: 42
+                radius: 21
+                color: root.consoleSource === "install" ? "#3A3A3A" : "#1E1E1E"
+                border.color: root.consoleSource === "install" ? "#777777" : "#333333"
+                border.width: 1
+                QText {
+                    anchors.centerIn: parent
+                    text: "Install"
+                    font.pixelSize: ConstantModel.FONT_SIZE_18
+                    color: "#DDDDDD"
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: {
+                        root.consoleSource = "install"
+                        root.refreshConsole()
+                    }
+                }
+            }
+
+            Rectangle {
+                width: 90
+                height: 42
+                radius: 21
+                color: "#2E2E2E"
+                border.color: "#555555"
+                border.width: 1
+                QText {
+                    anchors.centerIn: parent
+                    text: "Dump"
+                    font.pixelSize: ConstantModel.FONT_SIZE_18
+                    color: "#FFFFFF"
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: root.post("/logs/dump")
+                }
+            }
+        }
+
+        Rectangle {
+            x: 12
+            y: 104
+            width: 396
+            height: 484
+            radius: 8
+            color: "#050505"
+            border.color: "#222222"
+            border.width: 1
+            clip: true
+
+            ListView {
+                id: consoleView
+                anchors.fill: parent
+                anchors.margins: 10
+                clip: true
+                model: consoleModel
+                delegate: QText {
+                    width: consoleView.width
+                    text: line
+                    font.pixelSize: 13
+                    color: "#8FD18F"
+                    wrapMode: Text.WrapAnywhere
+                }
+                onCountChanged: positionViewAtEnd()
+                Component.onCompleted: positionViewAtEnd()
+            }
+
+            QText {
+                anchors.centerIn: parent
+                visible: consoleModel.count === 0
+                text: "(no log lines yet)"
+                font.pixelSize: ConstantModel.FONT_SIZE_18
+                color: "#555555"
+            }
+        }
+    }
+
+    ListModel { id: consoleModel }
+
+    Timer {
+        interval: 2000
+        running: root.visible && root.showConsole
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: root.refreshConsole()
     }
 }

@@ -21,7 +21,7 @@
  *   0x4E8  TX  cluster distance/flag countdown display (WiCAN layout)
  *   0x4CC  TX  cluster icon request, data[0] = 0x02
  *   0x4A2  TX  charge door open (factory TmsRemoteApp frames: all-FF, then DF)
- *   0x4C5  TX  charge door close (factory uses a distinct ID for close)
+ *   0x4A2  TX  charge door close (factory TmsRemoteApp frames: all-FF, then EF)
  *
  * M-CAN receive frames (0x036 gear, 0x038 READY, 0x152 temperature, 0x2AD
  * precondition state, 0x2AE utility, 0x3AA charge door) are not always
@@ -29,12 +29,19 @@
  * AppNModeModel instead.  The daemon still decodes them if they appear
  * (bench tests, other variants).
  *
+ * Logging: daemon.log/status.json live in /rw_data/battery.  The live console
+ * reads GET /logs, and --dump-logs / POST /logs/dump writes a timestamped
+ * battery_logs_<UTC>/ bundle to the USB stick (manual + error-triggered, with
+ * a persisted 10-minute error-dump limit).
+ *
  * This is research tooling for a rooted head unit.  It does not flash
  * firmware and does not touch the updater or bootloader.
  */
 
 #define _GNU_SOURCE
 #include <arpa/inet.h>
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/can.h>
@@ -42,6 +49,7 @@
 #include <net/if.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -56,7 +64,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BATTERY_DAEMON_VERSION "2026-11-10.2"
+#define BATTERY_DAEMON_VERSION "2026-11-10.6"
 
 #define IFACE_DEFAULT "can0"
 #define HTTP_PORT 8088
@@ -92,7 +100,6 @@
 #define FLAG_NONE 0xF
 
 #define DOOR_ID_OPEN 0x4A2
-#define DOOR_ID_CLOSE 0x4C5
 #define DOOR_STATE_UNKNOWN 0
 #define DOOR_STATE_OPEN 1
 #define DOOR_STATE_CLOSED 2
@@ -216,6 +223,13 @@ static const char *g_dbus_send = "/usr/bin/dbus-send";
  * command as a success. */
 static pid_t g_door_send_pid = -1;
 static volatile int g_door_dbus_status = -1;
+/* Every child forked for a charge-door sequence, so a failed arm or command
+ * frame is attributed to the right CAN ID instead of whichever send happened
+ * last. */
+#define DOOR_PID_SLOTS 8
+static pid_t g_door_pids[DOOR_PID_SLOTS];
+static uint16_t g_door_pid_cmd[DOOR_PID_SLOTS];
+static int g_door_pid_n = 0;
 static char g_last_tx[64] = "";
 static bool g_sniff = false;
 static int g_sniff_seconds = 10;
@@ -261,6 +275,20 @@ static char g_smack_expected[64] = "";
 static bool g_smack_ok = true;
 static char g_smack_send[64] = "unknown";
 static char g_smack_monitor[64] = "unknown";
+
+/* Log dumps to the USB stick (manual + error-triggered; see the dump module
+ * below).  The state is exposed in /status and the QML console/footer. */
+static char g_dump_state[16] = "idle";
+static char g_dump_message[192] = "";
+static char g_dump_dir[512] = "";
+static pid_t g_dump_pid = -1;
+static int64_t g_last_error_dump_ms = 0;
+
+static void request_error_dump(const char *reason);
+static void request_dump(const char *reason, bool manual);
+static bool dump_logs_to_usb(const char *usb_override, const char *reason);
+static void dump_child_reaped(int status);
+static bool write_atomic_file(const char *path, const char *data, size_t len);
 
 static int64_t now_ms(void)
 {
@@ -364,6 +392,7 @@ static int can_open(const char *iface, bool filtered)
         return -1;
     }
     fcntl(fd, F_SETFD, FD_CLOEXEC);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
 
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
@@ -451,6 +480,7 @@ static void send_bmu(uint8_t b3, uint8_t b4)
     uint8_t d[8] = {0, 0, 0, b3, b4, 0, 0, 0};
     if (send_micom_frame(ID_BMU, d) < 0) {
         set_message("micom send failed");
+        request_error_dump("micom_send_failed");
     }
 }
 
@@ -510,23 +540,60 @@ static const char *door_block_reason(void)
     return "";
 }
 
-/* The factory TmsRemoteApp sends the charge-door command through the micom
- * D-Bus service with these exact frames (decompiled from the 260128
- * TmsRemoteApp, EVRemoteChargeDoorOpen/Close):
- *   open:  04 A2 08 FF FF FF FF FF FF FF FF, then 04 A2 08 FF FF FF DF FF FF FF FF
- *   close: 04 C5 08 00 00 00 00 00 00 00 00
- * Our previous close frame (04 A2 ... EF ...) does not exist in the factory
- * binary.  Returns the pid of the last send. */
+/* Remember every charge-door send child so its exit status can be matched
+ * to the exact CAN ID, even when an arm/fallback frame follows it. */
+static void remember_door_pid(pid_t pid, uint16_t can_id)
+{
+    if (pid < 0) return;
+    if (g_door_pid_n >= DOOR_PID_SLOTS) {
+        memmove(&g_door_pids[0], &g_door_pids[1],
+                sizeof(g_door_pids[0]) * (DOOR_PID_SLOTS - 1));
+        memmove(&g_door_pid_cmd[0], &g_door_pid_cmd[1],
+                sizeof(g_door_pid_cmd[0]) * (DOOR_PID_SLOTS - 1));
+        g_door_pid_n = DOOR_PID_SLOTS - 1;
+    }
+    g_door_pids[g_door_pid_n] = pid;
+    g_door_pid_cmd[g_door_pid_n] = can_id;
+    g_door_pid_n++;
+}
+
+static bool take_door_pid(pid_t pid, uint16_t *can_id)
+{
+    for (int i = 0; i < g_door_pid_n; i++) {
+        if (g_door_pids[i] != pid) continue;
+        if (can_id) *can_id = g_door_pid_cmd[i];
+        memmove(&g_door_pids[i], &g_door_pids[i + 1],
+                sizeof(g_door_pids[0]) * (g_door_pid_n - i - 1));
+        memmove(&g_door_pid_cmd[i], &g_door_pid_cmd[i + 1],
+                sizeof(g_door_pid_cmd[0]) * (g_door_pid_n - i - 1));
+        g_door_pid_n--;
+        return true;
+    }
+    return false;
+}
+
+/* The factory TmsRemoteApp sends both door directions through the micom
+ * D-Bus service with the same 0x4A2 arm frame followed by a command frame
+ * (decompiled from the 260128 TmsRemoteApp, EVRemoteChargeDoorOpen/Close):
+ *   arm:   04 A2 08 FF FF FF FF FF FF FF FF
+ *   open:  04 A2 08 FF FF FF DF FF FF FF FF
+ *   close: 04 A2 08 FF FF FF EF FF FF FF FF
+ * 0x4C5 is NOT a door command; that ID belongs to the target-SoC setting
+ * path.  Returns the pid of the command frame. */
 static int send_chargedoor_frame(int target)
 {
-    if (target == DOOR_STATE_CLOSED) {
-        uint8_t d[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-        return send_micom_frame(DOOR_ID_CLOSE, d);
-    }
     uint8_t ff[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-    send_micom_frame(DOOR_ID_OPEN, ff);
-    uint8_t df[8] = {0xFF, 0xFF, 0xFF, 0xDF, 0xFF, 0xFF, 0xFF, 0xFF};
-    return send_micom_frame(DOOR_ID_OPEN, df);
+    int pid = send_micom_frame(DOOR_ID_OPEN, ff);
+    remember_door_pid(pid, DOOR_ID_OPEN);
+    /* Give the micom a moment to process the arm frame before the command;
+     * the two dbus-send children previously raced. */
+    usleep(120000);
+    uint8_t cmd[8] = {0xFF, 0xFF, 0xFF,
+                      target == DOOR_STATE_CLOSED ? 0xEF : 0xDF,
+                      0xFF, 0xFF, 0xFF, 0xFF};
+    int pid2 = send_micom_frame(DOOR_ID_OPEN, cmd);
+    remember_door_pid(pid2, DOOR_ID_OPEN);
+    return pid2;
 }
 
 static void reap_children(void)
@@ -535,11 +602,36 @@ static void reap_children(void)
     pid_t p;
     while ((p = waitpid(-1, &status, WNOHANG)) > 0) {
         int st = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        if (p == g_dump_pid) {
+            g_dump_pid = -1;
+            dump_child_reaped(st);
+            continue;
+        }
         if (p == g_mon_pid) {
             /* The session-bus monitor died: forget the pid so shutdown never
              * kills a recycled one, and never treat its exit as a command
              * result. */
             g_mon_pid = -1;
+            continue;
+        }
+        uint16_t door_cmd = 0;
+        if (take_door_pid(p, &door_cmd)) {
+            if (p == g_door_send_pid) {
+                g_door_dbus_status = st;
+                g_door_send_pid = -1;
+            }
+            g_last_send_status = st;
+            if (st == 0) {
+                g_send_oks++;
+                fprintf(stderr, "battery_daemon: door tx %03X ok\n",
+                        door_cmd);
+            } else {
+                g_send_fails++;
+                fprintf(stderr,
+                        "battery_daemon: door tx %03X failed: exit %d\n",
+                        door_cmd, st);
+            }
+            fflush(stderr);
             continue;
         }
         if (p == g_door_send_pid) {
@@ -561,6 +653,7 @@ static void reap_children(void)
             fprintf(stderr, "battery_daemon: send failed (%s): exit %d\n",
                     g_last_send_cmd, st);
             fflush(stderr);
+            request_error_dump("micom_send_failed");
         }
     }
 }
@@ -597,7 +690,7 @@ static void monitor_start(void)
     if (guid) *guid = '\0';
 
     int fds[2];
-    if (pipe(fds) < 0) return;
+    if (pipe2(fds, O_CLOEXEC) < 0) return;
     pid_t pid = fork();
     if (pid < 0) { close(fds[0]); close(fds[1]); return; }
     if (pid == 0) {
@@ -694,6 +787,17 @@ static int request_chargedoor(int target)
 {
     int64_t now = now_ms();
     const char *why = door_block_reason();
+    const char *st = door_state_name();
+    bool cable_fresh = g_cable_known && now - g_cable_ms <= DOOR_SIGNAL_STALE_MS;
+    fprintf(stderr,
+            "battery_daemon: door request target=%s state=%s busy=%d "
+            "cable=%s block='%s'\n",
+            target == DOOR_STATE_CLOSED ? "close" : "open",
+            st, g_door_busy,
+            cable_fresh ? (g_cable ? "yes" : "no") : "unknown",
+            why);
+    fflush(stderr);
+
     if (why[0]) {
         snprintf(g_door_msg, sizeof(g_door_msg), "%s", why);
         return -1;
@@ -703,7 +807,6 @@ static int request_chargedoor(int target)
         return -1;
     }
 
-    const char *st = door_state_name();
     if (target == DOOR_STATE_OPEN && !strcmp(st, "open")) {
         snprintf(g_door_msg, sizeof(g_door_msg), "open");
         return 0;
@@ -732,8 +835,15 @@ static int request_chargedoor(int target)
         g_door_attempts = 0;
         g_door_send_pid = -1;
         snprintf(g_door_msg, sizeof(g_door_msg), "send_failed");
+        fprintf(stderr, "battery_daemon: door %s send failed (fork)\n",
+                target == DOOR_STATE_CLOSED ? "close" : "open");
+        fflush(stderr);
         return -1;
     }
+    fprintf(stderr, "battery_daemon: door %s frames sent pid=%d\n",
+            target == DOOR_STATE_CLOSED ? "close" : "open",
+            (int)g_door_send_pid);
+    fflush(stderr);
     return 0;
 }
 
@@ -741,6 +851,12 @@ static void door_finish(const char *msg, bool ok)
 {
     g_door_busy = false;
     snprintf(g_door_msg, sizeof(g_door_msg), "%s", msg);
+    fprintf(stderr,
+            "battery_daemon: door result=%s ok=%d dbus_status=%d attempts=%d\n",
+            msg, ok ? 1 : 0, g_door_dbus_status, g_door_attempts);
+    fflush(stderr);
+    if (!ok)
+        request_error_dump("charge_door_failed");
     if (ok) {
         g_door_state = g_door_target;
         g_door_assumed = true;
@@ -985,6 +1101,8 @@ static void tick_state(int64_t now)
             bool cleanup = g_stop_cleanup;
             g_stop_cleanup = false;
             enter_idle((g_precond_known && !cleanup) ? "idle" : "stopped");
+            if (cleanup)
+                request_error_dump("preheat_start_failed");
         } else if (g_burst == BURST_NONE && now - g_attempt_ms > g_stop_retry_ms) {
             if (g_retries < MAX_RETRIES) {
                 g_retries++;
@@ -992,6 +1110,7 @@ static void tick_state(int64_t now)
                 set_message("stopping");
             } else {
                 enter_idle("stop_failed");
+                request_error_dump("preheat_stop_failed");
             }
         }
     }
@@ -1198,10 +1317,14 @@ static size_t build_status(char *buf, size_t sz)
     char raw[32] = "";
     char gear_raw[32] = "";
     char sm[64], se[64], ss[64], smon[64];
+    char ds[16], dm[192], dd[512];
     json_escape(sm, sizeof(sm), g_smack);
     json_escape(se, sizeof(se), g_smack_expected);
     json_escape(ss, sizeof(ss), g_smack_send);
     json_escape(smon, sizeof(smon), g_smack_monitor);
+    json_escape(ds, sizeof(ds), g_dump_state);
+    json_escape(dm, sizeof(dm), g_dump_message);
+    json_escape(dd, sizeof(dd), g_dump_dir);
     if (g_soc_frame_valid) {
         snprintf(raw, sizeof(raw), "%02X %02X %02X %02X %02X %02X %02X %02X",
                  g_soc_frame[0], g_soc_frame[1], g_soc_frame[2], g_soc_frame[3],
@@ -1235,6 +1358,7 @@ static size_t build_status(char *buf, size_t sz)
         "\"gear_raw\":\"%s\",\"gear_b3\":%d,\"gear_b4\":%d,"
         "\"smack\":\"%s\",\"smack_expected\":\"%s\",\"smack_ok\":%s,"
         "\"smack_send\":\"%s\",\"smack_monitor\":\"%s\","
+        "\"dump_state\":\"%s\",\"dump_message\":\"%s\",\"dump_dir\":\"%s\","
         "\"home_seq\":%d,\"home_source\":\"%s\",\"last_app_key\":%d,"
         "\"home_monitor\":%s}\n",
         state_name(), g_precond_raw,
@@ -1266,18 +1390,594 @@ static size_t build_status(char *buf, size_t sz)
         g_gear_frame_valid ? (int)(g_gear_frame[3] & 0x03) : -1,
         g_gear_frame_valid ? (int)(g_gear_frame[4] & 0x0F) : -1,
         sm, se, g_smack_ok ? "true" : "false", ss, smon,
+        ds, dm, dd,
         g_home_seq, g_home_source, g_last_app_key,
         g_home_monitor ? "true" : "false");
 }
 
 static void write_status_file(void)
 {
-    char buf[2048];
+    char buf[3072];
     build_status(buf, sizeof(buf));
-    int fd = open(g_status_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return;
-    (void)write(fd, buf, strlen(buf));
+    (void)write_atomic_file(g_status_path, buf, strlen(buf));
+}
+
+/* ---------------- log dump to USB ---------------- */
+
+#define ERROR_DUMP_THROTTLE_MS (10LL * 60 * 1000)
+#define LOG_DUMP_KEEP 5
+#define LOG_TAIL_BYTES (256L * 1024)
+
+static void status_dir(char *out, size_t n)
+{
+    const char *slash = strrchr(g_status_path, '/');
+    if (!slash) {
+        snprintf(out, n, "/rw_data/battery");
+        return;
+    }
+    size_t len = (size_t)(slash - g_status_path);
+    if (len >= n) len = n - 1;
+    memcpy(out, g_status_path, len);
+    out[len] = '\0';
+}
+
+static bool write_atomic_file(const char *path, const char *data, size_t len)
+{
+    char tmp[800];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return false;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = write(fd, data + off, len - off);
+        if (n <= 0) {
+            close(fd);
+            unlink(tmp);
+            return false;
+        }
+        off += (size_t)n;
+    }
+    (void)fsync(fd);
     close(fd);
+    return rename(tmp, path) == 0;
+}
+
+static int read_small_file(const char *path, char *out, size_t sz)
+{
+    if (!out || sz == 0) return -1;
+    out[0] = '\0';
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, out, sz - 1);
+    close(fd);
+    if (n < 0) return -1;
+    out[n] = '\0';
+    return (int)n;
+}
+
+static int read_tail_file(const char *path, char *out, size_t sz)
+{
+    if (!out || sz == 0) return -1;
+    out[0] = '\0';
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    off_t end = lseek(fd, 0, SEEK_END);
+    if (end < 0) { close(fd); return -1; }
+    off_t start = end > (off_t)(sz - 1) ? end - (off_t)(sz - 1) : 0;
+    if (lseek(fd, start, SEEK_SET) < 0) { close(fd); return -1; }
+    size_t used = 0;
+    ssize_t n;
+    while ((n = read(fd, out + used, sz - 1 - used)) > 0)
+        used += (size_t)n;
+    out[used] = '\0';
+    close(fd);
+    return (int)used;
+}
+
+static bool is_media_mount(const char *mp)
+{
+    return !strncmp(mp, "/media/usb", 10) ||
+           !strncmp(mp, "/media/", 7) ||
+           !strncmp(mp, "/run/media", 10);
+}
+
+static bool is_removable_dev(const char *dev)
+{
+    return !strncmp(dev, "/dev/sd", 7) ||
+           !strncmp(dev, "/dev/mmcblk", 11) ||
+           !strncmp(dev, "/dev/sr", 7);
+}
+
+/* Find the mounted USB stick via /proc/mounts.  No fstype whitelist: the
+ * car's exFAT is Tuxera texfat and FUSE mounts show up as fuseblk.  Prefer
+ * removable block devices; BATTERY_USB_ROOT and BATTERY_MOUNTS_FILE are the
+ * test hooks. */
+static bool find_usb_dir(char *out, size_t n)
+{
+    if (out && n) out[0] = '\0';
+    const char *env = getenv("BATTERY_USB_ROOT");
+    if (env && *env) {
+        snprintf(out, n, "%s", env);
+        return true;
+    }
+
+    const char *mounts_env = getenv("BATTERY_MOUNTS_FILE");
+    const char *mounts = (mounts_env && *mounts_env) ? mounts_env : "/proc/mounts";
+    bool test_mounts = mounts_env && *mounts_env;
+    char buf[16384];
+    if (read_small_file(mounts, buf, sizeof(buf)) <= 0) return false;
+
+    for (int pass = 0; pass < 2; pass++) {
+        char copy[16384];
+        snprintf(copy, sizeof(copy), "%s", buf);
+        char *save = NULL;
+        for (char *line = strtok_r(copy, "\n", &save); line;
+             line = strtok_r(NULL, "\n", &save)) {
+            char dev[256], mp[512];
+            if (sscanf(line, "%255s %511s", dev, mp) != 2) continue;
+            if (!test_mounts && !is_media_mount(mp)) continue;
+            if (pass == 0 && !is_removable_dev(dev)) continue;
+            struct stat st;
+            if (stat(mp, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+            snprintf(out, n, "%s", mp);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Single-quote a value for /bin/sh. */
+static void shq(char *dst, size_t n, const char *src)
+{
+    size_t j = 0;
+    if (!n) return;
+    if (j + 1 < n) dst[j++] = '\'';
+    for (const char *p = src ? src : ""; *p && j + 5 < n; p++) {
+        if (*p == '\'') {
+            memcpy(dst + j, "'\\''", 4);
+            j += 4;
+        } else {
+            dst[j++] = *p;
+        }
+    }
+    if (j + 1 < n) dst[j++] = '\'';
+    dst[j] = '\0';
+}
+
+/* Run a command with a hard deadline, capturing its output. */
+static int run_capture(char *out, size_t outsz, const char *cmd, int timeout_ms)
+{
+    if (out && outsz) out[0] = '\0';
+    int fds[2];
+    if (pipe2(fds, O_CLOEXEC) != 0) return -1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        setpgid(0, 0);
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
+        int nul = open("/dev/null", O_RDONLY);
+        if (nul >= 0) { dup2(nul, STDIN_FILENO); close(nul); }
+        dup2(fds[1], STDOUT_FILENO);
+        close(fds[0]);
+        close(fds[1]);
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+    close(fds[1]);
+    if (pid < 0) { close(fds[0]); return -1; }
+    (void)setpgid(pid, pid);
+    fcntl(fds[0], F_SETFL, O_NONBLOCK);
+    size_t used = 0;
+    bool eof = false, reaped = false;
+    int st = 0;
+    int64_t until = now_ms() + timeout_ms;
+    while (!eof || !reaped) {
+        char buf[1024];
+        ssize_t nr;
+        while ((nr = read(fds[0], buf, sizeof(buf))) > 0) {
+            if (out && used + 1 < outsz) {
+                size_t take = (size_t)nr;
+                if (take > outsz - used - 1) take = outsz - used - 1;
+                memcpy(out + used, buf, take);
+                used += take;
+                out[used] = '\0';
+            }
+        }
+        if (nr == 0) eof = true;
+        if (!reaped && waitpid(pid, &st, WNOHANG) == pid) reaped = true;
+        if (eof && reaped) break;
+        if (now_ms() >= until) {
+            close(fds[0]);
+            kill(-pid, SIGKILL);
+            kill(pid, SIGKILL);
+            if (!reaped)
+                while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+            return 124;
+        }
+        struct pollfd pfd = {.fd = fds[0], .events = POLLIN};
+        poll(&pfd, 1, 30);
+    }
+    close(fds[0]);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
+static void snap_cmd(FILE *f, const char *fmt, ...)
+{
+    char cmd[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(cmd, sizeof(cmd), fmt, ap);
+    va_end(ap);
+
+    char *out = malloc(16384);
+    if (!out) return;
+    out[0] = '\0';
+    fprintf(f, "\n$ %s\n", cmd);
+    int rc = run_capture(out, 16384, cmd, 8000);
+    fputs(out, f);
+    if (rc == 124) fputs("\n[timeout]\n", f);
+    else if (rc != 0 && out[0] == '\0') fprintf(f, "[exit %d]\n", rc);
+    fputc('\n', f);
+    free(out);
+}
+
+static void copy_tail(const char *dir, const char *src, const char *name, long max)
+{
+    FILE *in = fopen(src, "rb");
+    if (!in) return;
+    if (fseek(in, 0, SEEK_END) != 0) { fclose(in); return; }
+    long size = ftell(in);
+    long start = (size > max) ? size - max : 0;
+    if (start < 0) start = 0;
+    if (fseek(in, start, SEEK_SET) != 0) { fclose(in); return; }
+    char path[768];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE *out = fopen(path, "wb");
+    if (!out) { fclose(in); return; }
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+        if (fwrite(buf, 1, n, out) != n) break;
+    fclose(in);
+    fclose(out);
+}
+
+static bool is_pruneable_name(const char *name)
+{
+    if (!name || strncmp(name, "battery_logs_", 13)) return false;
+    size_t len = strlen(name);
+    if (len < 27) return false;
+    for (int i = 13; i < 27; i++)
+        if (!isdigit((unsigned char)name[i])) return false;
+    if (len > 27) {
+        if (name[27] != '_' || len == 28) return false;
+        for (size_t i = 28; i < len; i++)
+            if (!isdigit((unsigned char)name[i])) return false;
+    }
+    return true;
+}
+
+static bool remove_tree_at(int parent, const char *name, int depth)
+{
+    struct stat st;
+    if (fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) != 0)
+        return errno == ENOENT;
+    if (!S_ISDIR(st.st_mode))
+        return unlinkat(parent, name, 0) == 0;
+    if (depth >= 16) return false;
+    int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return false;
+    DIR *d = fdopendir(fd);
+    if (!d) { close(fd); return false; }
+    struct dirent *de;
+    bool ok = true;
+    while ((de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        if (!remove_tree_at(fd, de->d_name, depth + 1)) ok = false;
+    }
+    closedir(d);
+    return ok && unlinkat(parent, name, AT_REMOVEDIR) == 0;
+}
+
+static int dump_filter(const struct dirent *de)
+{
+    return is_pruneable_name(de->d_name);
+}
+
+static void prune_old_dumps(const char *usb)
+{
+    int fd = open(usb, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return;
+    struct dirent **names = NULL;
+    int count = scandir(usb, &names, dump_filter, alphasort);
+    int directories = 0;
+    for (int i = 0; i < count; i++) {
+        struct stat st;
+        if (fstatat(fd, names[i]->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+            S_ISDIR(st.st_mode))
+            directories++;
+    }
+    for (int i = 0; i < count; i++) {
+        struct stat st;
+        if (directories > LOG_DUMP_KEEP &&
+            fstatat(fd, names[i]->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+            S_ISDIR(st.st_mode) &&
+            remove_tree_at(fd, names[i]->d_name, 0))
+            directories--;
+        free(names[i]);
+    }
+    free(names);
+    close(fd);
+}
+
+static void write_dump_result(const char *state, const char *dir,
+                              const char *message, const char *reason)
+{
+    char sd[512];
+    status_dir(sd, sizeof(sd));
+    char path[768];
+    snprintf(path, sizeof(path), "%s/dump_result", sd);
+    char buf[1024];
+    snprintf(buf, sizeof(buf), "state=%s\ndir=%s\nmessage=%s\nreason=%s\n",
+             state ? state : "error",
+             dir ? dir : "",
+             message ? message : "",
+             reason ? reason : "");
+    (void)write_atomic_file(path, buf, strlen(buf));
+}
+
+static void read_dump_result(char *state, size_t ssz, char *dir, size_t dsz,
+                             char *message, size_t msz)
+{
+    if (state && ssz) state[0] = '\0';
+    if (dir && dsz) dir[0] = '\0';
+    if (message && msz) message[0] = '\0';
+    char sd[512];
+    status_dir(sd, sizeof(sd));
+    char path[768];
+    snprintf(path, sizeof(path), "%s/dump_result", sd);
+    char buf[1024];
+    if (read_small_file(path, buf, sizeof(buf)) <= 0) return;
+    char *save = NULL;
+    for (char *line = strtok_r(buf, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        if (!strncmp(line, "state=", 6) && state && ssz)
+            snprintf(state, ssz, "%s", line + 6);
+        else if (!strncmp(line, "dir=", 4) && dir && dsz)
+            snprintf(dir, dsz, "%s", line + 4);
+        else if (!strncmp(line, "message=", 8) && message && msz)
+            snprintf(message, msz, "%s", line + 8);
+    }
+}
+
+static void dump_child_reaped(int status)
+{
+    char state[16] = "error";
+    char dir[512] = "";
+    char message[192] = "log dump failed";
+    read_dump_result(state, sizeof(state), dir, sizeof(dir), message, sizeof(message));
+    if (status != 0) {
+        if (!strcmp(state, "ok") || state[0] == '\0')
+            snprintf(state, sizeof(state), "error");
+        if (message[0] == '\0')
+            snprintf(message, sizeof(message), "log dump failed (exit %d)", status);
+    } else if (!strcmp(state, "ok")) {
+        if (message[0] == '\0')
+            snprintf(message, sizeof(message), "saved");
+    } else if (state[0] == '\0') {
+        snprintf(state, sizeof(state), "error");
+    }
+    snprintf(g_dump_state, sizeof(g_dump_state), "%s", state);
+    snprintf(g_dump_message, sizeof(g_dump_message), "%s", message);
+    snprintf(g_dump_dir, sizeof(g_dump_dir), "%s", dir);
+    fprintf(stderr, "battery_daemon: log dump %s: %s%s%s\n",
+            state, message, dir[0] ? " -> " : "", dir[0] ? dir : "");
+    fflush(stderr);
+}
+
+static bool dump_logs_to_usb(const char *usb_override, const char *reason)
+{
+    char usb[512];
+    if (usb_override && *usb_override)
+        snprintf(usb, sizeof(usb), "%s", usb_override);
+    else if (!find_usb_dir(usb, sizeof(usb))) {
+        fprintf(stderr, "battery_daemon: log dump: no USB mount found\n");
+        fflush(stderr);
+        write_dump_result("error", "", "no USB mount found", reason);
+        return false;
+    }
+
+    char usbq[2200];
+    shq(usbq, sizeof(usbq), usb);
+    char mnt[2400];
+    snprintf(mnt, sizeof(mnt), "mount -o remount,rw %s 2>/dev/null", usbq);
+    (void)run_capture(NULL, 0, mnt, 4000);
+
+    char stamp[32];
+    time_t t = time(NULL);
+    struct tm tm;
+    gmtime_r(&t, &tm);
+    strftime(stamp, sizeof(stamp), "%Y%m%d%H%M%S", &tm);
+
+    char dir[768];
+    bool made = false;
+    for (int n = 0; n < 100; n++) {
+        if (n == 0)
+            snprintf(dir, sizeof(dir), "%s/battery_logs_%s", usb, stamp);
+        else
+            snprintf(dir, sizeof(dir), "%s/battery_logs_%s_%d", usb, stamp, n);
+        if (mkdir(dir, 0700) == 0) {
+            made = true;
+            break;
+        }
+        if (errno != EEXIST) break;
+    }
+    if (!made) {
+        fprintf(stderr, "battery_daemon: log dump: mkdir %s failed: %s\n",
+                dir, strerror(errno));
+        fflush(stderr);
+        write_dump_result("error", "", "cannot create dump directory", reason);
+        return false;
+    }
+
+    char sd[512];
+    status_dir(sd, sizeof(sd));
+    char src[768];
+
+    snprintf(src, sizeof(src), "%s/daemon.log", sd);
+    copy_tail(dir, src, "daemon.log", LOG_TAIL_BYTES);
+    snprintf(src, sizeof(src), "%s/install.log", sd);
+    copy_tail(dir, src, "install.log", LOG_TAIL_BYTES);
+    snprintf(src, sizeof(src), "%s/restore.log", sd);
+    copy_tail(dir, src, "restore.log", LOG_TAIL_BYTES);
+    snprintf(src, sizeof(src), "%s/manifest-check.log", sd);
+    copy_tail(dir, src, "manifest-check.log", LOG_TAIL_BYTES);
+    snprintf(src, sizeof(src), "%s/result.txt", sd);
+    copy_tail(dir, src, "result.txt", 1024 * 1024);
+    copy_tail(dir, g_status_path, "status.json", 1024 * 1024);
+    snprintf(src, sizeof(src), "%s/smack_expected", sd);
+    copy_tail(dir, src, "smack_expected", 4096);
+
+    char state[800];
+    snprintf(state, sizeof(state), "%s/state.txt", dir);
+    FILE *f = fopen(state, "w");
+    if (!f) {
+        write_dump_result("error", "", "cannot create state.txt", reason);
+        return false;
+    }
+    fprintf(f, "battery log dump %s reason=%s version=%s mono_ms=%lld\n",
+            stamp, reason ? reason : "manual", BATTERY_DAEMON_VERSION,
+            (long long)now_ms());
+    snap_cmd(f, "uname -a");
+    snap_cmd(f, "cat /proc/mounts");
+    snap_cmd(f, "date");
+    snap_cmd(f, "uptime");
+    snap_cmd(f, "ps w | grep -E 'battery_daemon|AppHomeScreen' | grep -v grep");
+    snap_cmd(f, "systemctl status battery-daemon.service --no-pager");
+    snap_cmd(f, "systemctl is-enabled battery-daemon.service");
+    snap_cmd(f, "ip -details -statistics link show can0");
+    snap_cmd(f, "cat /proc/net/can/stats");
+    snap_cmd(f, "cat /proc/net/can/rcvlist_all");
+    snap_cmd(f, "getfattr -n security.SMACK64 %s/battery_daemon %s/bin/dbus-send %s/bin/dbus-monitor %s/status.json 2>&1", sd, sd, sd, sd);
+    snap_cmd(f, "getfattr -n security.SMACK64EXEC %s/battery_daemon %s/bin/dbus-send %s/bin/dbus-monitor 2>&1", sd, sd, sd);
+    snap_cmd(f, "cat /sys/fs/smackfs/onlycap 2>&1");
+    snap_cmd(f, "pidof battery_daemon");
+    snap_cmd(f, "cat /proc/$(pidof battery_daemon | cut -d' ' -f1)/attr/current 2>&1");
+    snap_cmd(f, "tr '\\0' ' ' < /proc/$(pidof battery_daemon | cut -d' ' -f1)/cmdline 2>&1");
+    snap_cmd(f, "grep -E '^(Name|Pid|PPid|Uid|Gid|CapEff):' /proc/$(pidof battery_daemon | cut -d' ' -f1)/status 2>&1");
+    snap_cmd(f, "md5sum /app/share/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.qml /app/share/AppHomeScreen/qml_eco3.0/HomeScreen/BatteryPage.qml /app/share/AppHomeScreen/qml_eco3.0/component/BatterySwitch.qml /app/share/AppHomeScreen/qml_eco3.0/component/BatteryTile.qml 2>&1");
+    snap_cmd(f, "grep -nE 'BatteryPage|batteryTile|BATTERY_PAYLOAD_260128' /app/share/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.qml 2>&1 | head -80");
+    snap_cmd(f, "journalctl -b --no-pager 2>/dev/null | grep -iE 'battery|BatteryPage' | tail -n 200");
+    snap_cmd(f, "dmesg 2>&1 | tail -n 200");
+    snap_cmd(f, "dbus-send --system --print-reply --reply-timeout=1500 --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>&1 | grep -E 'com.lge.car.micom|org.freedesktop.DBus' | head -20");
+
+    char self[512];
+    ssize_t sl = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (sl > 0) self[sl] = '\0';
+    else snprintf(self, sizeof(self), "battery_daemon");
+    char selfq[1100];
+    shq(selfq, sizeof(selfq), self);
+    snap_cmd(f, "%s --iface can0 --sniff 3", selfq);
+    fclose(f);
+
+    prune_old_dumps(usb);
+    write_dump_result("ok", dir, "saved", reason);
+    fprintf(stderr, "battery_daemon: log dump written to %s\n", dir);
+    fflush(stderr);
+    return true;
+}
+
+static int64_t wall_ms(void)
+{
+    return (int64_t)time(NULL) * 1000;
+}
+
+static bool error_dump_allowed(void)
+{
+    char sd[512];
+    status_dir(sd, sizeof(sd));
+    char path[768];
+    snprintf(path, sizeof(path), "%s/last_error_dump", sd);
+    if (g_last_error_dump_ms == 0) {
+        char buf[64];
+        if (read_small_file(path, buf, sizeof(buf)) > 0)
+            g_last_error_dump_ms = (int64_t)atoll(buf) * 1000;
+    }
+    int64_t throttle = ERROR_DUMP_THROTTLE_MS;
+    const char *env = getenv("BATTERY_ERROR_DUMP_THROTTLE_MS");
+    if (env && *env) throttle = (int64_t)atoll(env);
+    if (throttle <= 0) return true;
+    if (g_last_error_dump_ms == 0) return true;
+    return wall_ms() - g_last_error_dump_ms >= throttle;
+}
+
+static void write_error_dump_stamp(void)
+{
+    char sd[512];
+    status_dir(sd, sizeof(sd));
+    char path[768];
+    snprintf(path, sizeof(path), "%s/last_error_dump", sd);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%lld\n", (long long)time(NULL));
+    (void)write_atomic_file(path, buf, strlen(buf));
+}
+
+static void request_dump(const char *reason, bool manual)
+{
+    if (g_stop) return;
+    if (g_dump_pid > 0) {
+        if (manual) {
+            snprintf(g_dump_state, sizeof(g_dump_state), "saving");
+            snprintf(g_dump_message, sizeof(g_dump_message), "already saving");
+        }
+        return;
+    }
+    if (!manual) {
+        if (!error_dump_allowed()) return;
+        g_last_error_dump_ms = wall_ms();
+        write_error_dump_stamp();
+    }
+
+    char usb[512];
+    if (!find_usb_dir(usb, sizeof(usb))) {
+        if (manual) {
+            snprintf(g_dump_state, sizeof(g_dump_state), "error");
+            snprintf(g_dump_message, sizeof(g_dump_message), "no USB stick found");
+            g_dump_dir[0] = '\0';
+        } else {
+            fprintf(stderr, "battery_daemon: error dump skipped (%s): no USB mount\n",
+                    reason ? reason : "error");
+            fflush(stderr);
+        }
+        return;
+    }
+
+    snprintf(g_dump_state, sizeof(g_dump_state), "saving");
+    snprintf(g_dump_message, sizeof(g_dump_message), "%s",
+             manual ? "saving logs" : "saving logs (error)");
+    g_dump_dir[0] = '\0';
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl("/proc/self/exe", "battery_daemon", "--dump-logs",
+              "--status-file", g_status_path, "--usb", usb,
+              "--reason", reason ? reason : "manual", (char *)NULL);
+        _exit(127);
+    }
+    if (pid < 0) {
+        snprintf(g_dump_state, sizeof(g_dump_state), "error");
+        snprintf(g_dump_message, sizeof(g_dump_message), "cannot start log dump");
+        return;
+    }
+    g_dump_pid = pid;
+    fprintf(stderr, "battery_daemon: log dump started (%s) pid=%d\n",
+            reason ? reason : "manual", (int)pid);
+    fflush(stderr);
+}
+
+static void request_error_dump(const char *reason)
+{
+    request_dump(reason, false);
 }
 
 static void http_reply(int fd, int code, const char *body)
@@ -1296,6 +1996,53 @@ static void http_reply(int fd, int code, const char *body)
     (void)write(fd, body, strlen(body));
 }
 
+static void url_decode(char *s)
+{
+    char *w = s;
+    for (char *r = s; *r; r++) {
+        if (*r == '%' && isxdigit((unsigned char)r[1]) &&
+            isxdigit((unsigned char)r[2])) {
+            char hex[3] = {r[1], r[2], 0};
+            *w++ = (char)strtol(hex, NULL, 16);
+            r += 2;
+        } else if (*r == '+') {
+            *w++ = ' ';
+        } else {
+            *w++ = *r;
+        }
+    }
+    *w = 0;
+}
+
+static bool query_get(const char *query, const char *name, char *out, size_t n)
+{
+    if (out && n) out[0] = 0;
+    if (!query) return false;
+    size_t nlen = strlen(name);
+    const char *p = query;
+    while (p && *p) {
+        const char *amp = strchr(p, '&');
+        size_t len = amp ? (size_t)(amp - p) : strlen(p);
+        const char *eq = memchr(p, '=', len);
+        if (eq && (size_t)(eq - p) == nlen && !strncmp(p, name, nlen)) {
+            size_t vlen = len - (size_t)(eq - p) - 1;
+            char tmp[512];
+            if (vlen >= sizeof(tmp)) vlen = sizeof(tmp) - 1;
+            memcpy(tmp, eq + 1, vlen);
+            tmp[vlen] = 0;
+            url_decode(tmp);
+            size_t outlen = strlen(tmp);
+            if (outlen >= n) outlen = n - 1;
+            memcpy(out, tmp, outlen);
+            out[outlen] = 0;
+            return true;
+        }
+        if (!amp) break;
+        p = amp + 1;
+    }
+    return false;
+}
+
 static void http_handle(int fd)
 {
     char req[2048];
@@ -1311,17 +2058,54 @@ static void http_handle(int fd)
         return;
     }
 
+    char *query = NULL;
     char *q = strchr(path, '?');
-    if (q)
+    if (q) {
         *q = '\0';
+        query = q + 1;
+    }
 
-    char body[2048];
+    char body[3072];
+    const char *reply_body = body;
     int code = 200;
 
     if (!strcmp(method, "GET") && !strcmp(path, "/health")) {
         snprintf(body, sizeof(body), "{\"ok\":true}\n");
     } else if (!strcmp(method, "GET") && !strcmp(path, "/status")) {
         build_status(body, sizeof(body));
+    } else if (!strcmp(method, "GET") && !strcmp(path, "/logs")) {
+        char src[64] = "";
+        char sd[512];
+        status_dir(sd, sizeof(sd));
+        char logpath[768];
+        if (query_get(query, "source", src, sizeof(src)) &&
+            !strcmp(src, "install"))
+            snprintf(logpath, sizeof(logpath), "%s/install.log", sd);
+        else if (!strcmp(src, "restore"))
+            snprintf(logpath, sizeof(logpath), "%s/restore.log", sd);
+        else
+            snprintf(logpath, sizeof(logpath), "%s/daemon.log", sd);
+        static char logbuf[16385];
+        static char logesc[32769];
+        static char logbody[32800];
+        if (read_tail_file(logpath, logbuf, sizeof(logbuf)) < 0)
+            logbuf[0] = '\0';
+        json_escape(logesc, sizeof(logesc), logbuf);
+        snprintf(logbody, sizeof(logbody), "{\"ok\":true,\"log\":\"%s\"}\n", logesc);
+        reply_body = logbody;
+    } else if (!strcmp(method, "POST") && !strcmp(path, "/logs/dump")) {
+        request_dump("manual", true);
+        if (!strcmp(g_dump_state, "saving")) {
+            code = 202;
+            snprintf(body, sizeof(body),
+                     "{\"ok\":true,\"queued\":true,\"message\":\"%s\"}\n",
+                     g_dump_message);
+        } else {
+            code = 409;
+            snprintf(body, sizeof(body),
+                     "{\"ok\":false,\"error\":\"%s\"}\n",
+                     g_dump_message[0] ? g_dump_message : "log dump failed");
+        }
     } else if (!strcmp(method, "POST") && !strcmp(path, "/start")) {
         if (request_start() == 0) {
             snprintf(body, sizeof(body), "{\"ok\":true,\"state\":\"%s\"}\n", state_name());
@@ -1376,7 +2160,7 @@ static void http_handle(int fd)
         snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"not found\"}\n");
     }
 
-    http_reply(fd, code, body);
+    http_reply(fd, code, reply_body);
     close(fd);
 }
 
@@ -1439,9 +2223,11 @@ static void usage(const char *argv0)
             " [--no-session-monitor]\n"
             "       %s [--retry-ms N] [--started-timeout-ms N]"
             " [--smack] [--version]\n"
+            "       %s --dump-logs [--usb DIR] [--reason TEXT]"
+            " [--status-file PATH]\n"
             "       %s --start|--stop|--dash-on|--dash-off|"
             "--door-open|--door-close|--door-toggle|--status|--sniff [seconds]\n",
-            argv0, argv0, argv0, argv0);
+            argv0, argv0, argv0, argv0, argv0);
 }
 
 int main(int argc, char **argv)
@@ -1449,6 +2235,9 @@ int main(int argc, char **argv)
     int port = HTTP_PORT;
     bool one_shot = false;
     bool smack_info = false;
+    bool dump_mode = false;
+    const char *dump_usb = NULL;
+    const char *dump_reason = "manual";
     enum { OS_NONE, OS_START, OS_STOP, OS_DASH_ON, OS_DASH_OFF,
            OS_DOOR_OPEN, OS_DOOR_CLOSE, OS_DOOR_TOGGLE, OS_STATUS,
            OS_SNIFF } op = OS_NONE;
@@ -1467,6 +2256,9 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--started-timeout-ms") && i + 1 < argc) g_started_timeout_ms = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--smack")) smack_info = true;
+        else if (!strcmp(argv[i], "--dump-logs")) dump_mode = true;
+        else if (!strcmp(argv[i], "--usb") && i + 1 < argc) dump_usb = argv[++i];
+        else if (!strcmp(argv[i], "--reason") && i + 1 < argc) dump_reason = argv[++i];
         else if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-v")) {
             printf("battery_daemon %s\n", BATTERY_DAEMON_VERSION);
             return 0;
@@ -1493,6 +2285,10 @@ int main(int argc, char **argv)
                g_smack_ok ? "true" : "false",
                g_smack_send, g_smack_monitor);
         return 0;
+    }
+    if (dump_mode) {
+        bool ok = dump_logs_to_usb(dump_usb, dump_reason);
+        return ok ? 0 : 1;
     }
 
     signal(SIGINT, on_signal);
@@ -1555,7 +2351,7 @@ int main(int argc, char **argv)
             tick_state(now_ms());
             tick_chargedoor(now_ms());
         }
-        char buf[2048];
+        char buf[3072];
         build_status(buf, sizeof(buf));
         fputs(buf, stdout);
         close(g_can_fd);

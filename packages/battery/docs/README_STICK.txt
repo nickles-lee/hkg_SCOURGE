@@ -42,6 +42,11 @@ Notes
 - The daemon and its dbus-send/dbus-monitor helpers are stamped with the
   installer's own SMACK label (normally the floor label "_"). The install
   aborts if chsmack/getfattr cannot apply and read that label back.
+- On wide screens the overlay has a live Daemon/Install log console and a
+  Dump button. The header "Save logs" button works on every layout.
+- A log bundle is also written automatically on a micom/preheat/charge-door
+  error, at most once per 10 minutes. Bundles are named battery_logs_<UTC>
+  and only the newest 5 are kept.
 - The charge-door toggle is greyed out only when a charging cable is observed.
   The gear/Park signal is advisory for now (0x036 is unreliable). It uses the
   factory micom D-Bus path.

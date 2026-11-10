@@ -8,6 +8,7 @@ commands (0x0C7 preheat, 0x4ED dash, 0x4A2 charge door), the charge-door
 gear-gate-disabled door, optimistic feedback, the session-bus Home/Star monitor,
 and the bus sniffer.
 """
+import glob
 import json
 import os
 import shutil
@@ -122,8 +123,9 @@ def main():
                 "if [ -f \"$DBUS_FAIL\" ]; then exit 1; fi\n"
                 "exit 0\n")
     os.chmod(stub, 0o755)
+    usb_dir = tempfile.mkdtemp(prefix="battery_usb_")
     env = dict(os.environ, DBUS_LOG=dbus_log, DBUS_FAIL=dbus_fail,
-               DBUS_DOOR_FAIL=door_fail)
+               DBUS_DOOR_FAIL=door_fail, BATTERY_USB_ROOT=usb_dir)
 
     # Private session bus standing in for the app-manager bus.  Dbuslaunch.sh
     # writes its address to /tmp/session_appmgr on the head unit; here the
@@ -140,6 +142,11 @@ def main():
     with open(bus_file, "w") as f:
         f.write(bus_addr + "\n")
     dbus_send_bin = shutil.which("dbus-send") or "/usr/bin/dbus-send"
+    for stale in ("/tmp/last_error_dump", "/tmp/dump_result"):
+        try:
+            os.unlink(stale)
+        except FileNotFoundError:
+            pass
 
     daemon = subprocess.Popen(
         [DAEMON, "--iface", IFACE, "--port", str(PORT),
@@ -156,6 +163,30 @@ def main():
                 time.sleep(0.05)
         else:
             raise AssertionError("daemon did not start")
+
+        # ---- live log endpoint + manual USB dump ----------------------
+        with open("/tmp/daemon.log", "w") as f:
+            f.write("battery test log marker\n")
+        with open("/tmp/install.log", "w") as f:
+            f.write("install test marker\n")
+        st = http("/logs?source=daemon")
+        assert st["ok"] is True and "battery test log marker" in st["log"], st
+        st = http("/logs?source=install")
+        assert st["ok"] is True and "install test marker" in st["log"], st
+        r = http("/logs/dump", "POST")
+        assert r.get("ok") is True, r
+        st = None
+        for _ in range(300):
+            st = http("/status")
+            if st.get("dump_state") in ("ok", "error"):
+                break
+            time.sleep(0.1)
+        assert st and st["dump_state"] == "ok", st
+        bundles = sorted(glob.glob(os.path.join(usb_dir, "battery_logs_*")))
+        assert bundles, "no log bundle written"
+        assert os.path.isfile(os.path.join(bundles[-1], "state.txt"))
+        assert os.path.isfile(os.path.join(bundles[-1], "status.json"))
+        print("logs endpoint + manual USB dump ok:", bundles[-1])
 
         # ---- no 0x2AD on this bus: start/stop still send the bursts ----
         send(s, 0x2FC, [0x0A, 0, 7, 8, 0, 0, 0x90, 0x9D])
@@ -353,8 +384,8 @@ def main():
         r = http("/chargedoor/open?park=1", "POST")
         assert r["ok"] is True and r["door"] == "open", r
         time.sleep(0.2)
-        before_doors = [l for l in before.splitlines() if "0x04,0xa2,0x08" in l or "0x04,0xc5,0x08" in l]
-        after_doors = [l for l in read_log(dbus_log).splitlines() if "0x04,0xa2,0x08" in l or "0x04,0xc5,0x08" in l]
+        before_doors = [l for l in before.splitlines() if "0x04,0xa2,0x08" in l]
+        after_doors = [l for l in read_log(dbus_log).splitlines() if "0x04,0xa2,0x08" in l]
         assert after_doors == before_doors, "duplicate open command was sent"
         print("door already-open no-op ok")
 
@@ -363,7 +394,7 @@ def main():
         r = http("/chargedoor/close?park=1", "POST")
         assert r["ok"] is True and r["door"] == "closing", r
         time.sleep(0.3)
-        assert "0x04,0xc5,0x08,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00" in read_log(dbus_log)[len(before):]
+        assert "0x04,0xa2,0x08,0xff,0xff,0xff,0xef,0xff,0xff,0xff,0xff" in read_log(dbus_log)[len(before):]
         send(s, 0x3AA, DOOR_CLOSED)
         st = wait_door("closed")
         assert st["door_state"] == 2 and st["door_source"] == "can", st
@@ -407,12 +438,27 @@ def main():
         send(s, 0x036, GEAR_PARK)
         send(s, 0x326, CABLE_NONE)
         time.sleep(0.1)
+        before_bundles = set(glob.glob(os.path.join(usb_dir, "battery_logs_*")))
         open(dbus_fail, "w").close()
         r = http("/chargedoor/close?park=1", "POST")
         assert r["ok"] is True, r
         st = wait_door("send_failed", timeout=4.0)
         os.unlink(dbus_fail)
-        print("door send-failed path ok")
+        new_bundles = set()
+        for _ in range(300):
+            new_bundles = set(glob.glob(os.path.join(usb_dir, "battery_logs_*"))) - before_bundles
+            if new_bundles:
+                break
+            time.sleep(0.1)
+        assert new_bundles, "failed door send did not trigger a log dump"
+        newest = sorted(new_bundles)[-1]
+        for _ in range(100):
+            if os.path.isfile(os.path.join(newest, "state.txt")):
+                break
+            time.sleep(0.1)
+        with open(os.path.join(newest, "state.txt")) as f:
+            assert "reason=charge_door_failed" in f.read()
+        print("door send-failed path ok + error dump")
 
         # ---- unknown cable state no longer blocks the door ------------
         # Regression: 0x326 is invisible on the car, so "cable_unknown"
@@ -443,6 +489,7 @@ def main():
         assert r["ok"] is True, r
         time.sleep(0.8)                    # dash children now exiting 0
         time.sleep(0.6)                    # past the door cooldown
+        before_limited = set(glob.glob(os.path.join(usb_dir, "battery_logs_*")))
         open(door_fail, "w").close()
         r = http("/chargedoor/close?park=1", "POST")
         assert r["ok"] is True, r
@@ -450,7 +497,10 @@ def main():
         assert st["door_state_name"] != "closed" or st["door_source"] != "command", st
         os.unlink(door_fail)
         http("/dash/off", "POST")
-        print("door send-fail not masked by dash frames ok")
+        time.sleep(1.0)
+        assert set(glob.glob(os.path.join(usb_dir, "battery_logs_*"))) == before_limited, \
+            "error dump was not rate-limited"
+        print("door send-fail not masked by dash frames ok + rate limit")
 
         # ---- session-bus Home/Star monitor ---------------------------
         st = wait_home_field("home_monitor", True)
