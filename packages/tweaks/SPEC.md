@@ -27,7 +27,11 @@
    bundled, freshly compiled tzdata.
 7. Optionally block Hyundai OTA via the vendor `AppDMClient` offline hook
    without disabling local USB updates.
-8. Install and restore entirely through the USB sideload path.
+8. Add a fourth home-screen app, **Reboot**, with a stock-style Yes/No
+   confirmation modal.
+9. Reboot cleanly through systemd, with a vendor micom watchdog-reset fallback
+   if the clean path does not take effect.
+10. Install and restore entirely through the USB sideload path.
 
 ## 3. Non-goals
 
@@ -35,6 +39,9 @@
 - No CAN/body or cluster firmware modification.
 - No new AppLauncher app ID or separate GUI process.
 - No replacement of the vendor blue-light UI.
+- No immediate hard reset in the normal path: Reboot asks systemd first and
+  only falls back to the micom watchdog when the clean reboot does not start.
+- No reboot while driving or while a firmware update process is running.
 
 ## 4. Architecture
 
@@ -52,6 +59,9 @@ USB run_stuff.sh
        |     - auto-DST via APP_SETTING_CLOCK_DAYLIGHTSAVETIME
        |     - OTA offline via AppDMClient.setOFFlineMode
        |     - writes disclaimer runtime files for AppStandbyClock
+       |     - POST /reboot: systemctl reboot --no-block, then the micom
+       |       SetETCCPUWDTReset fallback after 20 s
+       |     - session-bus home/star counter for the Reboot overlay
        |
        +-- /usr/bin/wrandr (wrapper)
        |     - rewrites --crtc=1 --gamma=128:128:128 to the desired warmth
@@ -161,7 +171,43 @@ Brightness is kept at `128:128:128`.
   paths delete the file; the daemon restores it on boot when enabled.
 - No process is stopped and `AppUpgrade`/`usb-automount` are not modified.
 
-## 11. Daemon API
+## 11. Reboot app
+
+The Reboot app is a fourth tile and an overlay/modal shipped by the same
+package; it has no separate daemon or AppLauncher ID.
+
+- **UI:** `RebootTile.qml` opens `RebootPage.qml`, which immediately shows a
+  stock-style Yes/No modal. Yes → `POST /reboot`; No/outside → close. The
+  page is `y: 90`, height 630, `z: 2000`, and owns `visible`.
+- **Clean path:** the daemon forks `/bin/systemctl reboot --no-block`. The
+  HTTP 202 is sent before the fork so the QML can render “Restarting”.
+- **Hard fallback:** after `reboot_wdt_ms` (default **20000**), if the daemon
+  is still alive, it kills a hung clean child, calls `sync()`, and sends
+  `SetETCCPUWDTReset array:byte:0x00` to `com.lge.car.micom` `/Ihu`
+  `com.lge.car.micom.ihu` — the exact call `/etc/weston-crash.sh` uses. A
+  failed clean command triggers the fallback immediately. The fallback is
+  attempted once.
+- **Guards:** the QML refuses on `AppHomeModel.drivingRestriction`; the daemon
+  refuses with `409 update_in_progress` while `AppUpgrade`/`AppScomoDM` runs.
+  The modal is disabled while `AppHomeModel.sysPopupShowing`.
+- **CSRF:** `/reboot` requires `X-Reboot-App: 1` and rejects requests with an
+  `Origin` header. It binds to `127.0.0.1` only.
+- **Home/Star:** the daemon watches the session bus for
+  `NotifyRequestHomeScreen` and `custom_key_value` key 7 and exposes
+  `home_seq`; the page closes when the counter changes (seeded on open).
+- **SMACK:** the daemon must run on the installer’s floor label `_`. The
+  hard-reset path uses the same `/usr/bin/dbus-send` helper as the proven
+  cluster CAN writes. The installer hard-gates `SMACK64EXEC` and the running
+  `/proc/<pid>/attr/current`; `/status` and `/health` expose `smack`,
+  `smack_expected`, `smack_ok`, and `smack_dbus`.
+- **State:** `reboot_state` = `idle` / `rebooting` / `error`;
+  `reboot_wdt_in_ms`, `reboot_wdt_sent`, `reboot_wdt_ok`,
+  `reboot_message`, `reboot_error`, `home_seq`, `home_source`.
+- **Localization:** button labels use the stock `TranslationsModel`
+  Yes/No/OK keys; the Reboot-specific body copy is English-only, matching the
+  rest of the Tweaks package.
+
+## 12. Daemon API
 
 | Method | Path | Meaning |
 |---|---|---|
@@ -179,13 +225,16 @@ Brightness is kept at `128:128:128`.
 | POST | `/apply` | apply immediately |
 | POST | `/restore` | disable night fixes and release front/cluster overrides |
 | POST | `/identify?crtc=N&seconds=3` | identify the front display (only `main_crtc`) |
+| POST | `/reboot` | clean reboot + micom WDT fallback; requires `X-Reboot-App: 1` |
 
-## 12. QML integration
+## 13. QML integration
 
 New components:
 
 - `HomeScreen/TweaksPage.qml`
+- `HomeScreen/RebootPage.qml`
 - `component/TweaksTile.qml`
+- `component/RebootTile.qml`
 - `component/TweaksSwitch.qml`
 - `component/TweaksButton.qml`
 - `component/TweaksZonePicker.qml`
@@ -202,9 +251,11 @@ Patched variants are generated for:
 | Setup | stock, hello, wifi, hello_wifi |
 | shared menu list | stock, hello, wifi, hello_wifi |
 
-In the Advanced layout the tile is attached to all three page components and a
-`tweaksTargetPage()` helper selects the first page with a free slot after the
-existing Hello/WiFi tiles.
+In the Advanced layout both tiles are attached to all three page components.
+Tweaks uses its existing per-page helper; Reboot uses the shared
+`firstEmptySlot` allocator with ordinal 4 (after Hello/Battery/WiFi/Tweaks).
+Wide, All Menus and Setup get both tiles; the shared menu list gets both
+`tweaksClicked` and `rebootClicked` signals.
 
 `TweaksPage.qml` starts at `y: ConstantModel.MENU_BAR_Y` with
 `height: DEVICE_HEIGHT - ConstantModel.MENU_BAR_Y`, so it never draws under the
@@ -213,15 +264,25 @@ consume stray taps so they cannot reach the home screen below. Every generated
 screen that hosts the page also connects `AppHomeModel.onButtonBackClicked` to
 close it, which handles the steering-wheel Home/Star and Back events.
 
-## 13. Installation
+`RebootPage.qml` is a full-page overlay at the same geometry (`z: 2000`) with
+a 70 % dim and a stock `QPopupAnimationItem`/`QVerticalButton`/
+`QHMI_ToggleButton` modal. It owns `visible: requested && !atOtherApp`, uses
+the full-page input shield, and closes on Back, app switch, screen/page change,
+`requestHomeByPP`, `AppHomeEngine.onNotifyHomeMainChanged`, and the daemon
+`home_seq`. The Yes button is disabled while the daemon status is not known;
+No/outside closes without a request.
+
+## 14. Installation
 
 1. Verify `manifest.md5`.
 2. Detect the current QML base by markers and MD5.
 3. Back up AppHomeScreen QML, AppStandbyClock QML and `/usr/bin/wrandr`.
 4. Remount `/` rw.
 5. Install assets, daemon, PCL helper, wrapper, service, `zoneinfo`, zones and
-   disclaimer runtime files.
-6. Install matching AppHomeScreen and AppStandbyClock QML variants.
+   disclaimer runtime files. Stamp the daemon/persist helper with the
+   installer's `SMACK_SELF`, read `SMACK64EXEC` back, and fail on a mismatch.
+6. Install matching AppHomeScreen and AppStandbyClock QML variants, including
+   `RebootPage.qml`/`RebootTile.qml`; preserve the target `SMACK64` label.
 7. Clear QML caches.
 8. Start `tweaks-daemon.service`.
 9. Restart `AppHomeScreen` (the disclaimer patch applies next boot).
@@ -230,18 +291,22 @@ close it, which handles the steering-wheel Home/Star and Back events.
 Restore reverses the QML and `wrandr` changes, removes the daemon/service and
 tzdata, and releases the OTA offline flag.
 
-## 14. Testing
+## 15. Testing
 
 - `tests/test_daemon.sh` — CLI, HTTP, state machine, gamma application,
   disclaimer clamping/files, DST winter/summer evaluation and OTA calls.
+- `tests/test_reboot.sh` — `/reboot` CSRF header, duplicate request, update
+  guard, failed-clean-command fallback, micom `SetETCCPUWDTReset` invocation,
+  status fields and the Home/Star session-bus counter.
 - `tests/test_artifacts.sh` — generated AppHomeScreen and AppStandbyClock QML
-  structure/markers.
+  structure/markers, including the Reboot tile/modal geometry and close hooks.
 - `tests/test_wrapper.sh` — neutral-reset rewrite and passthrough.
 - `tests/test_installer.sh` — install/reinstall/restore for all QML bases,
-  including AppStandbyClock backup, tzdata and disclaimer files.
-- QML parse check with host `qmllint` when available.
+  including AppStandbyClock backup, tzdata, disclaimer files and positive/
+  negative SMACK label gates.
+- QML parse check with the vendor Qt 5.4 `qmllint` in the 260128 rootfs.
 
-## 15. Risks
+## 16. Risks
 
 1. `tweaks_persist` depends on the vendor GENIVI PCL and D-Bus environment.
    If it fails, the daemon reports the error and does not guess the filter
@@ -264,3 +329,15 @@ tzdata, and releases the OTA offline flag.
 8. Auto-DST only changes the DST flag. If the selected IANA zone does not match
    the vehicle's region, transition dates will be wrong; the zone is selectable
    in the UI.
+9. The Reboot hard fallback is an **abrupt micom watchdog reset** of the ETC
+   CPU. It runs only after the clean systemd path does not take effect
+   (20 s), calls `sync()` first, and is suppressed while an update process is
+   running. It is still a reset, not a graceful shutdown.
+10. The Reboot app cannot help when AppHomeScreen or the daemon is already
+    dead; the hardware reset pinhole remains the last resort.
+11. The Reboot app ships inside Tweaks, so it cannot be uninstalled
+    independently without restoring the pre-Tweaks backup.
+12. The car validation of the Reboot path is still pending. The clean command,
+    `/status` schema, installer gates and fallback invocation are host-tested
+    with a fake `dbus-send`; the actual micom reset is derived from the vendor
+    `weston-crash.sh` and remains unverified on the car.

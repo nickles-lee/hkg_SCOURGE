@@ -1,6 +1,7 @@
 # Tweaks app — Ioniq 5 Gen5W (260128)
 
-A home-screen Tweaks app plus a small daemon for the Ioniq 5 Gen5W.
+The Tweaks package ships **two home-screen apps**: the Tweaks controls and a
+fourth **Reboot** overlay, plus the shared daemon.
 
 **Night mode:**
 
@@ -32,6 +33,24 @@ silently blocks every cluster CAN write while the front display still works.
 - **Hyundai OTA block** — uses the vendor `AppDMClient.setOFFlineMode()` hook,
   persists through `/update/offline_status`, and leaves local USB updates
   available. Off by default.
+
+**Reboot app (fourth overlay):**
+
+- Adds a **Reboot** tile in the next free home-screen slot (after Tweaks) and
+  a stock-style Yes/No confirmation modal.
+- **Yes** asks the daemon to run `/bin/systemctl reboot --no-block`.
+- If the clean reboot has not taken effect after 20 seconds, the daemon
+  `sync()`s and sends the vendor micom hard-reset call
+  (`SetETCCPUWDTReset array:byte:0x00`) — the same call `/etc/weston-crash.sh`
+  uses. This is the software equivalent of the pinhole reset when systemd is
+  stuck.
+- Refuses while `AppHomeModel.drivingRestriction` is true, while an update
+  process (`AppUpgrade`/`AppScomoDM`) is running, while a system popup is
+  showing, or when the daemon is unreachable. No/outside/Home closes it
+  without rebooting.
+- The modal follows the stock popup rules: 70 % dim, 100 ms InOutQuad fade,
+  `APP_HOME_POPUP_*` geometry, stock buttons, beep on release, and the
+  steering-wheel Home/Star key closes it via the daemon `home_seq` counter.
 
 ---
 
@@ -76,7 +95,8 @@ tweaks_app/
   scripts/run_stuff.sh         installer
   scripts/run_stuff_restore.sh restore
   scripts/run_stuff_diag.sh    read-only diagnostic
-  artifacts/qml/...            TweaksPage/Tile/Switch/Button/ZonePicker + patched QML
+  artifacts/qml/...            TweaksPage/Tile/Switch/Button/ZonePicker,
+                               RebootPage/RebootTile + patched QML
   artifacts/qml/AppStandbyClock/ disclaimer auto-accept patches
   artifacts/systemd/           tweaks-daemon.service
   tests/                       daemon, QML, wrapper and installer/restore tests
@@ -86,18 +106,22 @@ tweaks_app/
 
 ## Home-screen integration
 
-A **Tweaks** tile opens the full-screen `TweaksPage.qml`.
+Tweaks and Reboot are two tiles. Tweaks opens the full-screen
+`TweaksPage.qml`; Reboot opens `RebootPage.qml`, which immediately shows the
+confirmation modal.
 
-- **Advanced view:** the tile is placed in the first free slot across pages
-  1–3, after existing Hello/WiFi tiles. If page 1 is full it appears on page 2,
-  and so on.
-- **Wide view:** a Tweaks tile is appended after the existing Hello/WiFi
-  tiles.
-- **All Menus / Setup:** the tile appears in the shared menu list.
+- **Advanced view:** both tiles use the shared first-empty-slot allocator,
+  after existing Hello/Battery/WiFi tiles. Reboot takes the slot after Tweaks;
+  if the grid is full it stays hidden rather than overlapping.
+- **Wide view:** both tiles are appended after the existing Hello/WiFi tiles.
+- **All Menus / Setup:** both tiles appear in the shared menu list.
 
-The page starts below the 90 px system status bar and fits the 630 px content
-area. It has a full-page click guard, and the steering-wheel Home/Star and
-Back events dismiss it via `AppHomeModel.onButtonBackClicked`.
+The pages start below the 90 px system status bar and fit the 630 px content
+area. Tweaks keeps its existing full-page click guard. Reboot owns its
+visibility (`requested && !isAtOtherApp`), has a full-page input shield, and
+closes on Back, Home/Star (`home_seq`), app switch, screen/page changes, and
+`requestHomeByPP`. Host QML only calls `open()`/`close()` and never assigns
+`visible`.
 
 This is a QML tile/page inside `AppHomeScreen`, the same deployment model as
 the Hello and WiFi apps — not a separate AppLauncher app ID or GUI process.
@@ -201,6 +225,7 @@ Bound to `127.0.0.1:8091`.
 | POST | `/apply` | re-apply immediately |
 | POST | `/restore` | turn both night fixes off and release front/cluster overrides |
 | POST | `/identify?crtc=N&seconds=3` | briefly tint the front display red (only `main_crtc`) |
+| POST | `/reboot` | clean reboot, then the micom WDT reset fallback; requires `X-Reboot-App: 1` |
 
 ## Config
 
@@ -233,7 +258,12 @@ offline_status_path=/update/offline_status
 session_bus_file=/tmp/session_appmgr
 dbus_send_path=/usr/bin/dbus-send
 xdg_runtime_dir=/var/run/user/root
+reboot_command=/bin/systemctl
+reboot_wdt_ms=20000
 ```
+
+`/reboot` is deliberately not exposed as a `/set` key: the QML must send the
+custom header, and the daemon refuses while an update process is running.
 
 ## Tests
 
@@ -243,8 +273,11 @@ make test
 
 Covers the daemon HTTP/state machine, disclaimer files and clamping, DST
 winter/summer evaluation with a fake PCL helper, OTA `setOFFlineMode` calls,
-QML structure, the wrandr wrapper, and installer/restore for stock, Hello,
-Battery, WiFi and combined bases.
+the Reboot endpoint (CSRF header, duplicate request, update guard, clean
+command failure, micom WDT fallback, Home/Star counter), QML structure, the
+wrandr wrapper, and installer/restore for stock, Hello, Battery, WiFi and
+combined bases. The installer tests also exercise the positive and negative
+SMACK label gates.
 
 ## Troubleshooting
 
@@ -264,9 +297,19 @@ Battery, WiFi and combined bases.
   common cause is the daemon's SMACK label. It must be `_` (floor), not
   `Privileged`: only the floor label has access to `App::micommanager` and the
   system-bus socket. Check `smack` in `/status`/`/health` (must be `_`) and
-  `smack=` in `run_stuff_result.txt`; the diagnostic script prints the running
+  `smack_check=ok`/`smack=_` in `run_stuff_result.txt`; the diagnostic script prints the running
   label and a no-CAN-write micom D-Bus probe (Introspect may activate the
   service). Reinstall if it is not `_`.
+- **Reboot says “service unavailable”** — the daemon is not reachable on
+  `127.0.0.1:8091`. Check `systemctl status tweaks-daemon.service`, the
+  `smack_check` field in `run_stuff_result.txt`, and the daemon log. The
+  Reboot app cannot work if the daemon is not running.
+- **Reboot refused during an update** — `AppUpgrade`/`AppScomoDM` is running.
+  Let the update finish; the daemon will not hard-reset during a flash.
+- **Clean reboot did not start** — after 20 s the daemon sends the vendor
+  micom `SetETCCPUWDTReset` call. `reboot_wdt_sent`/`reboot_wdt_ok` in
+  `/status` and `wdt_call.out` record the fallback. If both paths fail, the
+  pinhole remains the only reset.
 - **Testing projection manually** — write `1` or `0` to
   `/rw_data/tweaks/projection_state`; the daemon prefers that file over the
   D-Bus detector.

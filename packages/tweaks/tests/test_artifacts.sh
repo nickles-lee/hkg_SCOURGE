@@ -108,6 +108,112 @@ for f in "$ADV"/*.qml; do
     fi
 done
 
+# ---- Reboot fourth app -------------------------------------------------
+for f in "$ADV"/QHMI_HomeScreenMain_Advanced.*.qml; do
+    [ "$(grep -c 'RebootTile {' "$f")" = 3 ] || {
+        echo "Reboot tile missing from all pages in $f" >&2; exit 1; }
+    for n in 1 2 3; do
+        grep -q "id: rebootTile$n" "$f" || {
+            echo "missing rebootTile$n in $f" >&2; exit 1; }
+        grep -q "visible: slot !== null && slot.page === $((n - 1))" "$f" || {
+            echo "missing Reboot slot guard $n in $f" >&2; exit 1; }
+    done
+    grep -q 'onClicked: rebootPage.open()' "$f" || {
+        echo "Reboot tile does not open the modal in $f" >&2; exit 1; }
+    grep -q 'id: rebootPage' "$f" || {
+        echo "missing RebootPage declaration in $f" >&2; exit 1; }
+    grep -q 'onGoHome: close()' "$f" || {
+        echo "missing Reboot goHome close in $f" >&2; exit 1; }
+    if grep -q 'rebootPage.visible' "$f"; then
+        echo "host assigns rebootPage.visible in $f" >&2; exit 1
+    fi
+    grep -q 'REBOOT_PAYLOAD_260128' "$f" || {
+        echo "missing Reboot marker in $f" >&2; exit 1; }
+done
+
+for f in "$ADV"/QHMI_HomeScreenMain_Wide.*.qml; do
+    grep -q 'id: itemReboot' "$f" || {
+        echo "missing Reboot wide tile in $f" >&2; exit 1; }
+    grep -q 'rebootPage.open()' "$f" || {
+        echo "wide Reboot tile does not open the modal in $f" >&2; exit 1; }
+    grep -q 'id: rebootPage' "$f" || {
+        echo "missing RebootPage in $f" >&2; exit 1; }
+done
+for f in "$ADV"/Screen_HomeScreen_AllMenus.*.qml "$ADV"/Screen_HomeScreen_Submenu_Setup.*.qml; do
+    grep -q 'onRebootClicked:' "$f" || {
+        echo "missing Reboot handler in $f" >&2; exit 1; }
+    grep -q 'id: rebootPage' "$f" || {
+        echo "missing RebootPage in $f" >&2; exit 1; }
+done
+for f in "$COMP"/QCustomizedMenuListAllowEmpty.*.qml; do
+    grep -q 'RebootTile' "$f" || {
+        echo "missing RebootTile in $f" >&2; exit 1; }
+    grep -q 'signal rebootClicked()' "$f" || {
+        echo "missing rebootClicked signal in $f" >&2; exit 1; }
+done
+
+test -f "$ADV/RebootPage.qml"
+test -f "$COMP/RebootTile.qml"
+python3 - "$ADV/RebootPage.qml" "$COMP/RebootTile.qml" <<'PY'
+import re, sys
+page = open(sys.argv[1]).read()
+tile = open(sys.argv[2]).read()
+
+def need(cond, msg):
+    if not cond:
+        raise AssertionError(msg)
+
+need("height: DEVICE_HEIGHT - ConstantModel.MENU_BAR_Y" in page,
+     "RebootPage does not fit under the status bar")
+need("height: 720" not in page, "RebootPage uses full screen height")
+need("visible: requested && !atOtherApp" in page,
+     "RebootPage is not foreground-gated")
+need("function open()" in page and "function close()" in page,
+     "RebootPage lacks open()/close()")
+need("onButtonBackClicked: root.close()" in page,
+     "RebootPage does not close on Back")
+need("onIsAtOtherAppChanged" in page, "RebootPage does not close on app switch")
+need("onCurrentScreenChanged" in page, "RebootPage does not close on screen change")
+need("onCurrentHomeAdvancedPageIdxChanged" in page,
+     "RebootPage does not close on page change")
+need("onRequestHomeByPPChanged" in page,
+     "RebootPage does not close on requestHomeByPP")
+need("onNotifyHomeMainChanged: root.close()" in page,
+     "RebootPage does not close on the C++ Home signal")
+need("homeSeq" in page and "home_source" in page,
+     "RebootPage does not consume the daemon home_seq")
+need("preventStealing: true" in page, "RebootPage shield cannot prevent stealing")
+need("acceptedButtons: Qt.AllButtons" in page, "shield does not accept all buttons")
+need("onWheel: wheel.accepted = true" in page, "shield does not consume the wheel")
+need("QPopupAnimationItem" in page, "RebootPage is not a stock popup")
+need("QVerticalButton" in page, "RebootPage panel is not stock")
+need("QHMI_ToggleButton" in page, "RebootPage buttons are not stock")
+need("ConstantModel.APP_HOME_POPUP_WIDTH_MID" in page, "popup width token missing")
+need("ConstantModel.APP_HOME_POPUP_1LINE_HEIGHT" in page, "popup height token missing")
+need("ConstantModel.APP_HOME_POPUP_BUTTON_HEIGHT" in page, "popup button token missing")
+need("GENERAL_OPACITY_PERCENT_70" in page, "popup dim missing")
+need("X-Reboot-App" in page, "QML does not send the reboot header")
+need("AppHomeModel.drivingRestriction" in page, "driving lockout missing")
+need("update_in_progress" in page, "update guard message missing")
+need("TranslationsModel.STR_HOME_YES" in page, "Yes label missing")
+need("TranslationsModel.STR_HOME_NO" in page, "No label missing")
+
+need("EVT_HOME_SOUND_BEEP_PLAY" in tile, "Reboot tile does not beep")
+need("onPositionChanged" in tile, "Reboot tile press does not cancel on slide-off")
+need("reboot_icon_n.png" in tile, "Reboot tile icon path missing")
+need('text: "Reboot"' in tile, "Reboot tile label missing")
+PY
+
+python3 - "$ROOT/artifacts/assets/tweaks/reboot_icon_n.png" <<'PY'
+import sys
+from PIL import Image
+im = Image.open(sys.argv[1]).convert("RGBA")
+px = [p for p in im.getdata() if p[3] > 0]
+assert px, "Reboot icon is empty"
+avg = tuple(sum(p[i] for p in px) // len(px) for i in range(3))
+assert avg[2] > avg[0] + 80 and avg[2] > avg[1] + 40, avg
+PY
+
 SB="$ROOT/artifacts/qml/AppStandbyClock"
 for base in qml_eco3.0 new_qml qml_genesis; do
     grep -q 'TWEAKS_DISCLAIMER_260128' "$SB/$base/main.qml" || {

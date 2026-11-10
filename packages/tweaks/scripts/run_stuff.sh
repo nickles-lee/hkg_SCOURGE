@@ -10,7 +10,9 @@
 #
 # Installs:
 #   /app/share/AppHomeScreen/qml_eco3.0/HomeScreen/TweaksPage.qml
+#   /app/share/AppHomeScreen/qml_eco3.0/HomeScreen/RebootPage.qml
 #   /app/share/AppHomeScreen/qml_eco3.0/component/Tweaks{Tile,Switch,Button}.qml
+#   /app/share/AppHomeScreen/qml_eco3.0/component/RebootTile.qml
 #   patched Advanced / Wide / AllMenus / Setup / shared menu QML
 #   /app/share/AppHomeScreen/tweaks/{tweaks_icon_n,tweaks_icon_d}.png
 #   /rw_data/tweaks/tweaks_daemon
@@ -33,6 +35,10 @@ RW_DIR="${TWEAKS_RW_DIR:-/rw_data/tweaks}"
 LOG="$RW_DIR/install.log"
 OUT="$USB_DIR/run_stuff_result.txt"
 SERVICE="${TWEAKS_SERVICE:-/etc/systemd/system/tweaks-daemon.service}"
+# The daemon and its persistence helper are stamped with this exact label.
+# On the car this is read from the installer's own /proc/self/attr/current
+# ("_" in the normal initial-root/USB flow); TWEAKS_SMACK_SELF is test-only.
+SMACK_SELF="${TWEAKS_SMACK_SELF:-}"
 
 ADV="HomeScreen/QHMI_HomeScreenMain_Advanced.qml"
 WIDE="HomeScreen/QHMI_HomeScreenMain_Wide.qml"
@@ -67,6 +73,35 @@ fail() {
     exit 1
 }
 
+smack_init() {
+    if [ -n "${TWEAKS_SMACK_SELF:-}" ]; then
+        SMACK_SELF=$TWEAKS_SMACK_SELF
+        [ "$SMACK_SELF" = "_" ] || \
+            fail "expected SMACK floor label '_', got '$SMACK_SELF'"
+        log "SMACK: using override label '$SMACK_SELF'"
+        return 0
+    fi
+    grep -q ' smackfs ' /proc/mounts 2>/dev/null || \
+        fail "smackfs is not mounted (SMACK is required)"
+    command -v chsmack >/dev/null 2>&1 || fail "chsmack missing (SMACK is required)"
+    SMACK_SELF=$(cat /proc/self/attr/current 2>/dev/null | tr -d '\r\n')
+    [ -n "$SMACK_SELF" ] || fail "cannot read /proc/self/attr/current"
+    [ "$SMACK_SELF" = "_" ] || \
+        fail "expected SMACK floor label '_', got '$SMACK_SELF'"
+    log "SMACK: installer label '$SMACK_SELF'"
+}
+
+set_exec_label() {
+    _bin=$1
+    command -v chsmack >/dev/null 2>&1 || fail "chsmack missing (SMACK is required)"
+    chsmack -e "$SMACK_SELF" "$_bin" >> "$LOG" 2>&1 || \
+        fail "exec label failed: $_bin"
+    _actual=$(getfattr -n security.SMACK64EXEC --only-values "$_bin" 2>/dev/null || true)
+    [ "$_actual" = "$SMACK_SELF" ] || \
+        fail "exec label readback failed: $_bin (expected '$SMACK_SELF', got '${_actual:-none}')"
+    log "exec label ok: $_bin = $SMACK_SELF"
+}
+
 mount -o remount,rw "$USB_DIR" 2>/dev/null || true
 log "=== tweaks payload start usb=$USB_DIR ==="
 
@@ -80,6 +115,7 @@ if ! ( cd "$USB_DIR" && md5sum -c manifest.md5 ) > "$RW_DIR/manifest-check.log" 
     fail "manifest check failed (see /rw_data/tweaks/manifest-check.log)"
 fi
 log "manifest OK"
+smack_init
 
 # ---- pick QML variants -------------------------------------------------
 cur_adv="$QML_DIR/$ADV"
@@ -255,23 +291,27 @@ done
 chmod 644 "$ASSET_DIR/"* 2>/dev/null || true
 
 # ---- daemon / persist helper / wrapper / service ----------------------
+# Remove first: cp -f onto an existing inode keeps its extended attributes,
+# including a stale SMACK64EXEC from an older install.
+rm -f "$RW_DIR/tweaks_daemon" 2>/dev/null || true
 cp -f "$PAYLOAD/bin/tweaks_daemon" "$RW_DIR/tweaks_daemon" || fail "daemon copy failed"
 chmod 755 "$RW_DIR/tweaks_daemon" 2>/dev/null || true
 chown 0:0 "$RW_DIR/tweaks_daemon" 2>/dev/null || true
-# /rw_data is the SMACK floor label; the daemon inherits it. The floor label
-# has rwx access to App::micommanager, which the cluster blue-light CAN calls
-# need. Do not use a Privileged exec label here: it has no micommanager or
-# system-bus rule (the Battery daemon is the car-proven pattern).
-command -v chsmack >/dev/null 2>&1 && chsmack -e _ "$RW_DIR/tweaks_daemon" 2>/dev/null || true
+# The daemon (and every helper it forks) must run on the installer's own
+# SMACK floor label.  `_` has rwx access to App::micommanager, which both the
+# cluster CAN writes and the Reboot hard-reset fallback need.  Never use
+# `Privileged`: it has no micommanager or system-bus rule.
+set_exec_label "$RW_DIR/tweaks_daemon"
 DAEMON_SMACK=$(getfattr -n security.SMACK64EXEC --only-values "$RW_DIR/tweaks_daemon" 2>/dev/null || true)
 [ -n "$DAEMON_SMACK" ] || DAEMON_SMACK=unset
 PERSIST_SMACK=absent
 
 if [ -f "$PAYLOAD/bin/tweaks_persist" ]; then
+    rm -f "$RW_DIR/tweaks_persist" 2>/dev/null || true
     cp -f "$PAYLOAD/bin/tweaks_persist" "$RW_DIR/tweaks_persist" || fail "persist helper copy failed"
     chmod 755 "$RW_DIR/tweaks_persist" 2>/dev/null || true
     chown 0:0 "$RW_DIR/tweaks_persist" 2>/dev/null || true
-    command -v chsmack >/dev/null 2>&1 && chsmack -e _ "$RW_DIR/tweaks_persist" 2>/dev/null || true
+    set_exec_label "$RW_DIR/tweaks_persist"
     PERSIST_SMACK=$(getfattr -n security.SMACK64EXEC --only-values "$RW_DIR/tweaks_persist" 2>/dev/null || true)
     [ -n "$PERSIST_SMACK" ] || PERSIST_SMACK=unset
     # The vendor library normally has this SONAME symlink already; make it
@@ -281,6 +321,13 @@ if [ -f "$PAYLOAD/bin/tweaks_persist" ]; then
         [ -n "$PCL" ] && ln -sf "$(basename "$PCL")" /usr/lib/libpersistence_client_library.so.7 2>/dev/null || true
     fi
 fi
+
+# Expected label for the daemon's self-check; the Reboot fallback depends on
+# the daemon actually running in this context.
+printf '%s\n' "$SMACK_SELF" > "$RW_DIR/smack_expected" || \
+    fail "cannot write smack_expected"
+chmod 644 "$RW_DIR/smack_expected" 2>/dev/null || true
+chown 0:0 "$RW_DIR/smack_expected" 2>/dev/null || true
 
 # Back up the vendor wrandr once.  Keep the real binary next to the wrapper.
 WRANDR="${TWEAKS_WRANDR:-/usr/bin/wrandr}"
@@ -426,8 +473,10 @@ if ! grep -q 'indexOf("file://")' "$cur_theme" 2>/dev/null; then
     install_qml "$Q/component/common/Q_ThemeImage.qml" "$cur_theme" "$cur_theme"
 fi
 
-for f in HomeScreen/TweaksPage.qml component/TweaksTile.qml component/TweaksSwitch.qml \
-         component/TweaksButton.qml component/TweaksZonePicker.qml; do
+for f in HomeScreen/TweaksPage.qml HomeScreen/RebootPage.qml \
+         component/TweaksTile.qml component/RebootTile.qml \
+         component/TweaksSwitch.qml component/TweaksButton.qml \
+         component/TweaksZonePicker.qml; do
     install_qml "$Q/$f" "$QML_DIR/$f" "$cur_adv"
 done
 
@@ -524,17 +573,51 @@ fi
 log "restart=$restart"
 sync
 
-if [ "$DAEMON_SMACK" != "_" ]; then
-    log "WARNING: tweaks_daemon SMACK64EXEC=$DAEMON_SMACK (expected _); daemon may be unable to reach micom"
+# The Reboot hard-reset fallback is only allowed to reach the micom service
+# from the floor label.  Prove both the file exec label and the running
+# process label; TWEAKS_DAEMON_SMACK is a test-only override for fake roots.
+RUNNING_SMACK="${TWEAKS_DAEMON_SMACK:-}"
+if [ -z "$RUNNING_SMACK" ]; then
+    for _try in 1 2 3 4 5; do
+        for p in /proc/[0-9]*; do
+            [ -r "$p/comm" ] || continue
+            if [ "$(cat "$p/comm" 2>/dev/null)" = "tweaks_daemon" ]; then
+                RUNNING_SMACK=$(cat "$p/attr/current" 2>/dev/null | tr -d '\r\n')
+                break
+            fi
+        done
+        [ -n "$RUNNING_SMACK" ] && break
+        sleep 1
+    done
 fi
-if [ "$PERSIST_SMACK" != "_" ] && [ "$PERSIST_SMACK" != "absent" ]; then
-    log "WARNING: tweaks_persist SMACK64EXEC=$PERSIST_SMACK (expected _)"
+smack_check=unknown
+if [ "$DAEMON_SMACK" != "$SMACK_SELF" ]; then
+    smack_check=mismatch
+    log "SMACK MISMATCH: tweaks_daemon file label='$DAEMON_SMACK' expected='$SMACK_SELF'"
+elif [ -n "$RUNNING_SMACK" ]; then
+    if [ "$RUNNING_SMACK" = "$SMACK_SELF" ]; then
+        smack_check=ok
+    else
+        smack_check=mismatch
+        log "SMACK MISMATCH: running tweaks_daemon='$RUNNING_SMACK' expected='$SMACK_SELF'"
+    fi
+else
+    log "SMACK UNKNOWN: tweaks_daemon is not running"
 fi
+if [ "$PERSIST_SMACK" != "$SMACK_SELF" ] && [ "$PERSIST_SMACK" != "absent" ]; then
+    log "SMACK MISMATCH: tweaks_persist='$PERSIST_SMACK' expected='$SMACK_SELF'"
+    smack_check=mismatch
+fi
+final_status=OK
+[ "$smack_check" = "ok" ] || final_status=FAIL
 
-result "status=OK" "variant=$adv_variant/$wide_variant/$all_variant/$setup_variant/$custom_variant" \
+result "status=$final_status" "variant=$adv_variant/$wide_variant/$all_variant/$setup_variant/$custom_variant" \
        "backup=$BACKUP_HU" "daemon=$daemon_status" "restart=$restart" \
-       "smack=$DAEMON_SMACK" "persist_smack=$PERSIST_SMACK" \
+       "smack_self=$SMACK_SELF" "smack=$DAEMON_SMACK" \
+       "persist_smack=$PERSIST_SMACK" "daemon_smack=${RUNNING_SMACK:-none}" \
+       "smack_check=$smack_check" \
        "disclaimer=next-boot" "tzdata=$(cat "$RW_DIR/tzdata_version" 2>/dev/null | head -n 1)" \
        "ota_block=$(cfg_value ota_block 0)" "log=$LOG"
 log "=== tweaks payload done ==="
+[ "$final_status" = "OK" ] || exit 1
 exit 0

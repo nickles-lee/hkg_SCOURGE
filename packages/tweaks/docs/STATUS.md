@@ -13,15 +13,21 @@
   - deep red night mode toggle (front 128:32:16, cluster CAN level 9)
   - daemon/persist run on the SMACK floor label `_` (micom/system-bus access);
     live label exposed in /status and /health
+  - `/reboot`: `systemctl reboot --no-block`, then `sync()` + micom
+    `SetETCCPUWDTReset array:byte:0x00` if the daemon is still alive after
+    20 s; update/process guard and CSRF header
   - `dbus-monitor` projection detection with manual override
+  - session-bus Home/Star counter (`home_seq`) for the Reboot overlay
 - `wrandr` wrapper:
   - intercepts `--crtc=1 --gamma=128:128:128`
   - preserves every other invocation
 - `tweaks_persist` built against the vendor 2.25 glibc/PCL.
 - QML:
   - `TweaksPage.qml`
-  - `TweaksTile.qml`, `TweaksSwitch.qml`, `TweaksButton.qml`
-  - generated variants for stock / Hello / Battery / WiFi combinations
+  - `RebootPage.qml` (stock-style Yes/No modal at y 90/h 630/z 2000)
+  - `TweaksTile.qml`, `RebootTile.qml`, `TweaksSwitch.qml`, `TweaksButton.qml`
+  - generated variants for stock / Hello / Battery / WiFi combinations; the
+    Reboot tile is ordinal 4 after Tweaks and hidden when the grid is full
   - Advanced tile searches pages 1–3 for the first free slot, so it appears
     on page 2 when page 1 is full
 - Installer:
@@ -31,9 +37,11 @@
   - restore script reverses the changes
 - Tests:
   - daemon CLI/HTTP/state machine
+  - Reboot `/reboot` CSRF, duplicate, update guard, failed-clean fallback,
+    micom WDT invocation, status fields and Home/Star counter
   - wrapper rewrite/passthrough
-  - install/reinstall/restore for eight QML bases
-  - QML parse check with host `qmllint`
+  - install/reinstall/restore for twelve QML bases, positive/negative SMACK gates
+  - QML parse check with the vendor Qt 5.4 `qmllint`
 - Safety disclaimer auto-accept:
   - AppStandbyClock `main.qml` + both confirm screens patched
   - on/off and 1–10 s timeout exposed in Tweaks
@@ -68,13 +76,22 @@
   Home/Star closes it, and taps on empty areas no longer reach the home tiles.
 - Confirm `setOFFlineMode(1)` blocks OTA without affecting SSH/Bluelink and
   that local USB detection still works; confirm `setOFFlineMode(0)` restores.
+- Reboot app: tile appears after Tweaks; Yes/No modal; No/outside/Home closes;
+  Yes cleanly reboots the unit; driving restriction blocks the request; the
+  daemon runs on `_` and `/status` shows `smack_expected`, `smack_ok`,
+  `home_seq`, `reboot_state`.
+- The 20 s micom hard-reset fallback is **not** to be forced on a car unless
+  the test is deliberate; the host tests use a fake `dbus-send` and the
+  command is derived from `/etc/weston-crash.sh`. It remains car-pending.
 
 ## First on-car test
 
 1. Run `run_stuff_diag.sh` as the loader script. Review `tweaks_diag.txt`.
 2. Install.
 3. Open Tweaks; both switches should be on.
-4. Start CarPlay/Android Auto; cluster should stay amber.
-5. Use `Identify front` to confirm the front-display CRTC.
-6. Toggle the infotainment fix and check the projection screen.
-7. Restore and confirm stock behaviour.
+4. Tap Reboot; confirm No/outside closes it; then confirm Yes once and
+   verify the clean reboot. Do not force the WDT fallback on this first run.
+5. Start CarPlay/Android Auto; cluster should stay amber.
+6. Use `Identify front` to confirm the front-display CRTC.
+7. Toggle the infotainment fix and check the projection screen.
+8. Restore and confirm stock behaviour.

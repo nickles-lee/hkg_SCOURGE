@@ -107,8 +107,10 @@ for base in qml_eco3.0 new_qml qml_genesis; do
 done
 
 # Remove app files.
-for f in HomeScreen/TweaksPage.qml component/TweaksTile.qml component/TweaksSwitch.qml \
-         component/TweaksButton.qml component/TweaksZonePicker.qml; do
+for f in HomeScreen/TweaksPage.qml HomeScreen/RebootPage.qml \
+         component/TweaksTile.qml component/RebootTile.qml \
+         component/TweaksSwitch.qml component/TweaksButton.qml \
+         component/TweaksZonePicker.qml; do
     rm -f "$QML_DIR/$f" 2>/dev/null || true
 done
 rm -rf "$ASSET_DIR" 2>/dev/null || true
@@ -158,6 +160,7 @@ fi
 # for post-mortem after an uninstall.
 rm -f "$RW_DIR/tweaks_daemon" "$RW_DIR/tweaks_persist" \
       "$RW_DIR/status.json" "$RW_DIR/daemon.log" "$RW_DIR/cluster_gamma" \
+      "$RW_DIR/smack_expected" "$RW_DIR/wdt_call.out" \
       "$RW_DIR/last_gamma" "$RW_DIR/config.conf" \
       "$RW_DIR/disclaimer_auto" "$RW_DIR/disclaimer_timeout_ms" \
       "$RW_DIR/zones.txt" "$RW_DIR/tzdata_version" "$RW_DIR/ota_call.out" \

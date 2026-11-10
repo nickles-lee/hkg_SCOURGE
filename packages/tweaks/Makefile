@@ -19,6 +19,7 @@ payload: daemon
 test: payload
 	sh tests/test_artifacts.sh
 	sh tests/test_daemon.sh
+	sh tests/test_reboot.sh
 	sh tests/test_wrapper.sh
 	sh tests/test_installer.sh stock
 	sh tests/test_installer.sh hello

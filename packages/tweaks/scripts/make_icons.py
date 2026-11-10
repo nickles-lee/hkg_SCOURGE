@@ -20,7 +20,18 @@ def make(color: str, path: str) -> None:
     im.save(path)
 
 
+def make_power(color: str, path: str) -> None:
+    im = Image.new("RGBA", (99, 99), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    # Power symbol: a ring with a gap at the top and a vertical stem.
+    d.arc((19, 24, 80, 85), start=300, end=240, fill=color, width=7)
+    d.line((49, 17, 49, 54), fill=color, width=7)
+    im.save(path)
+
+
 os.makedirs(OUT, exist_ok=True)
 make("#2F6FED", os.path.join(OUT, "tweaks_icon_n.png"))
 make("#8A8A8A", os.path.join(OUT, "tweaks_icon_d.png"))
+make_power("#2F6FED", os.path.join(OUT, "reboot_icon_n.png"))
+make_power("#8A8A8A", os.path.join(OUT, "reboot_icon_d.png"))
 print("wrote", OUT)

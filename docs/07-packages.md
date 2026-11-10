@@ -14,6 +14,7 @@ packages under active development, not finished products.**
 | Tweaks | Cluster + infotainment amber/night-mode fixes (follow the vehicle's blue-light setting, Hyundai's own gamma table) | WIP — almost working |
 | Tweaks | Automatic DST (IANA zone → `APP_SETTING_CLOCK_DAYLIGHTSAVETIME`) | WIP — almost working |
 | Tweaks | Hyundai OTA block (vendor `setOFFlineMode`, keeps USB updates) | WIP — off by default |
+| Tweaks | **Reboot app** — fourth tile + stock Yes/No modal; clean `systemctl reboot` with a micom `SetETCCPUWDTReset` fallback after 20 s; driving/update guards; SMACK `_` hard gate | WIP — host-tested; VM/car pending |
 | Battery | Tile + full-screen overlay (temp, SoC, heater state/power) | WIP — almost working; installer retries a failed copy after unlinking the destination and verifies the running daemon matches the payload (`daemon_fresh`; force-restarts a stale one) |
 | Battery | Preheat engage — full WiCAN sequence mimicry: `0x0C7` burst at 40 ms pacing + `0x4E8`/`0x4CC` cluster countdown; blocked at ≥ 21 °C min-cell temp; a no-status start assumes active after the 70 s timeout; exhausted retries end with a cleanup stop burst | WIP — safety-interlocked |
 | Battery | Cluster preheat countdown (WiCAN `0x4E8`+`0x4CC` layout) + standalone "Cluster display test" toggle | WIP — replaces the earlier synthetic `0x4ED` |
@@ -32,15 +33,17 @@ Per-package detail: `packages/<pkg>/README.md` + `SPEC.md` + `docs/`.
 
 | | Battery | WiFi | Tweaks |
 |---|---|---|---|
-| QML | `BatteryTile` + `BatteryPage` overlay (z 2000, y 90/h 630) | `WifiTile` + `WifiPage` (4 tabs) | `TweaksTile` + `TweaksPage`; AppStandbyClock disclaimer patches |
-| Daemon | `battery_daemon` (static; I-CAN `0x2FC`/`0x326`, micom D-Bus commands incl. the WiCAN preheat sequence; HTTP :8088 + `status.json` mirror; `home_seq` watcher for steering-wheel Home/Star; version + send-health in `/status`) | `wifi_daemon` (static; WLAN/AP state machine; HTTP :8090) | `tweaks_daemon` (static; gamma/projection/DST/OTA; HTTP :8091) + `tweaks_persist` (vendor-dynamic) + `wrandr` wrapper |
+| QML | `BatteryTile` + `BatteryPage` overlay (z 2000, y 90/h 630) | `WifiTile` + `WifiPage` (4 tabs) | `TweaksTile` + `TweaksPage`; `RebootTile` + `RebootPage` modal (z 2000, y 90/h 630); AppStandbyClock disclaimer patches |
+| Daemon | `battery_daemon` (static; I-CAN `0x2FC`/`0x326`, micom D-Bus commands incl. the WiCAN preheat sequence; HTTP :8088 + `status.json` mirror; `home_seq` watcher for steering-wheel Home/Star; version + send-health in `/status`) | `wifi_daemon` (static; WLAN/AP state machine; HTTP :8090) | `tweaks_daemon` (static; gamma/projection/DST/OTA/reboot; HTTP :8091; `home_seq` watcher) + `tweaks_persist` (vendor-dynamic) + `wrandr` wrapper |
 | Service | `battery-daemon.service` | `wifi-daemon.service` | `tweaks-daemon.service` |
 | Extras | icons (generated) | static `dropbearmulti`, `car` user (UID 0), firewall rule, `wifi.txt`/`authorized_keys` import | IANA tzdata (fetched at build), `zoneinfo` tree |
 
 Tiles are placed by the shared first-empty-slot allocator with a fixed
-install ordinal (Battery=1, WiFi=2, Tweaks=3) so they never fight over a
-page; installers detect the current base (stock / each other's previous
-installs) and pick the matching QML variant.
+install ordinal (Battery=1, WiFi=2, Tweaks=3, Reboot=4) so they never fight
+over a page; installers detect the current base (stock / each other's previous
+installs) and pick the matching QML variant. Reboot ships inside the Tweaks
+package rather than as a fourth package, so selecting Tweaks also installs
+the Reboot tile and daemon endpoint.
 
 ## Build + install
 

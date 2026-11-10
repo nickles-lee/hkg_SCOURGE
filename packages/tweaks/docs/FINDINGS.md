@@ -239,6 +239,19 @@ write failed. The car-proven Battery daemon uses `chsmack -e _` for exactly
 this reason; Tweaks now does the same and reports `smack=` in the install
 result and `/status`/`/health`.
 
+Reboot hard fallback (2026-11-10): the vendor's own `weston-crash.sh` does
+`sync` followed by
+`dbus-send --system --type=method_call --print-reply
+--dest=com.lge.car.micom /Ihu
+com.lge.car.micom.ihu.SetETCCPUWDTReset array:byte:0x00`.
+That is a micom watchdog reset of the ETC CPU, not a head-unit CRTC or a
+factory reset. The daemon reuses the same `_`-label `dbus-send` path as the
+cluster CAN writes and only sends it after the clean
+`systemctl reboot --no-block` has not taken effect for 20 s. The installer
+now hard-gates the daemon/persist `SMACK64EXEC` and the running
+`/proc/<pid>/attr/current` against the installer's own label; a mismatch is a
+failed install, not a warning.
+
 VM-only artifacts (not daemon bugs): the guest boots without loopback (the
 status server correctly fail-fasts; the test raises `lo` with the vendor
 busybox), `/etc/passwd` is a symlink to `/tmp/passwd`, and `/var` is a symlink

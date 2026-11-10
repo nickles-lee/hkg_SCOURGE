@@ -30,12 +30,12 @@ if [ -z "$SELECTION" ]; then
     echo "Which packages should go on the stick?"
     echo "  battery — Battery tile + preconditioning/charge-door daemon"
     echo "  wifi    — WiFi client / CarPlay AP / SSH (dropbear)"
-    echo "  tweaks  — night-mode fixes, auto-DST, OTA block, disclaimer auto-accept"
+    echo "  tweaks  — night-mode fixes, auto-DST, OTA block, disclaimer, Reboot app"
     echo "  [WIP, signatureless-update research — docs/08; VM-validated, car-pending]"
     echo "  button-gate   — AppScomoDM stubs + drive wrapper + watcher (tools/update-debug)"
     echo "  applauncher   — AppLauncher .sign stubs"
     echo "  dmclient-gate  — the REAL button gate (AppDMClient) + launcher prerequisite"
-    printf 'comma-separated list (default: the three apps): '
+    printf 'comma-separated list (default: the three packages; Tweaks includes Reboot): '
     read -r SELECTION
     [ -n "$SELECTION" ] || SELECTION="$DEFAULT_ORDER"
 fi

@@ -214,7 +214,22 @@ TWEAKS_BACK_CLOSE = """    // TWEAKS_BACK_CLOSE: Home/Back must dismiss the over
 """
 
 
+REBOOT_PAGE = """    RebootPage {
+        id: rebootPage
+        x: 0
+        y: ConstantModel.MENU_BAR_Y
+        width: AppHomeModel.isWideScr ? DEVICE_WIDTH : ConstantModel.SCREEN_WIDTH
+        height: DEVICE_HEIGHT - ConstantModel.MENU_BAR_Y
+        z: 2000
+        onGoHome: close()
+    }
+
+"""
+
+
 def add_page(text: str) -> str:
+    if "REBOOT_PAYLOAD_260128" not in text:
+        text = "// REBOOT_PAYLOAD_260128\n" + text
     if "id: tweaksPage" not in text:
         page = """    TweaksPage {
         id: tweaksPage
@@ -224,6 +239,9 @@ def add_page(text: str) -> str:
 """
         last = text.rstrip().rfind("}")
         text = text[:last] + page + text[last:]
+    if "id: rebootPage" not in text:
+        last = text.rstrip().rfind("}")
+        text = text[:last] + REBOOT_PAGE + text[last:]
     if "TWEAKS_BACK_CLOSE" not in text:
         last = text.rstrip().rfind("}")
         text = text[:last] + TWEAKS_BACK_CLOSE + text[last:]
@@ -269,6 +287,45 @@ def add_tweaks_target_fn(text: str, skips: tuple[int, int, int]) -> str:
     return text[:end] + "\n" + fn + text[end:]
 
 
+def reboot_tile_advanced(page: int, custom_index: int) -> str:
+    menu = "menuPage" if page == 1 else f"menuPage{page}"
+    cond = f"slot !== null && slot.page === {page - 1}"
+    return f"""                RebootTile {{
+                    id: rebootTile{page}
+                    property var slot: firstEmptySlot({custom_index})
+                    visible: {cond}
+                    x: {menu}.x + ({cond} ? (slot.index % k_nbrOfColumns) * k_itemWidth : 0)
+                    y: {menu}.y + ({cond} ? Math.floor(slot.index / k_nbrOfColumns) * k_itemHeight : 0)
+                    width: k_itemWidth
+                    height: k_itemHeight
+                    z: 7
+                    onClicked: rebootPage.open()
+                }}
+"""
+
+
+def reboot_custom_index(text: str) -> int:
+    count = 0
+    for pattern in (r"id:\s*helloTile1\b", r"id:\s*batteryTile1\b",
+                    r"id:\s*wifiTile1\b", r"id:\s*tweaksTile1\b"):
+        if re.search(pattern, text):
+            count += 1
+    return count
+
+
+def insert_reboot_tiles_advanced(text: str) -> str:
+    if "id: rebootTile1" in text:
+        return text
+    custom_index = reboot_custom_index(text)
+    for page in (1, 2, 3):
+        marker = f"                TweaksTile {{\n                    id: tweaksTile{page}"
+        if marker not in text:
+            raise ValueError(f"tweaksTile{page} marker not found for Reboot tile")
+        text = insert_after_block(text, marker,
+                                  reboot_tile_advanced(page, custom_index))
+    return text
+
+
 def patch_advanced(src: str) -> str:
     text = add_marker(read(src))
     text = patch_empty_fn(text)
@@ -300,6 +357,7 @@ def patch_advanced(src: str) -> str:
             marker = f"                QMenuPageNoDrag{{\n                    id: {menu_marker_id}"
         text = insert_after_block(text, marker, tile_advanced(page, skips[page - 1]))
     text = add_tweaks_target_fn(text, skips)
+    text = insert_reboot_tiles_advanced(text)
     return add_page(text)
 
 
@@ -351,6 +409,7 @@ def patch_advanced_global(src: str) -> str:
         else:
             marker = f"                QMenuPageNoDrag{{\n                    id: {menu}"
         text = insert_after_block(text, marker, tile_advanced_global(page, custom_index))
+    text = insert_reboot_tiles_advanced(text)
     return add_page(text)
 
 
@@ -392,6 +451,27 @@ def tile_wide(xexpr: str) -> str:
 """
 
 
+def tile_wide_reboot(xexpr: str) -> str:
+    return f"""        QHomeItem {{
+            id: itemReboot
+            visible: AppHomeModel.isWideScr
+            width: AppHomeModel.isWideScr ? 150 : 207
+            height: 183
+            x: {xexpr}
+            x_icon: AppHomeModel.isWideScr ? 42 : 55
+            iconSource: ["file:///app/share/AppHomeScreen/tweaks/reboot_icon_n.png", defineModel.home_bg_icon_p, "", "file:///app/share/AppHomeScreen/tweaks/reboot_icon_d.png"]
+            itemName: "Reboot"
+            icoPressed: rebootMouse.pressed
+            MouseArea {{
+                id: rebootMouse
+                anchors.fill: parent
+                onClicked: rebootPage.open()
+            }}
+        }}
+
+"""
+
+
 def patch_wide(src: str) -> str:
     text = add_marker(read(src))
     text = shrink_wide(text)
@@ -408,6 +488,11 @@ def patch_wide(src: str) -> str:
             marker = "        GridView {\n            id: mainGridItemMenu"
             xexpr = "itemAllMenu.right + mainGridItemMenu.cellWidth * 4"
         text = insert_after_block(text, marker, tile_wide(xexpr))
+    if "itemReboot" not in text:
+        marker = "        QHomeItem {\n            id: itemTweaks"
+        if marker not in text:
+            raise ValueError("itemTweaks marker not found for Reboot wide tile")
+        text = insert_after_block(text, marker, tile_wide_reboot("itemTweaks.right"))
     return add_page(text)
 
 
@@ -426,9 +511,27 @@ def add_signal_handler(text: str) -> str:
     return text[:end] + "\n            onTweaksClicked: tweaksPage.visible = true" + text[end:]
 
 
+def add_reboot_signal_handler(text: str) -> str:
+    if "onRebootClicked:" in text:
+        return text
+    if "onTweaksClicked:" in text:
+        pos = text.find("onTweaksClicked:")
+    elif "onWifiClicked:" in text:
+        pos = text.find("onWifiClicked:")
+    elif "onHelloClicked:" in text:
+        pos = text.find("onHelloClicked:")
+    else:
+        pos = text.find("onMenuItemClicked:")
+    if pos < 0:
+        raise ValueError("no menu click handler found for Reboot")
+    end = find_block_end(text, pos)
+    return text[:end] + "\n            onRebootClicked: rebootPage.open()" + text[end:]
+
+
 def patch_all_or_setup(src: str) -> str:
     text = add_marker(read(src))
     text = add_signal_handler(text)
+    text = add_reboot_signal_handler(text)
     return add_page(text)
 
 
@@ -444,6 +547,13 @@ def patch_custom(src: str) -> str:
         else:
             text = text.replace("    id: root\n",
                                 "    id: root\n    signal tweaksClicked()\n", 1)
+    if "signal rebootClicked()" not in text:
+        if "signal tweaksClicked()" in text:
+            text = text.replace("    signal tweaksClicked()\n",
+                                "    signal tweaksClicked()\n    signal rebootClicked()\n", 1)
+        else:
+            text = text.replace("    id: root\n",
+                                "    id: root\n    signal rebootClicked()\n", 1)
     text = patch_empty_fn(text)
     has_hello = "HelloTile" in text
     has_battery = "BatteryTile" in text
@@ -468,6 +578,24 @@ def patch_custom(src: str) -> str:
             marker = "            HelloTile {\n                id: helloTile"
         else:
             marker = "            QMenuPageAllowEmpty{\n                id: menuPage"
+        text = insert_after_block(text, marker, tile)
+    if "RebootTile" not in text:
+        reboot_skip = skip + 1
+        tile = f"""            RebootTile {{
+                id: rebootTile
+                property int emptyIdx: root.firstEmptyIndex(menuPage.pageModel, {reboot_skip})
+                visible: (isAllMenuScreen || listType === AppHome_Enum.E_LIST_SETUP_MAIN) && !customizeMode && index === menuList.currentIndex && emptyIdx >= 0
+                x: menuPage.x + (emptyIdx % k_nbrOfColumns) * k_itemWidth
+                y: menuPage.y + Math.floor(emptyIdx / k_nbrOfColumns) * k_itemHeight
+                width: k_itemWidth
+                height: k_itemHeight
+                z: 7
+                onClicked: root.rebootClicked()
+            }}
+"""
+        marker = "            TweaksTile {\n                id: tweaksTile"
+        if marker not in text:
+            raise ValueError("tweaksTile marker not found for Reboot custom tile")
         text = insert_after_block(text, marker, tile)
     return text
 

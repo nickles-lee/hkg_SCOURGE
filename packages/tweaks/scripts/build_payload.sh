@@ -50,7 +50,9 @@ fi
 cp artifacts/assets/tweaks/*.png "$OUT/payload/assets/tweaks/"
 cp artifacts/systemd/tweaks-daemon.service "$OUT/payload/systemd/"
 cp "$QML_SRC/HomeScreen/TweaksPage.qml" "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/HomeScreen/"
+cp "$QML_SRC/HomeScreen/RebootPage.qml" "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/HomeScreen/"
 cp "$QML_SRC/component/TweaksTile.qml" "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/component/"
+cp "$QML_SRC/component/RebootTile.qml" "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/component/"
 cp "$QML_SRC/component/TweaksSwitch.qml" "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/component/"
 cp "$QML_SRC/component/TweaksButton.qml" "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/component/"
 cp "$QML_SRC/component/TweaksZonePicker.qml" "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/component/"
@@ -113,13 +115,22 @@ Install:
      within ~8 seconds.
   3. Check run_stuff_result.txt on the stick.
 
-The app adds a Tweaks tile to the home screen / All Menus / Setup and a
-full-screen Tweaks page with:
+The package adds a Tweaks tile and a fourth Reboot tile to the home screen /
+All Menus / Setup.
+
+Tweaks page:
   - Instrument Cluster Night Mode Fix
   - Infotainment Night Mode Fix (CarPlay and Android Auto)
   - Safety disclaimer auto-accept (1-10s, cancels on touch)
   - Automatic DST using a selectable IANA timezone
   - Hyundai OTA block (local USB updates remain available)
+
+Reboot app:
+  - Yes/No confirmation modal; No/outside/Home closes it
+  - Yes asks the daemon for a clean systemctl reboot
+  - if the clean reboot has not taken effect after 20 s, the daemon
+    syncs and sends the vendor micom watchdog reset as a hard fallback
+  - blocked while driving or during an update
 
 The night-mode fixes follow the vehicle's existing Setup > Display >
 Blue Light Filter warmth setting.  The disclaimer and DST settings are

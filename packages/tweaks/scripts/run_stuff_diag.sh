@@ -100,7 +100,9 @@ if command -v getfattr >/dev/null 2>&1; then
              /app/bin/AppSetup /app/bin/TimeManager \
              "$RW_DIR/tweaks_daemon" "$RW_DIR/tweaks_persist" \
              "$RW_DIR/cluster_gamma" "$RW_DIR/config.conf" "$RW_DIR/status.json" \
-             "$QML_DIR/HomeScreen/TweaksPage.qml"; do
+             "$RW_DIR/smack_expected" "$QML_DIR/HomeScreen/TweaksPage.qml" \
+             "$QML_DIR/HomeScreen/RebootPage.qml" \
+             "$QML_DIR/component/RebootTile.qml"; do
         [ -e "$f" ] || continue
         acc=$(getfattr -n security.SMACK64 --only-values "$f" 2>/dev/null || true)
         ex=$(getfattr -n security.SMACK64EXEC --only-values "$f" 2>/dev/null || true)
@@ -152,10 +154,11 @@ for f in HomeScreen/QHMI_HomeScreenMain_Advanced.qml \
          HomeScreen/Screen_HomeScreen_AllMenus.qml \
          HomeScreen/Screen_HomeScreen_Submenu_Setup.qml \
          component/QCustomizedMenuListAllowEmpty.qml \
-         HomeScreen/TweaksPage.qml; do
+         HomeScreen/TweaksPage.qml HomeScreen/RebootPage.qml \
+         component/RebootTile.qml; do
     p="$QML_DIR/$f"
     if [ -f "$p" ]; then
-        echo "$f: $(md5sum "$p" 2>/dev/null | cut -d' ' -f1) $(grep -o 'TWEAKS_PAYLOAD_260128\|WIFI_PAYLOAD_260128\|HELLO_PAYLOAD_260128\|BATTERY_PAYLOAD_260128' "$p" 2>/dev/null | sort -u | tr '\n' ' ')"
+        echo "$f: $(md5sum "$p" 2>/dev/null | cut -d' ' -f1) $(grep -o 'TWEAKS_PAYLOAD_260128\|REBOOT_PAYLOAD_260128\|WIFI_PAYLOAD_260128\|HELLO_PAYLOAD_260128\|BATTERY_PAYLOAD_260128' "$p" 2>/dev/null | sort -u | tr '\n' ' ')"
     else
         echo "$f: missing"
     fi

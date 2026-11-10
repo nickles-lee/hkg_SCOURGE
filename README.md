@@ -55,7 +55,7 @@ This is likely readily adaptable to other cars & environments, but I am noting t
 |---|---|
 | TOCTOU delivery + stage-1 root firmware (sideloading, failsafe) | Validated on the target car |
 | Updater signature-check bypass baked into the firmware | Built & verified offline; on-car validation in progress |
-| Battery / WiFi+SSH / Tweaks app packages | Work-in-progress; the WiFi package is VM-validated on the vendor kernel/Qt (on-car retest pending) |
+| Battery / WiFi+SSH / Tweaks (incl. Reboot) app packages | Work-in-progress; the WiFi package is VM-validated on the vendor kernel/Qt (on-car retest pending). Reboot's clean path and daemon endpoint are host/QML-tested; the micom hard-reset fallback is host-tested with a fake D-Bus helper and derived from the vendor script (car pending) |
 | Tweaks: safety-disclaimer auto-accept | Working reliably |
 | Anything beyond the exact firmware above (`NE_E.EUR.S5W_L.001.001.260128`, EU) | Untested — see the porting runbook before trying |
 
@@ -114,7 +114,7 @@ If a markdown file in this repo is handwritten, I will highlight that. The READM
 | `docs/ui/` | The Gen5W UI/UX research: styleguide, deployment modes (A–L), UX behavior patterns, design tokens, component library, glossary, and 15 evidence reports |
 | `scripts/` | The build pipeline (fetch → stage → decrypt → patch → repack → verify → package → image → preflight → Pi deploy) |
 | `payload/` | What gets baked into the rootfs: the failsafe, the six-stub patch tables, the sample run_stuff.sh |
-| `packages/` | Battery, WiFi (+CarPlay+SSH), Tweaks — sources, patchers, installers — plus `compose.sh` (the combo-stick builder) |
+| `packages/` | Battery, WiFi (+CarPlay+SSH), Tweaks (incl. the Reboot overlay) — sources, patchers, installers — plus `compose.sh` (the combo-stick builder) |
 | `tools/` | First-party firmware-format tools, the update-debug (both_copies) tooling, the optional Ghidra/carve porting aids |
 | `verify/` | Offline package verification |
 | `config/` | `firmware_locks.env` (the compatibility pins), `third_party.lock` (fetch pins), paths/key examples |

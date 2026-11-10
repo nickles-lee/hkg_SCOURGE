@@ -11,6 +11,11 @@
  *
  * The daemon itself is static.  A small dynamically linked helper
  * (tweaks_persist) reads the vendor GENIVI persistence keys.
+ *
+ * It also serves the Reboot app: /reboot asks systemd for a clean reboot and,
+ * if the daemon is still alive after reboot_wdt_ms, syncs and sends the
+ * vendor micom SetETCCPUWDTReset hard-reset call.  Both paths run from the
+ * same SMACK floor label `_` as the cluster CAN writes.
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -32,11 +37,15 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 
 #define DEFAULT_RW_DIR "/rw_data/tweaks"
 #define DEFAULT_PORT 8091
+#define DEFAULT_REBOOT_COMMAND "/bin/systemctl"
+#define DEFAULT_REBOOT_WDT_MS 20000
+#define REBOOT_WDT_MAX_MS 120000
 #define MAX_PATH 512
 #define MAX_BUF 65536
 #define DEFAULT_OFFLINE_STATUS "/update/offline_status"
@@ -115,6 +124,8 @@ typedef struct {
     char session_bus_file[MAX_PATH];
     char dbus_send_path[MAX_PATH];
     char xdg_runtime_dir[MAX_PATH];
+    char reboot_command[MAX_PATH];
+    int reboot_wdt_ms;
 } config_t;
 
 typedef struct {
@@ -166,6 +177,15 @@ typedef struct {
     int ota_explicit_off;
     /* disclaimer */
     char tzdata_version[64];
+    /* Reboot app: clean reboot first, micom watchdog reset as a last resort */
+    int reboot_state;              /* 0 idle, 1 rebooting, 2 error */
+    char reboot_message[128];
+    char reboot_error[256];
+    pid_t reboot_child;
+    int64_t reboot_started_ms;
+    int64_t reboot_wdt_at_ms;
+    int reboot_wdt_sent;
+    int reboot_wdt_ok;             /* -1 unknown, 0 failed, 1 sent */
 } runtime_t;
 
 static config_t cfg;
@@ -196,6 +216,18 @@ static mon_t g_mon[2] = {
     {.pid = -1, .fd = -1, .is_session = 0},
     {.pid = -1, .fd = -1, .is_session = 1},
 };
+/* Home/Star key watcher.  The steering-wheel key is a session-bus event,
+ * not a QML key event; the Reboot overlay closes on a change of home_seq. */
+static pid_t g_home_pid = -1;
+static int g_home_fd = -1;
+static int g_home_alive;
+static int g_home_seq;
+static char g_home_source[16] = "none";
+static char g_home_member[128];
+static char g_home_line[512];
+static size_t g_home_len;
+static int64_t g_home_retry_ms;
+static char g_smack_expected[128];
 static int g_monitor_enabled = 1;
 static int g_config_migrated;
 /* One-shot modes (--once/--status/--set) must not fork dbus-monitors: the
@@ -250,6 +282,8 @@ static void check_dst(time_t now, int force);
 static void check_ota(time_t now, int force);
 static int restore_main(void);
 static int front_owned(void);
+static void write_status(void);
+static void reboot_tick(void);
 
 static void log_msg(const char *fmt, ...)
 {
@@ -602,6 +636,71 @@ static void current_smack(char *out, size_t size)
         snprintf(out, size, "unknown");
 }
 
+/* SMACK exec label of a helper the daemon forks (dbus-send).  An absent
+ * label means the helper inherits this process's label. */
+static void helper_smack(const char *path, char *out, size_t size)
+{
+    ssize_t n = getxattr(path, "security.SMACK64EXEC", out, size - 1);
+    if (n <= 0) {
+        snprintf(out, size, "inherit");
+        return;
+    }
+    out[n] = 0;
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r' ||
+                     out[n - 1] == ' '))
+        out[--n] = 0;
+    if (!out[0])
+        snprintf(out, size, "inherit");
+}
+
+static void load_expected_smack(void)
+{
+    char path[MAX_PATH];
+    g_smack_expected[0] = 0;
+    snprintf(path, sizeof(path), "%s/smack_expected", cfg.rw_dir);
+    if (read_file(path, g_smack_expected, sizeof(g_smack_expected)) < 0) {
+        g_smack_expected[0] = 0;
+    } else if (!strcmp(g_smack_expected, "(null)")) {
+        g_smack_expected[0] = 0;
+    }
+}
+
+static int smack_ok(const char *actual)
+{
+    return !g_smack_expected[0] || !strcmp(actual, g_smack_expected);
+}
+
+/* Update/upgrade processes: a reboot in the middle of a flash update can
+ * brick the unit.  Scan /proc on demand only (the static name strings avoid
+ * false matches against this daemon's own command line). */
+static int process_running(const char *name)
+{
+    DIR *d = opendir("/proc");
+    struct dirent *de;
+    int found = 0;
+    if (!d)
+        return 0;
+    while ((de = readdir(d)) != NULL) {
+        char path[MAX_PATH], comm[64];
+        char *end = NULL;
+        long pid = strtol(de->d_name, &end, 10);
+        if (!end || *end || pid <= 0)
+            continue;
+        snprintf(path, sizeof(path), "/proc/%ld/comm", pid);
+        if (read_file(path, comm, sizeof(comm)) > 0 && !strcmp(comm, name)) {
+            found = 1;
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+static int update_running(void)
+{
+    return process_running("AppUpgrade") || process_running("AppScomoDM");
+}
+
 /*
  * Effective night mode.
  *
@@ -682,6 +781,9 @@ static void load_config(void)
     snprintf(cfg.dbus_send_path, sizeof(cfg.dbus_send_path), "%s", DEFAULT_DBUS_SEND);
     snprintf(cfg.xdg_runtime_dir, sizeof(cfg.xdg_runtime_dir), "%s",
              DEFAULT_XDG_RUNTIME_DIR);
+    snprintf(cfg.reboot_command, sizeof(cfg.reboot_command), "%s",
+             DEFAULT_REBOOT_COMMAND);
+    cfg.reboot_wdt_ms = DEFAULT_REBOOT_WDT_MS;
 
     snprintf(path, sizeof(path), "%s/config.conf", cfg.rw_dir);
     f = fopen(path, "r");
@@ -754,6 +856,10 @@ static void load_config(void)
             snprintf(cfg.dbus_send_path, sizeof(cfg.dbus_send_path), "%s", v);
         else if (!strcmp(k, "xdg_runtime_dir"))
             snprintf(cfg.xdg_runtime_dir, sizeof(cfg.xdg_runtime_dir), "%s", v);
+        else if (!strcmp(k, "reboot_command"))
+            snprintf(cfg.reboot_command, sizeof(cfg.reboot_command), "%s", v);
+        else if (!strcmp(k, "reboot_wdt_ms"))
+            cfg.reboot_wdt_ms = atoi(v);
     }
     fclose(f);
     /* Version 1 shipped these zero-based defaults. Only migrate the known
@@ -779,6 +885,10 @@ static void load_config(void)
         cfg.dst_check_ms = 3600000;
     if (!cfg.dst_zone[0])
         snprintf(cfg.dst_zone, sizeof(cfg.dst_zone), "%s", DEFAULT_DST_ZONE);
+    cfg.reboot_wdt_ms = clamp_int(cfg.reboot_wdt_ms, 0, REBOOT_WDT_MAX_MS);
+    if (!cfg.reboot_command[0])
+        snprintf(cfg.reboot_command, sizeof(cfg.reboot_command), "%s",
+                 DEFAULT_REBOOT_COMMAND);
 }
 
 static void save_config(void)
@@ -812,7 +922,9 @@ static void save_config(void)
              "offline_status_path=%s\n"
              "session_bus_file=%s\n"
              "dbus_send_path=%s\n"
-             "xdg_runtime_dir=%s\n",
+             "xdg_runtime_dir=%s\n"
+             "reboot_command=%s\n"
+             "reboot_wdt_ms=%d\n",
              cfg.cluster_fix, cfg.infotainment_fix, cfg.cluster_crtc, cfg.main_crtc,
              cfg.warmth_override, cfg.force_filter_on, cfg.deep_red,
              cfg.projection_always,
@@ -820,7 +932,8 @@ static void save_config(void)
              cfg.disclaimer_timeout_ms, cfg.auto_dst, cfg.dst_zone, cfg.dst_check_ms,
              cfg.ota_block, cfg.wrandr_path, cfg.persist_helper, cfg.tzdata_dir,
              cfg.zones_file, cfg.tzdata_version_file, cfg.offline_status_path,
-             cfg.session_bus_file, cfg.dbus_send_path, cfg.xdg_runtime_dir);
+             cfg.session_bus_file, cfg.dbus_send_path, cfg.xdg_runtime_dir,
+             cfg.reboot_command, cfg.reboot_wdt_ms);
     write_atomic(path, data);
 }
 
@@ -1909,10 +2022,149 @@ static void monitor_stop_slot(mon_t *m)
     m->alive = 0;
 }
 
+static void home_monitor_stop(void)
+{
+    if (g_home_fd >= 0) {
+        close(g_home_fd);
+        g_home_fd = -1;
+    }
+    if (g_home_pid > 0) {
+        kill(g_home_pid, SIGTERM);
+        waitpid(g_home_pid, NULL, 0);
+        g_home_pid = -1;
+    }
+    g_home_alive = 0;
+}
+
+static void home_monitor_start(void)
+{
+    int pipefd[2];
+    pid_t pid;
+    char addr[MAX_PATH];
+
+    if (!g_monitor_enabled || g_once_mode || g_home_pid > 0)
+        return;
+    if (read_session_bus(addr, sizeof(addr)) < 0) {
+        g_home_retry_ms = mono_ms() + 5000;
+        return;
+    }
+    /* A stale guid makes libdbus refuse the connection after a bus restart;
+     * the path alone identifies the bus. */
+    {
+        char *guid = strstr(addr, ",guid=");
+        if (guid)
+            *guid = '\0';
+    }
+    if (pipe2(pipefd, O_CLOEXEC) < 0) {
+        g_home_retry_ms = mono_ms() + 5000;
+        return;
+    }
+    pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        g_home_retry_ms = mono_ms() + 5000;
+        return;
+    }
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+        dup2(pipefd[1], STDOUT_FILENO);
+        if (devnull >= 0) {
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        close(pipefd[0]);
+        close(pipefd[1]);
+        execlp("dbus-monitor", "dbus-monitor", "--address", addr,
+               "member=NotifyRequestHomeScreen",
+               "member=custom_key_value", (char *)NULL);
+        _exit(127);
+    }
+    close(pipefd[1]);
+    fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
+    g_home_fd = pipefd[0];
+    g_home_pid = pid;
+    g_home_len = 0;
+    g_home_member[0] = 0;
+    g_home_alive = 1;
+    g_home_retry_ms = 0;
+    log_msg("home/star monitor started pid=%ld", (long)pid);
+}
+
+static void process_home_line(const char *line)
+{
+    const char *memb = strstr(line, "member=");
+    if (memb) {
+        size_t n = 0;
+        memb += 7;
+        while (memb[n] && memb[n] != ' ' && memb[n] != '\t' &&
+               memb[n] != '\n' && n + 1 < sizeof(g_home_member)) {
+            g_home_member[n] = memb[n];
+            n++;
+        }
+        g_home_member[n] = 0;
+        if (!strcmp(g_home_member, "NotifyRequestHomeScreen")) {
+            g_home_seq++;
+            snprintf(g_home_source, sizeof(g_home_source), "home");
+        }
+    }
+    if (strstr(line, "int32 7") &&
+        !strcmp(g_home_member, "custom_key_value")) {
+        g_home_seq++;
+        snprintf(g_home_source, sizeof(g_home_source), "star");
+    }
+}
+
+static void home_monitor_read(void)
+{
+    char buf[4096];
+    ssize_t n;
+
+    if (g_home_fd < 0)
+        return;
+    while ((n = read(g_home_fd, buf, sizeof(buf))) > 0) {
+        for (ssize_t i = 0; i < n; i++) {
+            char c = buf[i];
+            if (c == '\n') {
+                g_home_line[g_home_len] = 0;
+                process_home_line(g_home_line);
+                g_home_len = 0;
+            } else if (g_home_len + 1 < sizeof(g_home_line)) {
+                g_home_line[g_home_len++] = c;
+            }
+        }
+    }
+}
+
+static void home_monitor_tick(void)
+{
+    int64_t now = mono_ms();
+    if (g_home_pid > 0) {
+        int st;
+        if (waitpid(g_home_pid, &st, WNOHANG) == g_home_pid) {
+            if (g_home_fd >= 0)
+                close(g_home_fd);
+            g_home_fd = -1;
+            g_home_pid = -1;
+            g_home_alive = 0;
+            g_home_retry_ms = now + 5000;
+            log_msg("home/star monitor died");
+        }
+    }
+    if (!g_once_mode && g_monitor_enabled && g_home_pid <= 0 &&
+        (g_home_retry_ms == 0 || now >= g_home_retry_ms)) {
+        home_monitor_start();
+        if (g_home_pid <= 0 && g_home_retry_ms == 0)
+            g_home_retry_ms = now + 5000;
+    }
+    home_monitor_read();
+}
+
 static void monitor_cleanup(void)
 {
     monitor_stop_slot(&g_mon[0]);
     monitor_stop_slot(&g_mon[1]);
+    home_monitor_stop();
 }
 
 /*
@@ -2174,11 +2426,25 @@ static void json_escape(const char *in, char *out, size_t size)
     out[j] = 0;
 }
 
+static const char *reboot_state_name(void)
+{
+    if (rt.reboot_state == 1)
+        return "rebooting";
+    if (rt.reboot_state == 2)
+        return "error";
+    return "idle";
+}
+
 static void build_status(char *out, size_t size)
 {
     char msg[512], err[512], ps[64];
     char zone[256], dststate[64], dsterr[512], otastate[64], otaerr[512];
     char tzver[128], smack[128], smack_json[256];
+    char smack_expected[128], smack_expected_json[256];
+    char smack_dbus[128], smack_dbus_json[256];
+    char rmsg[256], rerr[512], rcmd[MAX_PATH];
+    char hsource[32];
+    int64_t wdt_in = 0;
     json_escape(rt.message, msg, sizeof(msg));
     json_escape(rt.last_error, err, sizeof(err));
     json_escape(rt.projection_source, ps, sizeof(ps));
@@ -2190,11 +2456,34 @@ static void build_status(char *out, size_t size)
     json_escape(rt.tzdata_version, tzver, sizeof(tzver));
     current_smack(smack, sizeof(smack));
     json_escape(smack, smack_json, sizeof(smack_json));
+    json_escape(g_smack_expected, smack_expected, sizeof(smack_expected));
+    json_escape(smack_expected, smack_expected_json, sizeof(smack_expected_json));
+    helper_smack(cfg.dbus_send_path, smack_dbus, sizeof(smack_dbus));
+    json_escape(smack_dbus, smack_dbus_json, sizeof(smack_dbus_json));
+    json_escape(rt.reboot_message, rmsg, sizeof(rmsg));
+    json_escape(rt.reboot_error, rerr, sizeof(rerr));
+    json_escape(cfg.reboot_command, rcmd, sizeof(rcmd));
+    json_escape(g_home_source, hsource, sizeof(hsource));
+    if (rt.reboot_state == 1 && rt.reboot_wdt_at_ms > mono_ms())
+        wdt_in = rt.reboot_wdt_at_ms - mono_ms();
     snprintf(out, size,
              "{\"ok\":true,"
              "\"build\":\"%s\","
              "\"config_version\":%d,"
              "\"smack\":\"%s\","
+             "\"smack_expected\":\"%s\","
+             "\"smack_ok\":%s,"
+             "\"smack_dbus\":\"%s\","
+             "\"home_seq\":%d,"
+             "\"home_source\":\"%s\","
+             "\"reboot_state\":\"%s\","
+             "\"reboot_message\":\"%s\","
+             "\"reboot_error\":\"%s\","
+             "\"reboot_wdt_ms\":%d,"
+             "\"reboot_wdt_in_ms\":%ld,"
+             "\"reboot_wdt_sent\":%d,"
+             "\"reboot_wdt_ok\":%d,"
+             "\"reboot_command\":\"%s\","
              "\"cluster_fix\":%d,"
              "\"infotainment_fix\":%d,"
              "\"deep_red\":%d,"
@@ -2238,6 +2527,19 @@ static void build_status(char *out, size_t size)
              TWEAKS_BUILD_ID,
              CONFIG_VERSION,
              smack_json,
+             smack_expected_json,
+             smack_ok(smack) ? "true" : "false",
+             smack_dbus_json,
+             g_home_seq,
+             hsource,
+             reboot_state_name(),
+             rmsg,
+             rerr,
+             cfg.reboot_wdt_ms,
+             (long)wdt_in,
+             rt.reboot_wdt_sent,
+             rt.reboot_wdt_ok,
+             rcmd,
              cfg.cluster_fix ? 1 : 0,
              cfg.infotainment_fix ? 1 : 0,
              cfg.deep_red ? 1 : 0,
@@ -2290,6 +2592,143 @@ static void write_status(void)
     snprintf(path, sizeof(path), "%s/status.json", cfg.rw_dir);
     if (write_atomic(path, json) == 0)
         snprintf(last, sizeof(last), "%s", json);
+}
+
+/* Vendor hard-reset path, copied from /etc/weston-crash.sh: a micom watchdog
+ * reset of the ETC CPU.  The daemon runs on the SMACK floor label `_`, which
+ * has rwx access to App::micommanager; the same dbus-send path is already
+ * used for the cluster CAN writes. */
+static int send_wdt_reset(void)
+{
+    char outpath[MAX_PATH];
+    int fd;
+    pid_t pid;
+    int status = 0;
+
+    snprintf(outpath, sizeof(outpath), "%s/wdt_call.out", cfg.rw_dir);
+    fd = open(outpath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return -1;
+    pid = fork();
+    if (pid < 0) {
+        close(fd);
+        return -1;
+    }
+    if (pid == 0) {
+        dup2(fd, STDOUT_FILENO);
+        dup2(fd, STDERR_FILENO);
+        close(fd);
+        execl(cfg.dbus_send_path, "dbus-send", "--system",
+              "--type=method_call", "--print-reply", "--reply-timeout=8000",
+              "--dest=com.lge.car.micom", "/Ihu",
+              "com.lge.car.micom.ihu.SetETCCPUWDTReset",
+              "array:byte:0x00", (char *)NULL);
+        _exit(127);
+    }
+    close(fd);
+    if (waitpid(pid, &status, 0) != pid)
+        return -1;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return -1;
+    return 0;
+}
+
+static void reboot_wdt_now(void)
+{
+    if (rt.reboot_state != 1 || rt.reboot_wdt_sent)
+        return;
+    if (update_running()) {
+        if (rt.reboot_child > 0) {
+            kill(rt.reboot_child, SIGKILL);
+            waitpid(rt.reboot_child, NULL, 0);
+            rt.reboot_child = -1;
+        }
+        rt.reboot_state = 2;
+        rt.reboot_wdt_ok = 0;
+        snprintf(rt.reboot_error, sizeof(rt.reboot_error),
+                 "update started; hard reset withheld");
+        log_msg("reboot: hard reset withheld (update process running)");
+        write_status();
+        return;
+    }
+    if (rt.reboot_child > 0) {
+        kill(rt.reboot_child, SIGKILL);
+        waitpid(rt.reboot_child, NULL, 0);
+        rt.reboot_child = -1;
+    }
+    rt.reboot_wdt_sent = 1;
+    snprintf(rt.reboot_message, sizeof(rt.reboot_message),
+             "hard reset fallback");
+    log_msg("reboot: clean path did not complete; sending micom WDT reset");
+    write_status();
+    sync();
+    if (send_wdt_reset() < 0) {
+        rt.reboot_state = 2;
+        rt.reboot_wdt_ok = 0;
+        snprintf(rt.reboot_error, sizeof(rt.reboot_error),
+                 "hard reset request failed");
+        log_msg("reboot: micom WDT reset failed");
+    } else {
+        rt.reboot_wdt_ok = 1;
+        log_msg("reboot: micom WDT reset accepted");
+    }
+    write_status();
+}
+
+static void start_reboot(void)
+{
+    pid_t pid;
+
+    rt.reboot_state = 1;
+    rt.reboot_child = -1;
+    rt.reboot_wdt_sent = 0;
+    rt.reboot_wdt_ok = -1;
+    rt.reboot_error[0] = 0;
+    rt.reboot_started_ms = mono_ms();
+    rt.reboot_wdt_at_ms = rt.reboot_started_ms + cfg.reboot_wdt_ms;
+    snprintf(rt.reboot_message, sizeof(rt.reboot_message),
+             "clean reboot requested");
+    log_msg("reboot: clean reboot requested (%s)", cfg.reboot_command);
+
+    pid = fork();
+    if (pid == 0) {
+        execl(cfg.reboot_command, "systemctl", "reboot", "--no-block",
+              (char *)NULL);
+        _exit(127);
+    }
+    if (pid < 0) {
+        snprintf(rt.reboot_error, sizeof(rt.reboot_error),
+                 "cannot start clean reboot");
+        log_msg("reboot: fork failed");
+        reboot_wdt_now();
+    } else {
+        rt.reboot_child = pid;
+    }
+    write_status();
+}
+
+static void reboot_tick(void)
+{
+    int status = 0;
+
+    if (rt.reboot_state != 1)
+        return;
+    if (rt.reboot_child > 0) {
+        pid_t got = waitpid(rt.reboot_child, &status, WNOHANG);
+        if (got == rt.reboot_child) {
+            rt.reboot_child = -1;
+            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                snprintf(rt.reboot_error, sizeof(rt.reboot_error),
+                         "clean reboot command failed");
+                log_msg("reboot: clean reboot command failed (status=%d)",
+                        WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+                reboot_wdt_now();
+                return;
+            }
+        }
+    }
+    if (mono_ms() >= rt.reboot_wdt_at_ms)
+        reboot_wdt_now();
 }
 
 /* Front ownership survives crashes and service restarts. Do not confuse a
@@ -2428,6 +2867,7 @@ static void tick(void)
         g_last_vendor_read = now;
     }
     read_monitor();
+    home_monitor_tick();
     update_projection();
     log_night_transitions();
     usb_log_tick(now);
@@ -2471,6 +2911,7 @@ static void tick(void)
 
     write_cluster_desired();
     save_last_gamma();
+    reboot_tick();
     if (!rt.last_error[0])
         set_message("Cluster fix %s; infotainment fix %s; projection %s",
                     cfg.cluster_fix ? "on" : "off",
@@ -2495,7 +2936,11 @@ static void send_all(int fd, const char *data)
 static void send_response(int fd, int code, const char *body)
 {
     char header[256];
-    const char *reason = code == 200 ? "OK" : (code == 400 ? "Bad Request" : "Not Found");
+    const char *reason = code == 200 ? "OK" :
+                         code == 202 ? "Accepted" :
+                         code == 400 ? "Bad Request" :
+                         code == 403 ? "Forbidden" :
+                         code == 409 ? "Conflict" : "Not Found";
     snprintf(header, sizeof(header),
              "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\n"
              "Content-Length: %zu\r\nConnection: close\r\n\r\n",
@@ -2547,6 +2992,48 @@ static int query_param(const char *query, const char *key, char *out, size_t siz
     return 0;
 }
 
+/* A browser cross-site request carries an http(s) Origin.  The QML app is
+ * not a web origin; allow a file/qrc/none origin so the local UI is not
+ * rejected by its own network stack. */
+static int remote_origin(const char *request)
+{
+    const char *p = strcasestr(request, "\r\nOrigin:");
+    if (!p)
+        return 0;
+    p += strlen("\r\nOrigin:");
+    while (*p == ' ' || *p == '\t')
+        p++;
+    return !strncasecmp(p, "http://", 7) || !strncasecmp(p, "https://", 8);
+}
+
+static int header_value_is(const char *request, const char *name,
+                           const char *value)
+{
+    const char *p = strstr(request, "\r\n");
+    size_t n = strlen(name), vn = strlen(value);
+    if (!p)
+        return 0;
+    while (p) {
+        const char *end;
+        p += 2;
+        end = strstr(p, "\r\n");
+        if (!end)
+            break;
+        if ((size_t)(end - p) > n && !strncasecmp(p, name, n) && p[n] == ':') {
+            const char *v = p + n + 1;
+            size_t have;
+            while (v < end && (*v == ' ' || *v == '\t'))
+                v++;
+            have = (size_t)(end - v);
+            while (have > 0 && (v[have - 1] == ' ' || v[have - 1] == '\t'))
+                have--;
+            return have == vn && !strncasecmp(v, value, vn);
+        }
+        p = end;
+    }
+    return 0;
+}
+
 static int apply_config_key(const char *k, const char *v)
 {
     if (!strcmp(k, "cluster_fix"))
@@ -2588,7 +3075,7 @@ static void handle_http(int fd)
     char decoded[2048];
     ssize_t n;
     struct timeval tv = {2, 0};
-    char *sp1, *sp2, *q;
+    char *sp1, *sp2, *q, *headers;
 
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     n = recv(fd, buf, sizeof(buf) - 1, 0);
@@ -2597,6 +3084,9 @@ static void handle_http(int fd)
         return;
     }
     buf[n] = 0;
+    /* Keep a pointer to the header block: the request-line parser below
+     * inserts NULs, which would hide it from a later strstr(buf, ...). */
+    headers = strstr(buf, "\r\n");
     sp1 = strchr(buf, ' ');
     if (!sp1) {
         send_response(fd, 400, "{\"ok\":false,\"error\":\"bad request\"}\n");
@@ -2625,16 +3115,52 @@ static void handle_http(int fd)
 
     if (!strcmp(decoded, "/health")) {
         char smack[128], smack_json[256];
+        char expected[128], expected_json[256];
+        char dbus[128], dbus_json[256];
         current_smack(smack, sizeof(smack));
         json_escape(smack, smack_json, sizeof(smack_json));
+        json_escape(g_smack_expected, expected, sizeof(expected));
+        json_escape(expected, expected_json, sizeof(expected_json));
+        helper_smack(cfg.dbus_send_path, dbus, sizeof(dbus));
+        json_escape(dbus, dbus_json, sizeof(dbus_json));
         snprintf(body, sizeof(body),
                  "{\"ok\":true,\"build\":\"%s\",\"config_version\":%d,"
-                 "\"smack\":\"%s\"}\n",
-                 TWEAKS_BUILD_ID, CONFIG_VERSION, smack_json);
+                 "\"smack\":\"%s\",\"smack_expected\":\"%s\","
+                 "\"smack_ok\":%s,\"smack_dbus\":\"%s\","
+                 "\"home_seq\":%d,\"reboot_state\":\"%s\"}\n",
+                 TWEAKS_BUILD_ID, CONFIG_VERSION, smack_json, expected_json,
+                 smack_ok(smack) ? "true" : "false", dbus_json,
+                 g_home_seq, reboot_state_name());
         send_response(fd, 200, body);
     } else if (!strcmp(decoded, "/status")) {
         build_status(body, sizeof(body));
         send_response(fd, 200, body);
+    } else if (!strcmp(decoded, "/reboot") && !strcmp(method, "POST")) {
+        /* Reject browser cross-origin calls.  A custom header cannot be sent
+         * by a plain cross-site form/fetch without a preflight, which this
+         * server does not answer. */
+        if (!headers || remote_origin(headers) ||
+            !header_value_is(headers, "X-Reboot-App", "1")) {
+            send_response(fd, 403,
+                          "{\"ok\":false,\"reason\":\"forbidden\"}\n");
+        } else if (rt.reboot_state == 1) {
+            send_response(fd, 409,
+                          "{\"ok\":false,\"reason\":\"already_rebooting\"}\n");
+        } else if (update_running()) {
+            send_response(fd, 409,
+                          "{\"ok\":false,\"reason\":\"update_in_progress\","
+                          "\"error\":\"An update is running\"}\n");
+        } else {
+            snprintf(body, sizeof(body),
+                     "{\"ok\":true,\"state\":\"rebooting\","
+                     "\"wdt_ms\":%d}\n", cfg.reboot_wdt_ms);
+            /* Answer first so the UI can render "Restarting" before the
+             * clean shutdown starts. */
+            send_response(fd, 202, body);
+            start_reboot();
+            close(fd);
+            return;
+        }
     } else if (!strcmp(decoded, "/set") && !strcmp(method, "POST")) {
         static const char *keys[] = {
             "cluster_fix", "infotainment_fix", "cluster_crtc", "main_crtc",
@@ -2753,7 +3279,8 @@ static void print_usage(const char *argv0)
 {
     fprintf(stderr,
             "usage: %s [--rw-dir DIR] [--port N] [--status] [--set key=value] "
-            "[--dst-at EPOCH] [--no-dbus] [--foreground]\n", argv0);
+            "[--dst-at EPOCH] [--no-dbus] [--foreground] "
+            "[--reboot-command PATH] [--reboot-wdt-ms N]\n", argv0);
 }
 
 int main(int argc, char **argv)
@@ -2764,6 +3291,8 @@ int main(int argc, char **argv)
     int once = 0;
     char set_key[128] = "", set_value[256] = "";
     char rw_override[MAX_PATH] = "";
+    char reboot_override[MAX_PATH] = "";
+    int reboot_wdt_override = -1;
     time_t dst_at = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -2779,6 +3308,10 @@ int main(int argc, char **argv)
             no_dbus = 1;
         else if (!strcmp(argv[i], "--foreground"))
             ;
+        else if (!strcmp(argv[i], "--reboot-command") && i + 1 < argc)
+            snprintf(reboot_override, sizeof(reboot_override), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--reboot-wdt-ms") && i + 1 < argc)
+            reboot_wdt_override = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dst-at") && i + 1 < argc)
             dst_at = (time_t)strtoll(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--set") && i + 1 < argc) {
@@ -2802,6 +3335,8 @@ int main(int argc, char **argv)
     rt.dst_last_value = -1;
     rt.dst_raw = -1;
     rt.dst_expected = -1;
+    rt.reboot_child = -1;
+    rt.reboot_wdt_ok = -1;
     snprintf(rt.dst_state, sizeof(rt.dst_state), "unknown");
     snprintf(rt.ota_state, sizeof(rt.ota_state), "unknown");
     g_now_override = dst_at;
@@ -2812,7 +3347,13 @@ int main(int argc, char **argv)
     if (rw_override[0])
         snprintf(g_rw_override, sizeof(g_rw_override), "%s", rw_override);
     load_config();
+    if (reboot_override[0])
+        snprintf(cfg.reboot_command, sizeof(cfg.reboot_command), "%s",
+                 reboot_override);
+    if (reboot_wdt_override >= 0)
+        cfg.reboot_wdt_ms = clamp_int(reboot_wdt_override, 0, REBOOT_WDT_MAX_MS);
     mkdir_p(cfg.rw_dir);
+    load_expected_smack();
     if (g_config_migrated)
         save_config();
     load_last_gamma();
@@ -2877,8 +3418,10 @@ int main(int argc, char **argv)
     write_status();
 
     while (!stop_flag) {
-        struct pollfd fds[3];
+        struct pollfd fds[4];
         int nfds = 1, pr;
+        int timeout = cfg.poll_ms;
+        int monitor_fired = 0, home_fired = 0;
         fds[0].fd = listen_fd;
         fds[0].events = POLLIN;
         for (int i = 0; i < 2; i++) {
@@ -2888,7 +3431,16 @@ int main(int argc, char **argv)
                 nfds++;
             }
         }
-        pr = poll(fds, (nfds_t)nfds, cfg.poll_ms);
+        if (g_home_fd >= 0) {
+            fds[nfds].fd = g_home_fd;
+            fds[nfds].events = POLLIN | POLLHUP;
+            nfds++;
+        }
+        /* A pending reboot needs a tight poll so the 20 s fallback fires
+         * even when the normal status cadence is one second. */
+        if (rt.reboot_state == 1 && timeout > 100)
+            timeout = 100;
+        pr = poll(fds, (nfds_t)nfds, timeout);
         if (pr > 0) {
             if (fds[0].revents & POLLIN) {
                 int cfd = accept(listen_fd, NULL, NULL);
@@ -2897,10 +3449,16 @@ int main(int argc, char **argv)
             }
             for (int i = 1; i < nfds; i++) {
                 if (fds[i].revents & (POLLIN | POLLHUP)) {
-                    read_monitor();
-                    break;
+                    if (fds[i].fd == g_home_fd)
+                        home_fired = 1;
+                    else
+                        monitor_fired = 1;
                 }
             }
+            if (monitor_fired)
+                read_monitor();
+            if (home_fired)
+                home_monitor_read();
         }
         tick();
     }

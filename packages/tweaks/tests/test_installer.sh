@@ -133,6 +133,30 @@ echo "\$@" >> "$TMP/wrandr.log"
 exit 0
 EOF
 chmod 755 "$TMP/root/usr/bin/wrandr"
+cat > "$TMP/root/usr/bin/chsmack" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TMP/chsmack.log"
+exit 0
+EOF
+cat > "$TMP/root/usr/bin/getfattr" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *security.SMACK64EXEC*) [ "${BAD_LABEL:-0}" = 1 ] && exit 1; printf '_' ;;
+  *security.SMACK64*)     [ "${BAD_QML_LABEL:-0}" = 1 ] && exit 1; printf '_' ;;
+  *) exit 1 ;;
+esac
+EOF
+cat > "$TMP/root/usr/bin/setfattr" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TMP/setfattr.log"
+exit 0
+EOF
+chmod 755 "$TMP/root/usr/bin/chsmack" "$TMP/root/usr/bin/getfattr" \
+          "$TMP/root/usr/bin/setfattr"
+TWEAKS_PATH="$TMP/root/usr/bin:/usr/bin:/bin"
+TWEAKS_SMACK_SELF=_
+TWEAKS_DAEMON_SMACK=_
+export TWEAKS_PATH TWEAKS_SMACK_SELF TWEAKS_DAEMON_SMACK
 for f in main.qml Screen_AppStandbyClock_Confirm.qml Screen_AppStandbyClock_Confirm_Profile.qml; do
     printf '// STOCK_STANDBY_260128\n' > "$TMP/root/app/share/AppStandbyClock/qml_eco3.0/$f"
 done
@@ -182,12 +206,26 @@ grep -q "variant=$EXPECT" "$TMP/usb/run_stuff_result.txt" || {
 }
 Q="$TMP/root/app/share/AppHomeScreen/qml_eco3.0"
 test -f "$Q/HomeScreen/TweaksPage.qml"
+test -f "$Q/HomeScreen/RebootPage.qml"
 test -f "$Q/component/TweaksTile.qml"
+test -f "$Q/component/RebootTile.qml"
 test -f "$Q/component/TweaksZonePicker.qml"
 test -f "$TMP/root/app/share/AppHomeScreen/tweaks/tweaks_icon_n.png"
+test -f "$TMP/root/app/share/AppHomeScreen/tweaks/reboot_icon_n.png"
 test -f "$TMP/rw/tweaks_daemon"
 test -f "$TMP/rw/tweaks_persist"
+test -f "$TMP/rw/smack_expected"
+[ "$(cat "$TMP/rw/smack_expected")" = "_" ]
 test -f "$TMP/etc/systemd/system/tweaks-daemon.service"
+grep -q 'id: rebootPage' "$Q/HomeScreen/QHMI_HomeScreenMain_Advanced.qml"
+grep -q 'RebootTile' "$Q/HomeScreen/QHMI_HomeScreenMain_Advanced.qml"
+grep -q 'rebootPage.open()' "$Q/HomeScreen/QHMI_HomeScreenMain_Advanced.qml"
+grep -q 'smack_self=_' "$TMP/usb/run_stuff_result.txt"
+grep -q 'daemon_smack=_' "$TMP/usb/run_stuff_result.txt"
+grep -q 'smack_check=ok' "$TMP/usb/run_stuff_result.txt"
+grep -q -- "-e _ $TMP/rw/tweaks_daemon" "$TMP/chsmack.log"
+grep -q -- "-e _ $TMP/rw/tweaks_persist" "$TMP/chsmack.log"
+grep -q -- "SMACK64 -v _" "$TMP/setfattr.log"
 grep -q 'TWEAKS_WRANDR_WRAPPER' "$TMP/root/usr/bin/wrandr"
 test -f "$TMP/root/usr/bin/wrandr.real"
 grep -q 'TWEAKS_PAYLOAD_260128' "$Q/HomeScreen/QHMI_HomeScreenMain_Advanced.qml"
@@ -216,8 +254,9 @@ grep -q '^deep_red=0$' "$TMP/rw/config.conf"
 # The daemon must run on the SMACK floor label `_` (the Battery-proven
 # context). `Privileged` has no micommanager/system-bus rule, which would
 # silently block every cluster CAN write.
-grep -q 'chsmack -e _ "$RW_DIR/tweaks_daemon"' "$ROOT/scripts/run_stuff.sh"
-grep -q 'chsmack -e _ "$RW_DIR/tweaks_persist"' "$ROOT/scripts/run_stuff.sh"
+grep -q 'set_exec_label "$RW_DIR/tweaks_daemon"' "$ROOT/scripts/run_stuff.sh"
+grep -q 'set_exec_label "$RW_DIR/tweaks_persist"' "$ROOT/scripts/run_stuff.sh"
+grep -q 'chsmack -e "$SMACK_SELF"' "$ROOT/scripts/run_stuff.sh"
 ! grep -q 'chsmack -e Privileged' "$ROOT/scripts/run_stuff.sh"
 grep -q ' smack=' "$TMP/usb/run_stuff_result.txt"
 
@@ -298,7 +337,9 @@ grep -q 'status=OK' "$TMP/usb/run_stuff_result.txt"
 grep -q -- '--crtc=1 --brightness=128:120:112' "$TMP/wrandr.log"
 test ! -f "$TMP/rw/front_override"
 test ! -f "$Q/HomeScreen/TweaksPage.qml"
+test ! -f "$Q/HomeScreen/RebootPage.qml"
 test ! -f "$Q/component/TweaksTile.qml"
+test ! -f "$Q/component/RebootTile.qml"
 test ! -f "$Q/component/TweaksZonePicker.qml"
 test ! -f "$TMP/rw/tweaks_daemon"
 test ! -f "$TMP/root/usr/bin/wrandr.real"
@@ -311,5 +352,60 @@ test ! -f "$TMP/rw/disclaimer_auto"
 test ! -f "$TMP/rw/tzdata_version"
 test "$(cat "$TMP/root/update/offline_status")" = "0"
 test ! -f "$TMP/rw/ota_block_owned"
+
+# The Reboot fallback requires the floor label.  A failed SMACK readback or a
+# daemon running outside the installer label must fail the install, not warn.
+echo "== smack installer label gate (negative) =="
+if TWEAKS_SMACK_SELF=Privileged \
+    TWEAKS_QML_ROOT="$TMP/root/app/share/AppHomeScreen" \
+    TWEAKS_RW_DIR="$TMP/rw" \
+    TWEAKS_SERVICE="$TMP/etc/systemd/system/tweaks-daemon.service" \
+    TWEAKS_STANDBY_ROOT="$TMP/root/app/share/AppStandbyClock" \
+    TWEAKS_OFFLINE_STATUS="$TMP/root/update/offline_status" \
+    TWEAKS_WRANDR="$TMP/root/usr/bin/wrandr" \
+    TWEAKS_WRANDR_REAL="$TMP/root/usr/bin/wrandr.real" \
+    USB_DIR="$TMP/usb" \
+    sh "$TMP/install.sh"; then
+    echo "installer accepted a non-floor SMACK label" >&2
+    exit 1
+fi
+grep -q 'status=FAIL' "$TMP/usb/run_stuff_result.txt"
+grep -q "expected SMACK floor label" "$TMP/usb/run_stuff_result.txt"
+echo "smack installer label gate OK"
+
+echo "== smack label gate (negative) =="
+if BAD_LABEL=1 TWEAKS_QML_ROOT="$TMP/root/app/share/AppHomeScreen" \
+    TWEAKS_RW_DIR="$TMP/rw" \
+    TWEAKS_SERVICE="$TMP/etc/systemd/system/tweaks-daemon.service" \
+    TWEAKS_STANDBY_ROOT="$TMP/root/app/share/AppStandbyClock" \
+    TWEAKS_OFFLINE_STATUS="$TMP/root/update/offline_status" \
+    TWEAKS_WRANDR="$TMP/root/usr/bin/wrandr" \
+    TWEAKS_WRANDR_REAL="$TMP/root/usr/bin/wrandr.real" \
+    USB_DIR="$TMP/usb" \
+    sh "$TMP/install.sh"; then
+    echo "installer accepted a wrong SMACK exec label" >&2
+    exit 1
+fi
+grep -q 'status=FAIL' "$TMP/usb/run_stuff_result.txt"
+grep -q 'exec label readback failed' "$TMP/usb/run_stuff_result.txt"
+echo "smack file gate OK"
+
+echo "== smack runtime gate (negative) =="
+if TWEAKS_DAEMON_SMACK=Privileged \
+    TWEAKS_QML_ROOT="$TMP/root/app/share/AppHomeScreen" \
+    TWEAKS_RW_DIR="$TMP/rw" \
+    TWEAKS_SERVICE="$TMP/etc/systemd/system/tweaks-daemon.service" \
+    TWEAKS_STANDBY_ROOT="$TMP/root/app/share/AppStandbyClock" \
+    TWEAKS_OFFLINE_STATUS="$TMP/root/update/offline_status" \
+    TWEAKS_WRANDR="$TMP/root/usr/bin/wrandr" \
+    TWEAKS_WRANDR_REAL="$TMP/root/usr/bin/wrandr.real" \
+    USB_DIR="$TMP/usb" \
+    sh "$TMP/install.sh"; then
+    echo "installer accepted a daemon outside the installer label" >&2
+    exit 1
+fi
+grep -q 'status=FAIL' "$TMP/usb/run_stuff_result.txt"
+grep -q 'smack_check=mismatch' "$TMP/usb/run_stuff_result.txt"
+echo "smack runtime gate OK"
 
 echo "PASS: $KIND install/restore"
