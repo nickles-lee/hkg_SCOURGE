@@ -17,12 +17,15 @@ payload: daemon
 	sh scripts/build_payload.sh
 
 test: payload
+	python3 tests/test_release.py
 	python3 tests/test_tiles.py
 	sh tests/test_daemon.sh
 	sh tests/test_ports.sh
 	sh tests/test_wifi_stack.sh
+	python3 tests/test_qt_overlay.py
 	sh tests/test_logdump.sh
 	sh tests/test_prune.sh
+	python3 tests/test_apdiag.py
 	sh tests/test_ssh_persistence.sh
 	sh tests/test_installer.sh stock
 	sh tests/test_installer.sh hello

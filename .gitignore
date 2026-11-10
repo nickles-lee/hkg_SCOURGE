@@ -12,6 +12,19 @@ third_party/
 # --- owner stock QML bases (read by build_artifacts.py at build time; -------
 # --- OEM-derived, never committed) -------------------------------------------
 packages/*/base/
+packages/*/build/
+packages/wifi/backup/
+packages/wifi/artifacts/assets/wifi/
+packages/wifi/artifacts/bin/
+packages/wifi/artifacts/qml/**/QHMI_HomeScreenMain_*.qml
+packages/wifi/artifacts/qml/**/Screen_HomeScreen_*.qml
+packages/wifi/artifacts/qml/**/QCustomizedMenuListAllowEmpty.*.qml
+packages/wifi/artifacts/qml/**/common/
+packages/tweaks/artifacts/qml/**/QHMI_HomeScreenMain_*.qml
+packages/tweaks/artifacts/qml/**/Screen_HomeScreen_*.qml
+packages/tweaks/artifacts/qml/**/QCustomizedMenuListAllowEmpty.*.qml
+packages/tweaks/artifacts/qml/**/common/
+packages/wifi/bin/
 
 # --- VM-lab run outputs (serial logs, screenshots, result.json; -------------
 # --- runtime artifacts, never committed) --------------------------------------

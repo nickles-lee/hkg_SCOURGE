@@ -19,7 +19,7 @@
 # Usage: build_dropbear.sh [--use-existing /path/to/dropbearmulti]
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-ROOT=$(dirname "$(dirname "$HERE")")     # packages/wifi
+ROOT=$(dirname "$HERE")     # packages/wifi
 OUT="$ROOT/bin"
 DROPBEAR_VERSION="DROPBEAR_2024.86"
 

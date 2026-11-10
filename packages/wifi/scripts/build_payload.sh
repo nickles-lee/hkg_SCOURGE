@@ -1,25 +1,28 @@
 #!/bin/sh
 # SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
 # SPDX-License-Identifier: AGPL-3.0-only
+# TARGET: Ioniq 5 Gen5W_L EU 260128
 # Build a complete USB payload tree for the WiFi app.
 # Usage: sh scripts/build_payload.sh [output_dir]
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(dirname "$HERE")
 OUT=${1:-"$ROOT/out/usb"}
-DROPBEAR="$ROOT/bin/dropbearmulti"
-ROOTFS="${SCOURGE_ROOTFS:-$(dirname "$0")/../../work/rootfs}/app/share/AppHomeScreen/qml_eco3.0"
+DROPBEAR="${SCOURGE_DROPBEAR:-$ROOT/bin/dropbearmulti}"
+SCOURGE_ROOTFS="${SCOURGE_ROOTFS:-$ROOT/../../work/rootfs}"
+export SCOURGE_ROOTFS
+ROOTFS="$SCOURGE_ROOTFS/app/share/AppHomeScreen/qml_eco3.0"
 
 cd "$ROOT"
-
-echo "== build daemon =="
-make -C src
 
 echo "== icons =="
 python3 scripts/make_icons.py
 
 echo "== QML artifacts =="
 python3 scripts/build_artifacts.py
+
+echo "== build daemon =="
+make -C src
 
 echo "== assemble $OUT =="
 rm -rf "$OUT"
@@ -47,14 +50,15 @@ cp artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/Screen_HomeScreen_AllMenus.
 cp artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/Screen_HomeScreen_Submenu_Setup.*.qml "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/HomeScreen/"
 cp artifacts/qml/AppHomeScreen/qml_eco3.0/component/QCustomizedMenuListAllowEmpty.*.qml "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/component/"
 
-# The static dropbear: built by build_dropbear.sh (pinned Alpine container /
-# musl-gcc / --use-existing). Build it on demand if absent.
 if [ ! -f "$DROPBEAR" ]; then
-    echo "== dropbear (static musl) =="
     sh scripts/build_dropbear.sh
 fi
 cp "$DROPBEAR" "$OUT/payload/bin/dropbearmulti"
-chmod 755 "$OUT/payload/bin/wifi_daemon" "$OUT/payload/bin/dropbearmulti"
+# Pre-patched vendor mdnsd (setuid NOPed so it continues as root; see
+# scripts/run_stuff.sh "mdnsd continue as root" section).  Applied on the
+# car only when the MDNSD_ROOT_ARM marker is present.
+python3 scripts/patch_mdnsd.py "$SCOURGE_ROOTFS/app/bin/mdnsd" "$OUT/payload/bin/mdnsd.rooted"
+chmod 755 "$OUT/payload/bin/wifi_daemon" "$OUT/payload/bin/dropbearmulti" "$OUT/payload/bin/mdnsd.rooted"
 
 cp wifi.txt.sample "$OUT/payload/wifi.txt.sample"
 cp wifi.txt.sample "$OUT/README-wifi.txt"
@@ -85,7 +89,8 @@ cp "$ROOTFS/component/common/Q_ThemeImage.qml" "$OUT/backup/AppHomeScreen/qml_ec
 cp scripts/run_stuff.sh "$OUT/run_stuff.sh"
 cp scripts/run_stuff_restore.sh "$OUT/run_stuff_restore.sh"
 cp scripts/run_stuff_diag.sh "$OUT/run_stuff_diag.sh"
-chmod 755 "$OUT/run_stuff.sh" "$OUT/run_stuff_restore.sh" "$OUT/run_stuff_diag.sh"
+cp scripts/run_stuff_apdiag.sh "$OUT/run_stuff_apdiag.sh"
+chmod 755 "$OUT/run_stuff.sh" "$OUT/run_stuff_restore.sh" "$OUT/run_stuff_diag.sh" "$OUT/run_stuff_apdiag.sh"
 
 cat > "$OUT/README.txt" <<'EOF'
 Ioniq 5 Gen5W WiFi / CarPlay / SSH app — USB payload
@@ -107,14 +112,20 @@ Restore:
 
 Diagnostics:
   Copy run_stuff_diag.sh over run_stuff.sh on the stick and plug it in;
-  it writes wifi_diag.txt to the stick root (read-only).
+   it writes wifi_diag.txt to the stick root (read-only).
+  Optional run_stuff_apdiag.sh records a bounded, read-only AP/D-Bus header
+  trace. It never enables or restarts WLAN. No message bodies are captured.
 
 This does not flash firmware and does not touch the updater, bootloader or
 partitions.
 EOF
 
+# Package identity is written before the manifest so it is gated too. The ZIP
+# is regenerated only after its tree (including the manifest) is complete.
+python3 scripts/package_release.py "$OUT" --metadata-only
 # Manifest covers payload/ only; the loader md5-gates run_stuff.sh itself.
 ( cd "$OUT" && find payload -type f -print0 | sort -z | xargs -0 md5sum > manifest.md5 )
+python3 scripts/package_release.py "$OUT"
 
 echo "== done =="
 echo "USB tree: $OUT"

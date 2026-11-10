@@ -9,10 +9,20 @@ It follows the same deployment model as the Hello and Battery apps: a USB
 `/rw_data/wifi`, and a systemd service. Nothing is flashed; the updater,
 bootloader and partitions are untouched.
 
-**Status:** built and packaged; VM-validated on the vendor kernel/Qt
-(daemon, command forms, QML, installer/restore, Home/Star overlay close).
-On-car retest is pending for the radio paths; Wireless CarPlay is
-implemented but still needs the on-car iPhone test.
+**Status: host-tested, car validation pending.** The latest audit fixes include
+behavioral C tests, host Qt6 mouse hit-tests, and fake-root installer/rollback
+tests. They have not been validated on the car's Qt5/Wayland stack or real radio.
+Wireless CarPlay still needs the on-car iPhone test. Do not treat a local build
+or an installer success line as proof of association or CarPlay readiness.
+
+Client association and DHCP now have one owner: ConnMan. Credentials are sent
+only after its agent requests them; there is no direct `wpa_cli` association
+fallback. New hidden-network provisioning is not supported and fails explicitly.
+Importing credentials or public keys never enables WLAN, a mode, or SSH.
+
+AP startup, status, watchdog, teardown, scanning and SSH now share an actual-state
+probe. A lagging `Tethering=False` no longer causes a verified AP to be torn down.
+These AP-state fixes are host-tested only; the Nov 9 car bundles predate them.
 
 ---
 
@@ -38,7 +48,10 @@ implemented but still needs the on-car iPhone test.
   falls through to the home grid), and follows the repo overlay checklist:
   `open()`/`close()`, foreground gating, and auto-close on navigation. The
   steering-wheel Home/Star key is a session-bus event, so the daemon tails
-  it and writes `home.json`; the page closes on a new counter value:
+  it and writes `home.json`; the page closes on a new counter value.
+  `WifiPage` explicitly synchronizes `visible` and `requested`, so an older
+  Tweaks/Battery combo that assigns `wifiPage.visible = true` cannot leave
+  Exit ineffective by destroying a QML binding:
   - **Status** — WLAN on/off, mode, IP, AP state, SSH state, import button.
   - **Client** — imported SSID, scan results, connect/disconnect, import.
   - **CarPlay AP** — SSID/key, band/channel, AP state, CarPlay transport,
@@ -49,10 +62,10 @@ implemented but still needs the on-car iPhone test.
 - Runs `dropbear` with password auth for `car` / `electric` by default.
 - Writes status to `/rw_data/wifi/status.json`; the QML page polls it and
   falls back to the local HTTP API.
-- Uses the SMACK floor label `_` for the daemon and dropbear (the label the
-  Battery app proves works for D-Bus/socket access) and masks the OEM
+- Requests and verifies the SMACK exec label `_` for the daemon and dropbear;
+  effective runtime permissions still require on-car validation. It masks the OEM
   `supplicantmanager.path`/`.service` so it cannot respawn and steal the
-  wpa_supplicant control socket. Restore unmasks them.
+  wpa_supplicant control socket. Restore preserves pre-existing mask state.
 
 ---
 
@@ -67,6 +80,7 @@ wifi_app/
   scripts/run_stuff.sh           installer (copy to USB root)
   scripts/run_stuff_restore.sh   restore (rename to run_stuff.sh)
   scripts/run_stuff_diag.sh      read-only diagnostic (rename to run_stuff.sh)
+  scripts/run_stuff_apdiag.sh    opt-in bounded AP/D-Bus header trace
   scripts/make_icons.py          generates the WiFi glyphs
   artifacts/qml/...              WifiPage + patched home-screen QML
   artifacts/assets/wifi/         wifi_icon_n.png, wifi_icon_d.png
@@ -90,7 +104,10 @@ sh scripts/build_payload.sh
 ```
 
 This builds `src/wifi_daemon`, regenerates QML artifacts and icons, copies the
-static `dropbearmulti` from the earlier owner-access project, and assembles:
+static `dropbearmulti` from the package's pinned build (or `SCOURGE_DROPBEAR`
+owner-provided static binary), and assembles the output below. Set
+`SCOURGE_ROOTFS` to your extracted, pinned 260128 rootfs if it is not staged
+at `work/rootfs`; it is also used for the disarmed mDNS experiment artifact.
 
 ```text
 out/usb/            copied to the USB stick
@@ -106,6 +123,26 @@ out/wifi_app_usb.zip
 ```
 
 Copy the **contents** of `out/usb/` to the root of a FAT/exFAT USB stick.
+
+The ZIP is regenerated from that same staging tree. `payload/build-id.txt`,
+`payload/build.json`, daemon status and install results identify the build.
+The installer requires a newly written status file with the expected identity;
+it reports `REBOOT_REQUIRED` rather than claiming the UI restarted when its PID
+did not change. SMACK exec-label failures abort and roll back; no global policy
+is disabled. QML access labels are best-effort: `onlycap=Privileged` rejects
+`security.SMACK64` writes from the `_` USB installer context, so the copied QML
+keeps its inherited `_` floor label (readable by AppHomeScreen) and the install
+logs a WARNING instead of rolling back on that step. An unexpected inherited
+label still aborts. Existing ambiguous legacy account/VBT ownership is not guessed.
+New firewall rules live in `WIFI_APP_SSH` / `WIFI_APP_CP` chains, so cancelling
+a worker cannot lose track of a chosen SSH port. Legacy untagged firewall rules
+are not automatically deleted because they may belong to vendor/owner tooling.
+
+Run `make test` for behavioral, Qt input, packaging and fake-root install/restore
+checks (host Qt6 development tools and Node.js are needed for UI tests). Tests
+use private paths under `/tmp/opencode`; they do not run vehicle binaries or
+modify the host account database. Exported logs are filtered event summaries,
+not raw historical credential-bearing transcripts; original logs remain private.
 
 ---
 
@@ -151,9 +188,19 @@ and press **On** or **CarPlay AP**.
 Put this at the USB root. Key=value is preferred; a plain two-line
 `SSID` / `password` file also works.
 
+### Multiple client networks (priority order)
+
+The client (station) mode supports up to 4 networks in priority order:
+the daemon scans once and connects to the **first configured network
+that is visible**. The plain `ssid`/`psk` pair is network 1 (highest
+priority); `ssid2`/`psk2` … `ssid4`/`psk4` add lower-priority fallbacks
+(e.g. phone hotspot first, home network second).
+
 ```ini
-ssid=MyHomeWiFi
-psk=MyHomePassword
+ssid=iPhone
+psk=iphone-hotspot-password
+ssid2=MyHomeWiFi
+psk2=MyHomePassword
 
 carplay_ssid=IONIQ5-CarPlay
 carplay_psk=ChangeMe-CarPlay
@@ -162,9 +209,20 @@ carplay_channel=36
 carplay_hidden=0
 carplay_max_sta=2
 
-ssh=1
 ssh_port=2222
 ```
+
+`client_networks` in `status.json` lists the imported networks in
+priority order (never the passphrases); the WiFi page shows the list and
+which one is connected.
+
+### CarPlay identity (`carplay_btaddr` is required)
+
+`carplay_btaddr` is the car's **Bluetooth MAC** and is required for the
+CarPlay information element: without it the daemon skips the IE with
+"Bluetooth address unknown" and the iPhone will not offer wireless
+CarPlay. Set the actual Bluetooth MAC of your head unit; no universal
+WiFi-to-Bluetooth MAC offset is assumed.
 
 Optional CarPlay identity overrides:
 
@@ -173,10 +231,50 @@ carplay_manufacturer=Hyundai
 carplay_model=Ioniq 5
 carplay_name=Ioniq 5
 carplay_id=IONIQ5-260128
-carplay_btaddr=00:00:00:00:00:00
 ```
 
 The app never logs the PSK. `config.conf` is mode `0600`.
+
+---
+
+## Optional mdnsd "continue as root" patch (`MDNSD_ROOT_ARM`)
+
+**Experimental, not VM/car-validated; leave disarmed.** The vendor `mdnsd`
+drops to `nobody`, and multicast `EPERM` was observed on-car. Whether the
+uid drop causes it is unresolved. `scripts/patch_mdnsd.py` generates
+`payload/bin/mdnsd.rooted` from owner-provided firmware with SHA256 pins
+in `config/firmware_locks.env` and exact call-byte verification. The
+five-byte `setuid` call at `0x43c2` is NOPed; no vendor binary is committed.
+Retaining root is a diagnostic experiment, not a confirmed CarPlay fix.
+
+The patch is **opt-in**: create the marker file `MDNSD_ROOT_ARM` at the
+USB stick root before installing. The installer then:
+
+1. verifies the on-car `/app/bin/mdnsd` matches the stock md5 (or is
+   already the patched md5) and the payload copy matches the patched
+   md5 — anything else aborts the patch step without touching the
+   vendor binary;
+2. backs the stock binary up to `/rw_data/wifi/backup/mdnsd.stock`;
+3. copies the patched binary over it (`cp -f` keeps the inode and
+   therefore the vendor `SMACK64EXEC=App::projection` label);
+4. verifies the installed md5 and restarts `carplay_mdnsd.service`.
+
+`run_stuff_restore.sh` restores the stock binary from the backup and
+removes the `carplay_mdnsd` restart drop-in. The installer also
+installs a systemd drop-in (`Restart=always`) for `carplay_mdnsd`
+unconditionally: the vendor unit is `RemainAfterExit=true`, so a dead
+mdnsd still reports "active" and nothing restarts it.
+
+---
+
+## Firewall
+
+The daemon's `WIFI_APP_CP`/`WIFI_APP_SSH` chains are hooked into **both**
+`INPUT` and `OUTPUT` on `wlan0`. The OUTPUT hook matters: the vendor
+`HARDEN_LOUT` chain silently drops all multicast (`224.0.0.0/4`,
+`ff00::/8`) unless a rule accepts it first, and the stock rules only do
+that for the USB `ncm0` interface — without the OUTPUT hook the phone
+never sees the car's `_airplay._tcp` records even with the AP up.
 
 ---
 
@@ -259,6 +357,43 @@ If pairing reports “Bluetooth control unavailable”, the exact vendor D-Bus
 name differs on that build; the diagnostic stick prints the session-bus names
 and the adapter introspection XML so the candidate list can be updated.
 
+### AP readiness and recovery
+
+- Readiness requires a fresh AP role, the **actual** expected SSID from `iw`,
+  WEXT or completed supplicant AP status, and a usable IPv4 address. ConnMan's
+  configured `TetheringIdentifier` is not broadcast evidence. Conflicting or
+  unsupported observations stay unknown. A recorded previous station address
+  (`ap.station-ip`) is excluded, including across worker/daemon restarts.
+- Startup requires three ready samples and allows up to 30 seconds for an
+  interface/address to settle. A working AP is reused even if `Tethering=False`.
+  An existing AP with a different SSID is not automatically torn down; use an
+  explicit Restart or Stop/Start after changing settings.
+- A single 5 GHz → 2.4 GHz fallback is allowed only if an AP was **never
+  observed**, absence is confirmed, and teardown completes. A late AP blocks
+  fallback teardown. `enabled_then_lost`, pending/unknown state, and permission
+  errors do not cause a blind frequency retry. The watchdog backs off; pending
+  observations receive a 30-second grace period, stale/unknown probes do not
+  trigger radio resets, and recovery reuses an existing AP.
+- Explicit Stop, Restart and switching to client mode may stop a real AP, but
+  must confirm actual non-AP state and `Tethering=False` before another enable.
+  Off is not successful merely because the property is false.
+- Active WiFi station services are disconnected through ConnMan during AP
+  setup, not just the imported SSID. Cellular, unrelated technologies, saved
+  profiles and persistent AutoConnect settings are untouched. Unexpected station
+  association during startup is reconciled once; unresolved races fail safely.
+- SSH's shared start path rechecks the requested role and address. CarPlay
+  requires AP readiness, client mode requires association and matching ConnMan
+  address readback. A station IP alone cannot start CarPlay SSH.
+
+Status adds `ap_interface`, `ap_state` (0 unknown, 1 absent, 2 interface-up/pending,
+3 ready), and `ap_tether_field` (-1 unknown, 0 false, 1 true). `ap_active` means
+actual readiness. `observations_fresh` still governs every cached observation.
+Stage-specific messages and sanitized `AP stage=` events retain startup history.
+
+The old logs establish AP enable followed by a local D-Bus disconnect; they do
+**not** establish who sent it or prove ConnMan property lag caused teardown.
+The new logic removes that failure path without claiming to identify the caller.
+
 ### Firmware-verified command syntax
 
 The car binaries were executed with the firmware's own loader to capture
@@ -270,12 +405,12 @@ their parser behaviour, not just their help text:
 | CarPlay IE | `connmanctl tether_carplay_ie wifi on <mfg> <model> <name> <id> <btaddr>` |
 | Client key | ConnMan agent flow: `agent on`, `connect <service>`, passphrase on stdin |
 | `wpa_cli` | `wpa_cli -p /var/run/wpa_supplicant -i wlan0 ...` |
-| `wpa_supplicant` v2.5 | no `-f`, no `-B`; `-u -Dnl80211,wext -i wlan0 -c <conf> -P <pid>` |
+| `wpa_supplicant` v2.5 | no `-f`, no `-B`; `-u -Dnl80211,wext -i wlan0 -c <conf> -O /var/run/wpa_supplicant`; detached with `setsid`, PID captured by the launcher |
 
 This build has **no `connmanctl config --wifi`**; the old command printed
 `Error '--wifi': Invalid argument` and connmand then refused the connect
 with `Not registered` because no agent was registered. The daemon now runs
-the agent flow and redacts the passphrase from captured output.
+the prompt-driven agent flow without logging raw interactive transcripts.
 
 ---
 
@@ -283,6 +418,23 @@ the agent flow and redacts the passphrase from captured output.
 
 Rename `run_stuff_diag.sh` to `run_stuff.sh` on the stick and plug it in. It
 writes `wifi_diag.txt` to the stick root and `/rw_data/wifi/diag.txt`.
+
+For an **opt-in AP trace**, use `run_stuff_apdiag.sh` instead. It is not run by
+the installer or daemon. It captures 25 seconds of D-Bus **profile headers only**
+for supplicant Disconnect/interface changes and WiFi technology property calls,
+with best-effort sender → PID/executable/SMACK label/capability resolution.
+Before/after snapshots include actual interface state, whitelisted ConnMan and
+supplicant fields, build identity, and `get ap_scan`. It writes a new
+`wifi_apdiag_<timestamp>_<pid>/` directory, never overwriting historical bundles.
+It does **not** enable WLAN or trigger a restart: use the app's Restart button
+manually during the capture if desired. Individual commands have deadlines;
+the whole script is limited to 90 seconds (plus forced-kill headroom).
+
+Vendor `timeout -k`, D-Bus profile mode, WEXT and `get ap_scan` support still need
+car validation. Unsupported profile mode never falls back to raw message bodies.
+Short-lived bus names may disappear before resolution; missing evidence is not
+proof of an absent process or denial. No production `ap_scan` change is made.
+Treat these exports as sensitive network/process metadata even without keys.
 
 ### Live console
 
@@ -317,8 +469,9 @@ ssh.log              dropbear output
 install.log          the installer's log
 status.json          last status snapshot
 config.conf          config with psk/carplay_psk redacted
-state.txt            live snapshot: ps, connmanctl, wpa_cli status and
-                     scan_results, iw, ifconfig, iptables, dmesg tail,
+state.txt            build ID and monotonic timestamp; ps, connmanctl,
+                      wpa_cli status/get ap_scan/scan_results, iw/iwconfig,
+                      ifconfig, iptables, dmesg tail,
                      ENABLE_WIRELESS_CARPLAY
 ```
 
@@ -357,7 +510,7 @@ Backups under `/rw_data/wifi/backup/` are kept; the live config and imported cre
 
 ## VM validation
 
-The app has been validated against the real firmware in the project's
+Earlier revisions were exercised against the real firmware in the project's
 QEMU/KVM harness (vendor kernel + decrypted 260128 rootfs): vendor Qt 5.4
 qmllint over every shipped QML file, the daemon on the guest kernel, the
 tether/agent command forms against real connmand, the Home/Star session-bus
@@ -365,6 +518,9 @@ watcher, log dumps onto a real Tuxera texfat stick, full install/restore on
 the real QML tree, and a real AppHomeScreen launch that loads the patched
 qml_eco3.0 tree and draws the patched Advanced page with zero QML errors.
 See `docs/FINDINGS.md` §5.2f.
+Those historical runs do not validate the current audit fixes. The current
+revision has host behavior/Qt6/fake-root coverage only; the vendor Qt5, real
+radio, live SMACK policy and iPhone transitions must be tested again.
 
 ## Known limitations / risks
 

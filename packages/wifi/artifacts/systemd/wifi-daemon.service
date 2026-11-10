@@ -2,17 +2,18 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 [Unit]
 Description=WiFi manager daemon (Ioniq 5 Gen5W)
-After=multi-user.target Dbuslaunch.service connman.service
+After=Dbuslaunch.service connman.service
 Wants=connman.service
 ConditionPathExists=/rw_data/wifi/wifi_daemon
 
 [Service]
 Type=simple
+UMask=0077
 Environment=PATH=/bin:/sbin:/usr/bin:/usr/sbin
 ExecStart=/bin/sh -c 'exec /rw_data/wifi/wifi_daemon --port 8090 --status-file /rw_data/wifi/status.json >> /rw_data/wifi/daemon.log 2>&1'
 Restart=always
 RestartSec=3
-TimeoutStopSec=10
+TimeoutStopSec=25
 
 [Install]
 WantedBy=multi-user.target

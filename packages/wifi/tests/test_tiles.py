@@ -120,8 +120,10 @@ def main() -> int:
 
     require("property bool requested" in page,
             "overlay is missing the requested state")
-    require("visible: requested && !atOtherApp" in page,
-            "overlay visibility is not gated on request and foreground")
+    require("visible: false" in page,
+            "overlay visibility must be explicitly managed, not a fragile binding")
+    require("onVisibleChanged:" in page and "onRequestedChanged:" in page,
+            "overlay does not synchronize legacy visible assignments with requested")
     require("function open()" in page and "function close()" in page,
             "overlay does not expose open()/close()")
     require("onButtonBackClicked: root.close()" in page,
@@ -132,8 +134,8 @@ def main() -> int:
             "overlay does not close on page change")
     require("onRequestHomeByPPChanged" in page,
             "overlay does not close on requestHomeByPP")
-    require("onHomeSeqChanged" in page and "homeSeq" in page,
-            "overlay does not consume the daemon home_seq")
+    require("function acceptHome(d)" in page and "homeBaselineValid" in page,
+            "overlay does not consume generation-aware Home state")
     require("preventStealing: true" in page, "input shield cannot prevent stealing")
     require("acceptedButtons: Qt.AllButtons" in page,
             "input shield does not accept all buttons")

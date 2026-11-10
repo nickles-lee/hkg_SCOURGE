@@ -426,13 +426,8 @@ def patch_custom(src: str) -> str:
 def patch_theme_image() -> None:
     src = os.path.join(BASE, "stock", "component", "Q_ThemeImage.qml")
     if not os.path.exists(src):
-        rootfs = os.environ.get(
-            "SCOURGE_ROOTFS",
-            os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "..", "..", "..", "work", "rootfs"))
-        src = os.path.join(rootfs, "app", "share", "AppHomeScreen",
-                           "qml_eco3.0", "component", "common",
-                           "Q_ThemeImage.qml")
+        rootfs = os.environ.get("SCOURGE_ROOTFS", os.path.join(ROOT, "../../work/rootfs"))
+        src = os.path.join(rootfs, "app/share/AppHomeScreen/qml_eco3.0/component/common/Q_ThemeImage.qml")
     text = read(src)
     if 'indexOf("file://")' not in text:
         old = 'source: themeSource !== "" ? (themeSource + AppHomeModel.dayLightSuffix) : themeSource'

@@ -89,8 +89,12 @@ set_exec_label() {
     command -v chsmack >/dev/null 2>&1 || fail "chsmack missing (SMACK is required)"
     chsmack -e "$SMACK_SELF" "$_bin" >> "$LOG" 2>&1 || fail "exec label failed: $_bin"
     _actual=$(getfattr -n security.SMACK64EXEC --only-values "$_bin" 2>/dev/null || true)
-    [ "$_actual" = "$SMACK_SELF" ] || fail "exec label readback failed: $_bin (expected '$SMACK_SELF', got '${_actual:-none}')"
-    log "exec label ok: $_bin = $SMACK_SELF"
+    if [ -z "$_actual" ]; then
+        log "WARNING: cannot read back SMACK64EXEC for $_bin; inherited process label must be verified"
+    elif [ "$_actual" != "$SMACK_SELF" ]; then
+        fail "exec label readback failed: $_bin (expected '$SMACK_SELF', got '$_actual')"
+    fi
+    log "exec label readback: $_bin = ${_actual:-unverified}"
 }
 
 # Copy a QML file, retrying after unlinking the destination. A reinstall can

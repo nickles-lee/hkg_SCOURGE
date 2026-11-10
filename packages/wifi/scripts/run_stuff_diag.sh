@@ -49,18 +49,19 @@ raw 'systemctl is-enabled supplicantmanager.path supplicantmanager.service 2>&1'
 raw 'systemctl status carplay_iAP2.service carplay_mdnsd.service 2>&1 | head -120'
 raw 'systemctl status wifi-daemon.service 2>&1 | head -160'
 raw 'systemctl cat wifi-daemon.service 2>&1'
-raw 'journalctl -u wifi-daemon.service --no-pager -n 120 2>&1'
+raw 'journalctl -u wifi-daemon.service --no-pager -n 120 2>&1 | grep -E "wifi_daemon started:|watchdog:|apply (ok|failed)| msg:"'
 raw 'ps w 2>/dev/null | grep -E "connmand|wpa_supplicant|supplicantmanager|iAP2|mdnsd|AppProjection|vbtd|wifi_daemon|dropbear" | grep -v grep'
 
 sec "WiFi supplicant"
 raw 'ps w 2>/dev/null | grep -E "wpa_supplicant|supplicantmanager|connmand" | grep -v grep'
 raw 'wpa_cli -p /var/run/wpa_supplicant -i wlan0 ping 2>&1'
 raw 'wpa_cli -p /var/run/wpa_supplicant -i wlan0 status 2>&1'
+raw 'wpa_cli -p /var/run/wpa_supplicant -i wlan0 get ap_scan 2>&1'
 raw 'wpa_cli -p /var/run/wpa_supplicant -i wlan0 list_networks 2>&1'
 raw 'wpa_cli -p /var/run/wpa_supplicant -i wlan0 scan_results 2>&1 | head -40'
 raw 'cat /rw_data/wifi/wpa_supplicant.conf 2>&1'
 raw 'cat /etc/wpa_supplicant.conf 2>&1'
-raw 'cat /rw_data/wifi/wpa_supplicant.log 2>/dev/null | tail -n 120'
+raw 'tail -n 120 /rw_data/wifi/wpa_supplicant.log 2>/dev/null | grep -E "State:|CTRL-EVENT-|AP-(ENABLED|DISABLED)|Failed to start AP functionality"'
 raw 'getfattr -n security.SMACK64 /usr/sbin/wpa_supplicant /usr/sbin/wpa_cli /usr/sbin/connmanctl /rw_data/wifi/wifi_daemon /rw_data/wifi/bin/dropbearmulti 2>&1'
 raw 'getfattr -n security.SMACK64EXEC /usr/sbin/wpa_supplicant /usr/sbin/wpa_cli /usr/sbin/connmanctl /rw_data/wifi/wifi_daemon /rw_data/wifi/bin/dropbearmulti 2>&1'
 raw 'ls -la /var/run/wpa_supplicant 2>&1'
@@ -75,8 +76,7 @@ raw 'ls -l /sys/class/bluetooth 2>&1'
 raw 'cat /sys/class/bluetooth/hci0/address 2>&1'
 raw 'cat /sys/class/bluetooth/hci0/name 2>&1'
 raw 'dmesg 2>/dev/null | grep -iE "bluetooth|hci0|btusb|patchram" | tail -80'
-raw 'cat /app/data/vbt/VBTConfig.json 2>/dev/null'
-raw 'cat /rw_data/app_data/vbt/VBTConfig.json 2>/dev/null'
+raw 'grep -n ENABLE_WIRELESS_CARPLAY /app/data/vbt/VBTConfig.json /rw_data/app_data/vbt/VBTConfig.json 2>/dev/null'
 raw 'grep -n "ENABLE_WIRELESS_CARPLAY" /app/data/vbt/VBTConfig.json /rw_data/app_data/vbt/VBTConfig.json 2>/dev/null'
 raw 'cat /tmp/session_appmgr.env 2>&1; cat /tmp/session_appmgr 2>&1'
 raw '. /tmp/session_appmgr.env 2>/dev/null; dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>&1 | grep -iE "blue|vbt|Bluetooth"'
@@ -89,7 +89,7 @@ raw 'echo -n "secure_console="; cat /sys/module/micom/parameters/secure_console 
 raw 'echo -n "iptable_debug="; cat /sys/module/micom/parameters/iptable_debug 2>/dev/null'
 raw 'ls -l /tmp/secure_console_disable /tmp/shells 2>&1'
 raw 'readlink -f /etc/passwd /etc/shadow /etc/shells 2>&1'
-raw 'grep -E "^car:" /etc/passwd /etc/passwd.legacy /etc/passwd.secure /etc/shadow /etc/shadow.Global 2>/dev/null'
+raw 'grep -E "^car:" /etc/passwd /etc/passwd.legacy /etc/passwd.secure 2>/dev/null'
 raw 'ls -l /usr/sbin/dropbear* /usr/sbin/dropbearmulti 2>&1'
 raw 'systemctl status dropbear.socket dropbear@*.service 2>&1 | head -100'
 raw 'ss -ltnp 2>/dev/null | grep -E ":22 |:2222 "'
@@ -101,8 +101,7 @@ raw 'connmanctl services 2>&1'
 
 sec "VBT / CarPlay config"
 raw 'ls -l /app/data/vbt /rw_data/app_data/vbt 2>&1'
-raw 'cat /app/data/vbt/VBTConfig.json 2>/dev/null'
-raw 'cat /rw_data/app_data/vbt/VBTConfig.json 2>/dev/null'
+raw 'grep -n ENABLE_WIRELESS_CARPLAY /app/data/vbt/VBTConfig.json /rw_data/app_data/vbt/VBTConfig.json 2>/dev/null'
 raw 'ls -l /app/data/AppProjection /rw_data/app_data/AppProjection 2>&1'
 raw 'cat /app/data/AppProjection/USBSerial.txt 2>/dev/null'
 raw 'cat /rw_data/app_data/AppProjection/USBSerial.txt 2>/dev/null'
@@ -136,16 +135,24 @@ raw 'for f in /app/share/AppHomeScreen/qml_eco3.0/component/WifiTile.qml /app/sh
 raw 'ls -l /app/share/AppHomeScreen/wifi /app/share/AppHomeScreen/hello /app/share/AppHomeScreen/battery /app/share/AppHomeScreen/tweaks 2>&1'
 
 sec "install state"
+raw 'sed -n '\''s/.*"build_id":"\([^"]*\)".*/build_id=\1/p'\'' /rw_data/wifi/status.json 2>/dev/null'
 raw 'cat /rw_data/wifi/install.log 2>/dev/null | tail -n 160'
 raw 'cat /rw_data/wifi/config.conf 2>/dev/null | sed "s/^psk=.*/psk=<redacted>/; s/^carplay_psk=.*/carplay_psk=<redacted>/"'
 raw 'cat /rw_data/wifi/status.json 2>/dev/null'
 
 sec "daemon state"
+raw 'grep -RIn "wifiPage\\.\\(visible\\|open\\|close\\)" /app/share/AppHomeScreen/qml_eco3.0 2>/dev/null | head -80'
+raw 'md5sum /app/share/AppHomeScreen/qml_eco3.0/HomeScreen/WifiPage.qml /app/share/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.qml /app/share/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Wide.qml 2>&1'
+raw 'journalctl -b --no-pager 2>/dev/null | grep -iE "WifiPage|qml" | tail -n 200'
 raw 'cat /rw_data/wifi/status.json 2>/dev/null'
-raw 'tail -n 120 /rw_data/wifi/daemon.log 2>/dev/null'
-raw 'tail -n 120 /rw_data/wifi/wpa_supplicant.log 2>/dev/null'
+raw 'tail -n 120 /rw_data/wifi/daemon.log 2>/dev/null | grep -E "wifi_daemon started:|watchdog:|apply (ok|failed)| msg:"'
+raw 'tail -n 120 /rw_data/wifi/wpa_supplicant.log 2>/dev/null | grep -E "State:|CTRL-EVENT-|AP-(ENABLED|DISABLED)|Failed to start AP functionality"'
 raw 'cat /rw_data/wifi/config.conf 2>/dev/null | sed "s/^psk=.*/psk=<redacted>/; s/^carplay_psk=.*/carplay_psk=<redacted>/"'
 
+# Structural filtering also covers historical/current keys that differ from
+# config.conf. Omit entire secret-bearing JSON/config/transcript lines.
+awk '{ lower=tolower($0); if (lower ~ /psk|passphrase|password|private key|hexdump|connmanctl>|error '\''/) next; print }' "$OUT" > "$OUT.redacted.$$" || exit 1
+mv -f "$OUT.redacted.$$" "$OUT" || exit 1
 cp -f "$OUT" "$RW_OUT" 2>/dev/null || true
 echo "wrote $OUT"
 exit 0

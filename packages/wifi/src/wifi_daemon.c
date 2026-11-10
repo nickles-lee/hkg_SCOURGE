@@ -1,5 +1,4 @@
-/*
- * SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+/* SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 /*
@@ -42,10 +41,16 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 
+#ifndef APP_DIR
 #define APP_DIR        "/rw_data/wifi"
+#endif
+#ifndef WIFI_BUILD_ID
+#define WIFI_BUILD_ID "development"
+#endif
 #define CONFIG_PATH    APP_DIR "/config.conf"
 #define STATUS_PATH    APP_DIR "/status.json"
 #define LOG_PATH       APP_DIR "/daemon.log"
@@ -62,8 +67,10 @@
 #define WPA_LOG        APP_DIR "/wpa_supplicant.log"
 #define WPA_PIDFILE    APP_DIR "/wpa_supplicant.pid"
 #define APPLY_RESULT   APP_DIR "/apply.result"
+#define SCAN_RESULT    APP_DIR "/scan.json"
 #define BT_STATE       APP_DIR "/bt.state"
 #define SSH_BOUND      APP_DIR "/ssh.bound"
+#define AP_STATION_IP  APP_DIR "/ap.station-ip"
 #define HOME_STATE     APP_DIR "/home.json"
 #define SESSION_ENV    "/tmp/session_appmgr.env"
 #define SESSION_ADDR   "/tmp/session_appmgr"
@@ -87,12 +94,21 @@
 
 typedef enum { MODE_OFF = 0, MODE_CLIENT, MODE_CARPLAY } wifi_mode_t;
 
+#define WIFI_NETS_MAX 4
+
 typedef struct {
     wifi_mode_t mode;
     bool wlan_on;
 
-    char ssid[80];
+    char ssid[80];           /* client network 1 (highest priority) */
     char psk[160];
+
+    /* Client networks 2..4 by priority.  net_count is 1..WIFI_NETS_MAX;
+     * it is 1 for a legacy single-network config (config_version < 3). */
+    char net2_ssid[80];  char net2_psk[160];
+    char net3_ssid[80];  char net3_psk[160];
+    char net4_ssid[80];  char net4_psk[160];
+    int  net_count;
 
     char cp_ssid[80];
     char cp_psk[160];
@@ -116,6 +132,10 @@ typedef struct {
 
 static config_t g_cfg;
 static volatile sig_atomic_t g_stop;
+static bool g_log_stderr = true;   /* one-shot CLI mode; daemon redirects stderr into the same log file */
+static bool g_pure_query;
+static int g_apply_gen;            /* increments per apply; stale children cannot publish */
+static bool g_carplay_ie;          /* last observed CarPlay IE state */
 static const char *g_status_path = STATUS_PATH;
 static char g_last_msg[256] = "starting";
 static int64_t g_last_apply_ms;
@@ -149,6 +169,48 @@ static char g_home_line[512];
 static size_t g_home_line_len;
 static char g_home_member[48];
 
+typedef enum { WORK_MODE, WORK_SCAN, WORK_SSH, WORK_PAIR_STOP, WORK_DUMP } work_t;
+static work_t g_work_kind = WORK_MODE, g_pending_kind;
+static bool g_work_pending, g_pending_pair, g_apply_cancelled;
+static bool g_current_pair, g_dump_requested;
+static bool g_pairing_stop_requested;
+static bool g_pair_stop_confirmed;
+static bool g_ap_restart_requested; /* explicit user restart, not watchdog recovery */
+static int g_scan_gen = -1;
+static bool g_network_failed;
+static int64_t g_last_mode_ms;
+static int64_t g_cancel_ms;
+static pid_t g_probe_pid;
+static int g_probe_fd = -1;
+static int64_t g_probe_start_ms, g_last_probe_ms;
+static bool g_probe_child;
+static int64_t g_ap_unready_ms;
+static int g_ap_unready_gen = -1;
+
+typedef enum { AP_UNKNOWN, AP_ABSENT, AP_INTERFACE_UP, AP_READY } ap_state_t;
+typedef struct {
+    ap_state_t state;
+    int role, tether; /* -1 unknown, 0 absent/non-AP or false, 1 AP or true */
+    bool station, conflict;
+    int64_t sampled_ms;
+    char ssid[80], configured_ssid[80], ip[64];
+} ap_probe_t;
+
+typedef struct {
+    int gen;
+    bool driver, associated, ap_on, carplay_svc, mdns_svc, ssh_ours;
+    ap_probe_t ap;
+    bool vendor_ssh_22, debug_console;
+    int signal, clients, secure_console;
+    char ip[64], ssid[80], ap_ssid[80];
+} observation_t;
+static observation_t g_observed;
+static int64_t g_observed_ms;
+
+static void home_monitor_tick(void);
+static void apply_reap(void);
+static void probe_tick(void);
+
 /* ------------------------------------------------------------------ */
 /* small helpers                                                       */
 /* ------------------------------------------------------------------ */
@@ -175,6 +237,66 @@ static char *trim(char *s)
     return s;
 }
 
+/* ---- multi-network client config (priority order) --------------------- */
+/* Priority-ordered access to the configured client networks.  Index 0 is
+ * the primary (legacy g_cfg.ssid/psk). */
+static const char *net_ssid(int i)
+{
+    switch (i) {
+    case 0: return g_cfg.ssid;
+    case 1: return g_cfg.net2_ssid;
+    case 2: return g_cfg.net3_ssid;
+    case 3: return g_cfg.net4_ssid;
+    }
+    return "";
+}
+
+static const char *net_psk(int i)
+{
+    switch (i) {
+    case 0: return g_cfg.psk;
+    case 1: return g_cfg.net2_psk;
+    case 2: return g_cfg.net3_psk;
+    case 3: return g_cfg.net4_psk;
+    }
+    return "";
+}
+
+static void set_net_ssid(int i, const char *v)
+{
+    char *dst = NULL; size_t n = 0;
+    switch (i) {
+    case 0: dst = g_cfg.ssid;        n = sizeof(g_cfg.ssid);        break;
+    case 1: dst = g_cfg.net2_ssid;   n = sizeof(g_cfg.net2_ssid);   break;
+    case 2: dst = g_cfg.net3_ssid;   n = sizeof(g_cfg.net3_ssid);   break;
+    case 3: dst = g_cfg.net4_ssid;   n = sizeof(g_cfg.net4_ssid);   break;
+    }
+    if (dst) str_copy(dst, n, v);
+}
+
+static void set_net_psk(int i, const char *v)
+{
+    char *dst = NULL; size_t n = 0;
+    switch (i) {
+    case 0: dst = g_cfg.psk;         n = sizeof(g_cfg.psk);         break;
+    case 1: dst = g_cfg.net2_psk;    n = sizeof(g_cfg.net2_psk);    break;
+    case 2: dst = g_cfg.net3_psk;    n = sizeof(g_cfg.net3_psk);    break;
+    case 3: dst = g_cfg.net4_psk;    n = sizeof(g_cfg.net4_psk);    break;
+    }
+    if (dst) str_copy(dst, n, v);
+}
+
+/* Number of configured client networks (a net counts when its SSID is set). */
+static int net_total(void)
+{
+    int count = 0;
+    for (int i = 0; i < WIFI_NETS_MAX; i++)
+        if (net_ssid(i)[0]) count++;
+    return count;
+}
+
+static void redact_secret(char *buf, const char *secret);
+
 static void log_msg(const char *fmt, ...)
 {
     char buf[1024];
@@ -182,8 +304,13 @@ static void log_msg(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+    for (int i = 0; i < WIFI_NETS_MAX; i++) redact_secret(buf, net_psk(i));
+    redact_secret(buf, g_cfg.cp_psk);
 
-    FILE *f = fopen(LOG_PATH, "a");
+    int logfd = g_pure_query ? -1 : open(LOG_PATH, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    if (logfd >= 0) fchmod(logfd, 0600);
+    FILE *f = logfd >= 0 ? fdopen(logfd, "a") : NULL;
+    if (!f && logfd >= 0) close(logfd);
     if (f) {
         time_t t = time(NULL);
         struct tm tm;
@@ -193,7 +320,11 @@ static void log_msg(const char *fmt, ...)
                 tm.tm_hour, tm.tm_min, tm.tm_sec, buf);
         fclose(f);
     }
-    fprintf(stderr, "%s\n", buf);
+    /* In daemon mode the service redirects stderr into LOG_PATH already;
+     * writing there too duplicates every line.  One-shot CLI invocations
+     * keep stderr output. */
+    if (g_log_stderr && !g_in_child)
+        fprintf(stderr, "%s\n", buf);
 }
 
 static void set_msg(const char *fmt, ...)
@@ -205,7 +336,75 @@ static void set_msg(const char *fmt, ...)
     log_msg("msg: %s", g_last_msg);
 }
 
-/* Run a shell command, discard output.  Returns exit status or -1. */
+/* Bounded command execution. Workers own a process group: a command deadline
+ * kills that disposable group, never a detached, persistent supplicant. No
+ * secret-bearing command text is logged. The parent uses cached observations
+ * and never runs network commands from its HTTP/event loop. */
+#ifdef WIFI_TEST
+static int (*test_command)(char *, size_t, const char *);
+static bool (*test_work)(work_t, bool);
+static int test_iface = -1, test_owned_wpa = -1;
+#endif
+static int run_command(char *out, size_t outsz, const char *cmd, int timeout_ms)
+{
+    if (out && outsz) out[0] = 0;
+#ifdef WIFI_TEST
+    if (test_command) return test_command(out, outsz, cmd);
+#endif
+    if (g_stop) return -1;
+    int fds[2];
+    if (pipe2(fds, O_CLOEXEC) != 0) return -1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (!g_in_child) setpgid(0, 0);
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
+        int nul = open("/dev/null", O_RDONLY);
+        if (nul >= 0) { dup2(nul, STDIN_FILENO); close(nul); }
+        dup2(fds[1], STDOUT_FILENO);
+        close(fds[0]); close(fds[1]);
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+    close(fds[1]);
+    if (pid < 0) { close(fds[0]); return -1; }
+    if (!g_in_child) setpgid(pid, pid);
+    fcntl(fds[0], F_SETFL, O_NONBLOCK);
+    size_t used = 0;
+    bool eof = false, reaped = false;
+    int st = 0;
+    int64_t until = now_ms() + timeout_ms;
+    while (!eof || !reaped) {
+        char buf[1024];
+        ssize_t nr;
+        while ((nr = read(fds[0], buf, sizeof(buf))) > 0) {
+            if (out && used + 1 < outsz) {
+                size_t take = (size_t)nr;
+                if (take > outsz - used - 1) take = outsz - used - 1;
+                memcpy(out + used, buf, take); used += take; out[used] = 0;
+            }
+        }
+        if (nr == 0) eof = true;
+        if (!reaped && waitpid(pid, &st, WNOHANG) == pid) reaped = true;
+        if (eof && reaped) break;
+        if (g_stop || now_ms() >= until) {
+            close(fds[0]);
+            if (g_in_child && getpgrp() == getpid()) {
+                log_msg("worker command deadline/cancellation reached");
+                kill(-getpgrp(), SIGKILL);
+                _exit(124);
+            }
+            kill(-pid, SIGKILL); kill(pid, SIGKILL);
+            if (!reaped) while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+            return 124;
+        }
+        struct pollfd pfd = {.fd = fds[0], .events = POLLIN};
+        poll(&pfd, 1, 30);
+    }
+    close(fds[0]);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
 static int sh(const char *fmt, ...)
 {
     char cmd[2048];
@@ -214,16 +413,9 @@ static int sh(const char *fmt, ...)
     vsnprintf(cmd, sizeof(cmd), fmt, ap);
     va_end(ap);
 
-    FILE *p = popen(cmd, "r");
-    if (!p) return -1;
-    char buf[256];
-    while (fgets(buf, sizeof(buf), p)) { /* drain */ }
-    int rc = pclose(p);
-    if (rc < 0) return -1;
-    return WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
+    return run_command(NULL, 0, cmd, g_probe_child ? 1500 : 8000);
 }
 
-/* Run a shell command and capture stdout+stderr. */
 static int sh_out(char *out, size_t outsz, const char *fmt, ...)
 {
     char cmd[2048];
@@ -231,26 +423,7 @@ static int sh_out(char *out, size_t outsz, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(cmd, sizeof(cmd), fmt, ap);
     va_end(ap);
-
-    if (out && outsz) out[0] = 0;
-    FILE *p = popen(cmd, "r");
-    if (!p) return -1;
-
-    size_t used = 0;
-    char buf[512];
-    while (fgets(buf, sizeof(buf), p)) {
-        size_t n = strlen(buf);
-        if (out && used + 1 < outsz) {
-            size_t room = outsz - used - 1;
-            if (n > room) n = room;
-            memcpy(out + used, buf, n);
-            used += n;
-            out[used] = 0;
-        }
-    }
-    int rc = pclose(p);
-    if (rc < 0) return -1;
-    return WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
+    return run_command(out, outsz, cmd, g_probe_child ? 1500 : 8000);
 }
 
 /* Single-quote a value for /bin/sh. */
@@ -326,25 +499,106 @@ static int read_file(const char *path, char *buf, size_t n)
     return (int)r;
 }
 
+static bool same_smack64(int fd, const char *label, size_t len)
+{
+    char current[256];
+    ssize_t n = fgetxattr(fd, "security.SMACK64", current, sizeof(current));
+    return n > 0 && (size_t)n == len && !memcmp(current, label, len);
+}
+
 static int write_file_atomic(const char *path, const char *data, mode_t mode)
 {
     char tmp[512];
     snprintf(tmp, sizeof(tmp), "%s.tmp.%d", path, (int)getpid());
     int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, mode);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        log_msg("write_file_atomic %s open failed: %s", path, strerror(errno));
+        return -1;
+    }
+    struct stat original;
+    if (stat(path, &original) == 0) {
+        struct stat current;
+        char label[256];
+        ssize_t ln = getxattr(path, "security.SMACK64", label, sizeof(label));
+        bool label_error = false;
+        if (fstat(fd, &current) != 0 ||
+            ((current.st_uid != original.st_uid || current.st_gid != original.st_gid) &&
+             fchown(fd, original.st_uid, original.st_gid) != 0)) {
+            label_error = true;
+        } else if (ln > 0) {
+            /* The floor label is the default for new files.  Avoid asking
+             * SMACK to set security.SMACK64="_" explicitly: on the car this
+             * can return EPERM in an otherwise valid "_" installer/daemon
+             * context and made config import fail.  For non-floor labels,
+             * avoid the syscall when the temp file already inherited it. */
+            bool floor = (ln == 1 && label[0] == '_');
+            if (!floor && !same_smack64(fd, label, (size_t)ln) &&
+                fsetxattr(fd, "security.SMACK64", label, (size_t)ln, 0) != 0 &&
+                !same_smack64(fd, label, (size_t)ln)) {
+                label_error = true;
+            }
+        }
+        if (label_error) {
+            int saved = errno;
+            close(fd); unlink(tmp); errno = saved;
+            log_msg("write_file_atomic %s label/owner failed: %s", path, strerror(saved));
+            return -1;
+        }
+    }
     size_t len = strlen(data);
     ssize_t w = write(fd, data, len);
+    bool runtime = !strcmp(path, g_status_path) || !strcmp(path, HOME_STATE) ||
+                   !strcmp(path, APPLY_RESULT) || !strcmp(path, BT_STATE) ||
+                   !strcmp(path, SSH_BOUND) || !strcmp(path, SCAN_RESULT);
+    int sync_rc = runtime ? 0 : fsync(fd);
     close(fd);
-    if (w != (ssize_t)len) {
-        unlink(tmp);
+    if (w != (ssize_t)len || sync_rc != 0) {
+        int saved = errno;
+        unlink(tmp); errno = saved;
+        log_msg("write_file_atomic %s write/fsync failed: %s", path, strerror(saved));
         return -1;
     }
     chmod(tmp, mode);
     if (rename(tmp, path) != 0) {
-        unlink(tmp);
+        int saved = errno;
+        unlink(tmp); errno = saved;
+        log_msg("write_file_atomic %s rename failed: %s", path, strerror(saved));
         return -1;
     }
     return 0;
+}
+
+static bool pid_has_argument(int pid, const char *argument)
+{
+    char path[64], args[4096];
+    snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+    int n = read_file(path, args, sizeof(args));
+    if (n <= 0) return false;
+    for (int at = 0; at < n;) {
+        size_t len = strnlen(args + at, (size_t)(n - at));
+        if (len == strlen(argument) && !memcmp(args + at, argument, len)) return true;
+        at += (int)len + 1;
+    }
+    return false;
+}
+
+static int owned_wpa_pid(void)
+{
+    DIR *d = opendir("/proc");
+    if (!d) return -1;
+    struct dirent *de;
+    int found = -1;
+    while ((de = readdir(d))) {
+        if (!isdigit((unsigned char)de->d_name[0])) continue;
+        int pid = atoi(de->d_name);
+        char path[80], comm[32];
+        snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+        if (read_file(path, comm, sizeof(comm)) > 0 && !strcmp(trim(comm), "wpa_supplicant") &&
+            pid_has_argument(pid, "-c" WPA_CONF) &&
+            pid_has_argument(pid, "-O" WPA_CTRL_DIR)) { found = pid; break; }
+    }
+    closedir(d);
+    return found;
 }
 
 /* Read the last n-1 bytes of a file (whole file if smaller), trimming a
@@ -424,6 +678,30 @@ static int pid_by_comm(const char *name)
     return -1;
 }
 
+/* /proc/comm truncates names to 15 bytes. Match executable basename instead,
+ * not a substring of arbitrary arguments or a guessed truncated comm. */
+static int pid_by_executable(const char *name)
+{
+    DIR *d = opendir("/proc");
+    if (!d) return -1;
+    struct dirent *de;
+    int found = -1;
+    while ((de = readdir(d))) {
+        if (!isdigit((unsigned char)de->d_name[0])) continue;
+        char path[80], exe[1024];
+        snprintf(path, sizeof(path), "/proc/%s/exe", de->d_name);
+        ssize_t n = readlink(path, exe, sizeof(exe) - 1);
+        if (n <= 0) continue;
+        exe[n] = 0;
+        char *deleted = strstr(exe, " (deleted)");
+        if (deleted) *deleted = 0;
+        const char *base = strrchr(exe, '/');
+        if (!strcmp(base ? base + 1 : exe, name)) { found = atoi(de->d_name); break; }
+    }
+    closedir(d);
+    return found;
+}
+
 /* Find a process whose /proc/<pid>/cmdline contains needle. */
 static int pid_by_cmdline(const char *needle)
 {
@@ -457,6 +735,9 @@ static void kill_pid(int pid)
 
 static bool iface_present(void)
 {
+#ifdef WIFI_TEST
+    if (test_iface >= 0) return test_iface != 0;
+#endif
     return file_exists("/sys/class/net/wlan0");
 }
 
@@ -489,7 +770,7 @@ static bool wlan_ip(char *out, size_t n)
     while (*p && *p != ' ' && *p != '\n' && *p != '\t' && i + 1 < n)
         out[i++] = *p++;
     out[i] = 0;
-    return i > 0 && strcmp(out, "127.0.0.1") != 0;
+    return i > 0 && strcmp(out, "127.0.0.1") != 0 && strcmp(out, "0.0.0.0") != 0;
 }
 
 static void wlan_link(char *ssid, size_t ssid_n, int *signal)
@@ -532,16 +813,16 @@ static int ap_clients(void)
     return n;
 }
 
-/* Parse `connmanctl technologies` for wifi Tethering = True. */
-static bool tethering_on(char *ap_ssid, size_t ap_ssid_n)
+/* The configured identifier is diagnostic data, never broadcast evidence. */
+static int tethering_state(char *ap_ssid, size_t ap_ssid_n)
 {
     if (ap_ssid && ap_ssid_n) ap_ssid[0] = 0;
     char buf[8192];
     if (sh_out(buf, sizeof(buf), "connmanctl technologies 2>/dev/null") != 0)
-        return false;
+        return -1;
 
     bool in_wifi = false;
-    bool tether = false;
+    int tether = -1;
     char *save = NULL;
     for (char *line = strtok_r(buf, "\n", &save); line;
          line = strtok_r(NULL, "\n", &save)) {
@@ -552,7 +833,8 @@ static bool tethering_on(char *ap_ssid, size_t ap_ssid_n)
         }
         if (!in_wifi) continue;
         if (!strncmp(p, "Tethering = ", 12)) {
-            tether = !strcmp(trim(p + 12), "True");
+            p = trim(p + 12);
+            tether = !strcmp(p, "True") ? 1 : !strcmp(p, "False") ? 0 : -1;
         } else if (!strncmp(p, "TetheringIdentifier = ", 22)) {
             if (ap_ssid) str_copy(ap_ssid, ap_ssid_n, trim(p + 22));
         }
@@ -560,67 +842,95 @@ static bool tethering_on(char *ap_ssid, size_t ap_ssid_n)
     return tether;
 }
 
-static bool ssid_md5(const char *ssid, char *out, size_t n)
+/* Find a ConnMan service token for an SSID. */
+/* Extract the displayed name from a `connmanctl services` line: the text
+ * after the optional state marker ('*') and before the wifi_ token. */
+static void service_line_name(const char *line, char *out, size_t n)
 {
     if (out && n) out[0] = 0;
-    char ssid_q[256], raw[128];
-    shq(ssid_q, sizeof(ssid_q), ssid);
-    /* This firmware ships md5sum only as a busybox applet; the coreutils
-     * binary is /usr/bin/md5sum.coreutils.  Try both so the service-id
-     * hash never depends on the applet alone. */
-    if (sh_out(raw, sizeof(raw),
-               "(printf %%s %s | md5sum) 2>/dev/null || "
-               "(printf %%s %s | md5sum.coreutils) 2>/dev/null",
-               ssid_q, ssid_q) != 0)
-        return false;
-    char *p = trim(raw);
-    if (strlen(p) < 32) return false;
-    char hash[33];
-    memcpy(hash, p, 32);
-    hash[32] = 0;
-    str_copy(out, n, hash);
-    return true;
+    const char *svc = NULL;
+    for (const char *p = line; (p = strstr(p, "wifi_")); p += 5)
+        if (p == line || isspace((unsigned char)p[-1])) svc = p;
+    if (!svc) return;
+    const char *p = line;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p == '*') {
+        while (*p && !isspace((unsigned char)*p)) p++;
+        while (*p && isspace((unsigned char)*p)) p++;
+    }
+    size_t len = (size_t)(svc - p);
+    while (len > 0 && isspace((unsigned char)p[len - 1])) len--;
+    if (len >= n) len = n - 1;
+    memcpy(out, p, len);
+    out[len] = 0;
 }
 
-/* Find a ConnMan service token for an SSID. */
-static bool find_service(const char *services, const char *ssid,
-                         char *service, size_t service_n)
+/* find_service matches the primary network (legacy single-network call
+ * sites); find_service_psk matches a specific network whose psk decides
+ * the _psk/_none security suffix in the ConnMan service id. */
+static bool find_service_psk(const char *services, const char *ssid,
+                            const char *security_want,
+                            char *service, size_t service_n)
 {
-    char *save = NULL;
+    if (!ssid || !*ssid || strlen(ssid) > 32) return false;
     char *copy = strdup(services ? services : "");
     if (!copy) return false;
     bool found = false;
-    char hash[40] = "";
-    bool have_hash = ssid_md5(ssid, hash, sizeof(hash));
-
+    /* Vendor service IDs encode SSID bytes as hex, not MD5. Require the
+     * exact ID component; never select a similarly named guest network. */
+    char encoded[68] = "_";
+    size_t at = 1;
+    for (const unsigned char *p = (const unsigned char *)ssid; *p; p++) {
+        snprintf(encoded + at, sizeof(encoded) - at, "%02x", *p); at += 2;
+    }
+    encoded[at++] = '_'; encoded[at] = 0;
+    char *save = NULL;
     for (char *line = strtok_r(copy, "\n", &save); line;
          line = strtok_r(NULL, "\n", &save)) {
-        if (!strstr(line, "wifi_")) continue;
-
-        bool name_hit = strstr(line, ssid) != NULL;
-        bool hash_hit = have_hash && strstr(line, hash) != NULL;
-        if (!name_hit && !hash_hit) continue;
-
-        /* The service id is the token starting with wifi_; connmanctl
-         * prints a trailing state word, so the last token is not it.
-         * Prefer the token carrying the SSID hash. */
-        char *tok = strtok(line, " \t");
-        while (tok) {
-            if (!strncmp(tok, "wifi_", 5)) {
-                if (hash_hit && !strstr(tok, hash)) {
-                    tok = strtok(NULL, " \t");
-                    continue;
-                }
-                str_copy(service, service_n, tok);
-                found = true;
-                break;
-            }
-            tok = strtok(NULL, " \t");
-        }
-        if (found) break;
+        char name[256];
+        service_line_name(line, name, sizeof(name));
+        char *token = NULL;
+        for (char *p = line; (p = strstr(p, "wifi_")); p += 5)
+            if (p == line || isspace((unsigned char)p[-1])) token = p;
+        if (!token) continue;
+        size_t len = strcspn(token, " \t\r");
+        token[len] = 0;
+        if (strcmp(name, ssid) && !strstr(token, encoded)) continue;
+        const char *security = strrchr(token, '_');
+        if (!security || strcmp(security, security_want)) continue;
+        /* Treat the token as data even when interpolated into CLI commands. */
+        if (strspn(token, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != len)
+            continue;
+        str_copy(service, service_n, token);
+        found = true;
+        break;
     }
     free(copy);
     return found;
+}
+
+/* Index of the client network an in-flight connect/agent exchange is for.
+ * find_service_any sets it; the agent passphrase reply and the connect
+ * result messages read it. */
+static int g_client_net = 0;
+
+/* Multi-network selection: scan output -> the highest-priority configured
+ * network that is visible.  Returns the network index and fills service
+ * (and ssid_out when given), or -1 when none of the networks is visible. */
+static int find_service_any(const char *services, char *service, size_t service_n,
+                            char *ssid_out, size_t ssid_n)
+{
+    for (int i = 0; i < WIFI_NETS_MAX; i++) {
+        const char *ssid = net_ssid(i);
+        if (!ssid[0]) continue;
+        if (find_service_psk(services, ssid,
+                             net_psk(i)[0] ? "_psk" : "_none",
+                             service, service_n)) {
+            if (ssid_out && ssid_n) str_copy(ssid_out, ssid_n, ssid);
+            return i;
+        }
+    }
+    return -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -673,6 +983,22 @@ static void config_load(void)
             str_copy(g_cfg.ssid, sizeof(g_cfg.ssid), v);
         } else if (!strcmp(k, "psk")) {
             str_copy(g_cfg.psk, sizeof(g_cfg.psk), v);
+        } else if (!strcmp(k, "net2_ssid")) {
+            str_copy(g_cfg.net2_ssid, sizeof(g_cfg.net2_ssid), v);
+        } else if (!strcmp(k, "net2_psk")) {
+            str_copy(g_cfg.net2_psk, sizeof(g_cfg.net2_psk), v);
+        } else if (!strcmp(k, "net3_ssid")) {
+            str_copy(g_cfg.net3_ssid, sizeof(g_cfg.net3_ssid), v);
+        } else if (!strcmp(k, "net3_psk")) {
+            str_copy(g_cfg.net3_psk, sizeof(g_cfg.net3_psk), v);
+        } else if (!strcmp(k, "net4_ssid")) {
+            str_copy(g_cfg.net4_ssid, sizeof(g_cfg.net4_ssid), v);
+        } else if (!strcmp(k, "net4_psk")) {
+            str_copy(g_cfg.net4_psk, sizeof(g_cfg.net4_psk), v);
+        } else if (!strcmp(k, "net_count")) {
+            g_cfg.net_count = atoi(v);
+            if (g_cfg.net_count < 1) g_cfg.net_count = 1;
+            if (g_cfg.net_count > WIFI_NETS_MAX) g_cfg.net_count = WIFI_NETS_MAX;
         } else if (!strcmp(k, "carplay_ssid")) {
             str_copy(g_cfg.cp_ssid, sizeof(g_cfg.cp_ssid), v);
         } else if (!strcmp(k, "carplay_psk")) {
@@ -722,18 +1048,37 @@ static void config_load(void)
         g_config_migrated = true;
         log_msg("config migration: SSH port 22 -> %d", SSH_DEFAULT_PORT);
     }
+    /* A legacy config (version < 3) has only the primary network; make
+     * net_count consistent with what is actually configured.  */
+    {
+        int total = net_total();
+        if (g_cfg.net_count < 1) g_cfg.net_count = 1;
+        if (total == 0) g_cfg.net_count = 1;          /* empty primary */
+        else if (total > g_cfg.net_count) g_cfg.net_count = total;
+    }
 }
 
-static void config_save(void)
+static bool config_save(void)
 {
+    /* Only the parent daemon persists config.  An apply child reports
+     * observed adjustments through APPLY_RESULT instead, so a canceled or
+     * stale worker can never save a config it did not apply. */
+    if (g_in_child) return true;
     char buf[4096];
     snprintf(buf, sizeof(buf),
              "# wifi_daemon config\n"
-             "config_version=2\n"
+             "config_version=3\n"
              "mode=%s\n"
              "wlan_on=%d\n"
              "ssid=%s\n"
              "psk=%s\n"
+             "net2_ssid=%s\n"
+             "net2_psk=%s\n"
+             "net3_ssid=%s\n"
+             "net3_psk=%s\n"
+             "net4_ssid=%s\n"
+             "net4_psk=%s\n"
+             "net_count=%d\n"
              "carplay_ssid=%s\n"
              "carplay_psk=%s\n"
              "carplay_band=%s\n"
@@ -753,6 +1098,10 @@ static void config_save(void)
              g_cfg.mode == MODE_CARPLAY ? "carplay" : "off",
              g_cfg.wlan_on ? 1 : 0,
              g_cfg.ssid, g_cfg.psk,
+             g_cfg.net2_ssid, g_cfg.net2_psk,
+             g_cfg.net3_ssid, g_cfg.net3_psk,
+             g_cfg.net4_ssid, g_cfg.net4_psk,
+             g_cfg.net_count,
              g_cfg.cp_ssid, g_cfg.cp_psk,
              g_cfg.cp_band == 1 ? "2.4" : g_cfg.cp_band == 2 ? "5" : "auto",
              g_cfg.cp_channel, g_cfg.cp_hidden ? 1 : 0, g_cfg.cp_max_sta,
@@ -762,7 +1111,7 @@ static void config_save(void)
              g_cfg.imported ? 1 : 0, g_cfg.imported_from);
 
     mkdir(APP_DIR, 0755);
-    write_file_atomic(CONFIG_PATH, buf, 0600);
+    return write_file_atomic(CONFIG_PATH, buf, 0600) == 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -827,13 +1176,16 @@ static void random_psk(char *out, size_t n)
 /* Parse wifi.txt.  Supports key=value and a two-line SSID/PSK fallback. */
 static bool parse_wifi_txt(const char *path)
 {
+    config_t previous = g_cfg;
     char buf[8192];
     if (read_file(path, buf, sizeof(buf)) <= 0) return false;
 
     char ssid[80] = {0}, psk[160] = {0};
+    char net_ssid_v[WIFI_NETS_MAX - 1][80] = {{0}};
+    char net_psk_v[WIFI_NETS_MAX - 1][160] = {{0}};
     char cp_ssid[80] = {0}, cp_psk[160] = {0};
     int cp_band = -1, cp_channel = -1, cp_hidden = -1, cp_max = -1;
-    int ssh = -1, ssh_port = -1;
+    int ssh_port = -1;   /* accepted as a stored preference; `ssh=` ignored */
     char cp_manufacturer[64] = {0}, cp_model[64] = {0};
     char cp_name[64] = {0}, cp_id[64] = {0}, cp_btaddr[32] = {0};
     int plain_lines = 0;
@@ -856,6 +1208,15 @@ static bool parse_wifi_txt(const char *path)
         if (!strcmp(k, "ssid")) str_copy(ssid, sizeof(ssid), v);
         else if (!strcmp(k, "psk") || !strcmp(k, "key") || !strcmp(k, "password"))
             str_copy(psk, sizeof(psk), v);
+        /* Additional client networks in priority order: ssid2/psk2 ..
+         * ssid4/psk4 (net2_ssid/net2_psk synonyms).  The plain ssid/psk
+         * pair is network 1 (highest priority). */
+        else if (!strcmp(k, "ssid2") || !strcmp(k, "net2_ssid")) str_copy(net_ssid_v[0], sizeof(net_ssid_v[0]), v);
+        else if (!strcmp(k, "psk2") || !strcmp(k, "net2_psk"))    str_copy(net_psk_v[0], sizeof(net_psk_v[0]), v);
+        else if (!strcmp(k, "ssid3") || !strcmp(k, "net3_ssid")) str_copy(net_ssid_v[1], sizeof(net_ssid_v[1]), v);
+        else if (!strcmp(k, "psk3") || !strcmp(k, "net3_psk"))    str_copy(net_psk_v[1], sizeof(net_psk_v[1]), v);
+        else if (!strcmp(k, "ssid4") || !strcmp(k, "net4_ssid")) str_copy(net_ssid_v[2], sizeof(net_ssid_v[2]), v);
+        else if (!strcmp(k, "psk4") || !strcmp(k, "net4_psk"))    str_copy(net_psk_v[2], sizeof(net_psk_v[2]), v);
         else if (!strcmp(k, "carplay_ssid")) str_copy(cp_ssid, sizeof(cp_ssid), v);
         else if (!strcmp(k, "carplay_psk") || !strcmp(k, "carplay_key"))
             str_copy(cp_psk, sizeof(cp_psk), v);
@@ -871,18 +1232,33 @@ static bool parse_wifi_txt(const char *path)
         else if (!strcmp(k, "carplay_name")) str_copy(cp_name, sizeof(cp_name), v);
         else if (!strcmp(k, "carplay_id")) str_copy(cp_id, sizeof(cp_id), v);
         else if (!strcmp(k, "carplay_btaddr")) str_copy(cp_btaddr, sizeof(cp_btaddr), v);
-        else if (!strcmp(k, "ssh")) ssh = atoi(v) != 0;
+        /* `ssh` and `mode` are deliberately ignored: importing wifi.txt only
+         * stores credentials/AP settings.  Activation (WLAN mode, SSH) is
+         * always an explicit user action in the UI, never an import side
+         * effect.  ssh_port is accepted as a stored preference only. */
         else if (!strcmp(k, "ssh_port")) ssh_port = atoi(v);
-        else if (!strcmp(k, "mode")) {
-            if (!strcmp(v, "client")) g_cfg.mode = MODE_CLIENT;
-            else if (!strcmp(v, "carplay")) g_cfg.mode = MODE_CARPLAY;
-            else if (!strcmp(v, "off")) g_cfg.mode = MODE_OFF;
-        }
     }
 
-    if (!ssid[0]) return false;
+    if (!ssid[0] || strlen(ssid) > 32 || strlen(cp_ssid) > 32) {
+        set_msg("WiFi SSIDs must be 1-32 bytes");
+        return false;
+    }
+    for (int i = 0; i < WIFI_NETS_MAX - 1; i++) {
+        if (strlen(net_ssid_v[i]) > 32) {
+            set_msg("WiFi SSIDs must be 1-32 bytes");
+            return false;
+        }
+    }
     str_copy(g_cfg.ssid, sizeof(g_cfg.ssid), ssid);
     str_copy(g_cfg.psk, sizeof(g_cfg.psk), psk);
+    set_net_ssid(1, net_ssid_v[0]);
+    set_net_psk(1, net_psk_v[0]);
+    set_net_ssid(2, net_ssid_v[1]);
+    set_net_psk(2, net_psk_v[1]);
+    set_net_ssid(3, net_ssid_v[2]);
+    set_net_psk(3, net_psk_v[2]);
+    g_cfg.net_count = net_total();
+    if (g_cfg.net_count < 1) g_cfg.net_count = 1;
     if (cp_ssid[0]) str_copy(g_cfg.cp_ssid, sizeof(g_cfg.cp_ssid), cp_ssid);
     if (cp_psk[0]) str_copy(g_cfg.cp_psk, sizeof(g_cfg.cp_psk), cp_psk);
     if (cp_band >= 0) g_cfg.cp_band = cp_band;
@@ -894,7 +1270,6 @@ static bool parse_wifi_txt(const char *path)
     if (cp_name[0]) str_copy(g_cfg.cp_name, sizeof(g_cfg.cp_name), cp_name);
     if (cp_id[0]) str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), cp_id);
     if (cp_btaddr[0]) str_copy(g_cfg.cp_btaddr, sizeof(g_cfg.cp_btaddr), cp_btaddr);
-    if (ssh >= 0) g_cfg.ssh_enabled = ssh != 0;
     if (ssh_port > 0 && ssh_port < 65536) g_cfg.ssh_port = ssh_port;
 
     if (!g_cfg.cp_psk[0]) random_psk(g_cfg.cp_psk, sizeof(g_cfg.cp_psk));
@@ -904,14 +1279,20 @@ static bool parse_wifi_txt(const char *path)
 
     str_copy(g_cfg.imported_from, sizeof(g_cfg.imported_from), path);
     g_cfg.imported = true;
-    config_save();
+    if (!config_save()) {
+        g_cfg = previous;
+        set_msg("WiFi import failed: could not persist credentials");
+        return false;
+    }
 
     /* Keep a private copy for the UI / later use. */
     char copy[8192];
     if (read_file(path, copy, sizeof(copy)) > 0)
         write_file_atomic(WIFI_TXT_COPY, copy, 0600);
 
-    set_msg("imported WiFi config from %s (ssid=%s)", path, g_cfg.ssid);
+    set_msg("imported WiFi config from %s (ssid=%s, %d network%s)",
+            path, g_cfg.ssid, g_cfg.net_count,
+            g_cfg.net_count == 1 ? "" : "s");
     return true;
 }
 
@@ -961,7 +1342,7 @@ static void stop_oem_wifi(void)
     sh("systemctl stop supplicantmanager.service 2>/dev/null");
     sh("rm -f /tmp/no_unece");
 
-    int pid = pid_by_comm("supplicantmanager");
+    int pid = pid_by_executable("supplicantmanager");
     if (pid > 0) kill_pid(pid);
 
     pid = pid_by_cmdline("/rw_data/wifi/entropy.bin");
@@ -1011,9 +1392,11 @@ static bool wpa_ping(void)
     if (sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 ping 2>/dev/null | grep -q PONG") == 0)
         return true;
 
-    /* A running supplicant with a dead/unreadable socket is the classic
-     * SMACK-label mismatch seen on this car.  Log the socket state (at most
-     * once a minute) so the reason is in the console and the log bundle. */
+    /* A running supplicant with a missing socket is expected while ConnMan
+     * removes/recreates wlan0 for AP mode: the per-interface socket is
+     * unlinked during teardown and recreated with -O.  Log the socket state
+     * (at most once a minute) so the reason is in the console and log bundle;
+     * distinguish ENOENT from a permission error in the listing. */
     static int64_t last_log;
     int64_t now = now_ms();
     if (now - last_log > 60000) {
@@ -1025,22 +1408,81 @@ static bool wpa_ping(void)
     return false;
 }
 
+/* Process health only: is a supplicant process alive at all?  This is the
+ * signal that matters for "do we restart the stack"; a missing per-interface
+ * socket on a live process is a transition, not a crash. */
+static bool wpa_process_alive(void)
+{
+#ifdef WIFI_TEST
+    if (test_owned_wpa >= 0) return test_owned_wpa != 0;
+#endif
+    return owned_wpa_pid() > 0;
+}
+
+static bool proc_alive(int pid)
+{
+    char path[64], state[1024];
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    if (read_file(path, state, sizeof(state)) <= 0) return false;
+    char *end = strrchr(state, ')');
+    return end && end[1] == ' ' && end[2] != 'Z' && end[2] != 'X';
+}
+
+static void close_child_fds(int keep)
+{
+    DIR *d = opendir("/proc/self/fd");
+    if (!d) {
+        for (int fd = 3; fd < 1024; fd++) if (fd != keep) close(fd);
+        return;
+    }
+    struct dirent *de;
+    int own = dirfd(d);
+    while ((de = readdir(d))) {
+        int fd = atoi(de->d_name);
+        if (fd >= 3 && fd != own && fd != keep) close(fd);
+    }
+    closedir(d);
+}
+
+/* Signal a supplicant and wait for it to exit; escalate to SIGKILL after a
+ * bounded timeout.  Only the owner verified by /proc/<pid>/comm is signaled. */
 static void stop_wpa_supplicant(void)
 {
+    int pid = -1;
     char buf[64];
     if (read_file(WPA_PIDFILE, buf, sizeof(buf)) > 0) {
-        int pid = atoi(trim(buf));
-        if (pid > 1) {
+        int p = atoi(trim(buf));
+        if (p > 1) {
             char path[64], comm[64];
-            snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+            snprintf(path, sizeof(path), "/proc/%d/comm", p);
             if (read_file(path, comm, sizeof(comm)) > 0 &&
-                !strcmp(trim(comm), "wpa_supplicant"))
-                kill_pid(pid);
+                !strcmp(trim(comm), "wpa_supplicant") &&
+                pid_has_argument(p, "-c" WPA_CONF) && pid_has_argument(p, "-O" WPA_CTRL_DIR))
+                pid = p;
         }
     }
-    int pid = pid_by_comm("wpa_supplicant");
-    if (pid > 0) kill_pid(pid);
-    unlink(WPA_PIDFILE);
+    if (pid <= 0) {
+        int p = owned_wpa_pid();
+        if (p > 0) pid = p;
+    }
+    if (pid > 0) {
+        if (pid_has_argument(pid, "-c" WPA_CONF)) kill(pid, SIGTERM);
+        for (int i = 0; i < 20 && proc_alive(pid); i++)
+            usleep(100000);
+        if (proc_alive(pid)) {
+            log_msg("wpa_supplicant pid %d ignored SIGTERM; SIGKILL", pid);
+            if (pid_has_argument(pid, "-c" WPA_CONF)) kill(pid, SIGKILL);
+            for (int i = 0; i < 10 && proc_alive(pid); i++)
+                usleep(100000);
+        }
+    }
+    /* Remove stale endpoints only after the owner is gone, so a replacement
+     * instance cannot race a still-shutting-down predecessor. */
+    if (pid <= 0 || !proc_alive(pid)) {
+        if (pid > 0) waitpid(pid, NULL, WNOHANG);
+        sh("rm -f " WPA_CTRL_DIR "/wlan0 2>/dev/null");
+        unlink(WPA_PIDFILE);
+    }
 }
 
 static void ensure_wpa_conf(void)
@@ -1061,23 +1503,53 @@ static bool start_wpa_supplicant_args(const char *driver)
     ensure_wpa_conf();
     sh("mkdir -p /var/run/wpa_supplicant /run/wpa_supplicant 2>/dev/null");
     sh("chmod 755 /var/run/wpa_supplicant 2>/dev/null");
-    sh("rm -f /var/run/wpa_supplicant/wlan0 2>/dev/null");
-
     /* This build has no CONFIG_DEBUG_FILE: -f is rejected.  Do not use -B:
      * daemon(0,0) would redirect output to /dev/null and the log would stay
-     * empty.  Background via the shell instead so wpa_supplicant.log keeps
-     * the real output.  Do not pass -e /rw_data/wifi/entropy.bin: the OEM
-     * supplicant is identified by that cmdline argument in stop_oem_wifi,
-     * and our own instance would be killed by mistake. */
-    if (driver && *driver)
-        sh("nohup /usr/sbin/wpa_supplicant -u -D%s -iwlan0 -c%s -P%s >>%s 2>&1 &",
-           driver, WPA_CONF, WPA_PIDFILE, WPA_LOG);
-    else
-        sh("nohup /usr/sbin/wpa_supplicant -u -iwlan0 -c%s -P%s >>%s 2>&1 &",
-           WPA_CONF, WPA_PIDFILE, WPA_LOG);
+     * empty, and -P only writes the pid file on the -B daemonize path, so a
+     * foreground launch would leave a stale pid file.  Background via the
+     * shell and capture $! ourselves.  Do not pass -e /rw_data/wifi/entropy.bin:
+     * the OEM supplicant is identified by that cmdline argument in
+     * stop_oem_wifi, and our own instance would be killed by mistake.
+     *
+     * -O is essential: ConnMan removes and recreates wlan0 over D-Bus when
+     * switching to AP mode, and the recreated interface gets no config file
+     * (conf 'N/A' ctrl_interface 'N/A').  -O overrides ctrl_interface for
+     * every new interface, so the control socket survives the transition
+     * instead of disappearing with the removed interface. */
+    if (g_stop) return false;
+    /* setsid, unlike nohup, removes the persistent radio service from the
+     * disposable apply group. Its exact config argument is our ownership
+     * marker even if cancellation happens before its PID file is written. */
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (setsid() < 0) _exit(126);
+        signal(SIGTERM, SIG_DFL); signal(SIGINT, SIG_DFL);
+        signal(SIGHUP, SIG_IGN);
+        int log = open(WPA_LOG, O_WRONLY | O_CREAT | O_APPEND, 0600);
+        int nul = open("/dev/null", O_RDONLY);
+        if (log < 0 || nul < 0) _exit(126);
+        fchmod(log, 0600);
+        dup2(nul, STDIN_FILENO); dup2(log, STDOUT_FILENO); dup2(log, STDERR_FILENO);
+        close(log); close(nul);
+        char drv[64]; snprintf(drv, sizeof(drv), "-D%s", driver ? driver : "");
+        if (driver && *driver)
+            execl("/usr/sbin/wpa_supplicant", "wpa_supplicant", "-u", drv,
+                  "-iwlan0", "-c" WPA_CONF, "-O" WPA_CTRL_DIR, (char *)NULL);
+        else
+            execl("/usr/sbin/wpa_supplicant", "wpa_supplicant", "-u",
+                  "-iwlan0", "-c" WPA_CONF, "-O" WPA_CTRL_DIR, (char *)NULL);
+        _exit(127);
+    }
+    char pidbuf[64]; snprintf(pidbuf, sizeof(pidbuf), "%d\n", (int)pid);
+    if (pid <= 0) return false;
+    if (pid > 1)
+        write_file_atomic(WPA_PIDFILE, pidbuf, 0644);
+    log_msg("started wpa_supplicant pid=%d driver=%s -O%s",
+            pid, driver ? driver : "default", WPA_CTRL_DIR);
 
     for (int i = 0; i < 32; i++) {
         if (wpa_ping()) return true;
+        if (pid > 1 && !proc_alive(pid)) break;   /* exited already */
         usleep(250000);
     }
     return false;
@@ -1085,14 +1557,35 @@ static bool start_wpa_supplicant_args(const char *driver)
 
 static bool ensure_wpa_supplicant(void)
 {
-    if (wpa_ping()) return true;
+    if (wpa_process_alive() && wpa_ping()) return true;
     if (!iface_present()) return false;
+    if (!wpa_process_alive() && pid_by_executable("wpa_supplicant") > 0) {
+        set_msg("WiFi has a foreign supplicant owner; refusing a second instance");
+        return false;
+    }
 
-    /* A stale instance with a broken control socket blocks the new one. */
-    if (pid_by_comm("wpa_supplicant") > 0) {
-        log_msg("wpa_supplicant running but control socket is dead; restarting");
-        stop_wpa_supplicant();
-        usleep(500000);
+    /* A live process with a missing socket is usually a ConnMan interface
+     * transition (AP remove/recreate).  Give the socket a grace period to
+     * reappear (the -O override recreates it) before deciding the process is
+     * stale; only a dead process or a socket still missing after the grace
+     * period justifies a restart. */
+    if (wpa_process_alive()) {
+        log_msg("wpa_supplicant alive but control socket missing; "
+                "waiting for interface recreation");
+        for (int i = 0; i < 40; i++) {
+            if (wpa_ping()) return true;
+            if (!wpa_process_alive()) break;
+            usleep(250000);
+        }
+        if (!wpa_process_alive()) {
+            log_msg("wpa_supplicant exited during interface transition");
+        } else if (!wpa_ping()) {
+            log_msg("control socket still missing after grace; restarting supplicant");
+            stop_wpa_supplicant();
+            usleep(500000);
+        } else {
+            return true;
+        }
     }
 
     /* One start with the driver list: wpa_supplicant falls back from
@@ -1111,11 +1604,12 @@ static bool ensure_wpa_supplicant(void)
     return false;
 }
 
-static bool wifi_powered(void)
+/* -1 means unknown/unavailable, not a verified powered-off technology. */
+static int wifi_power_state(void)
 {
     char buf[8192];
     if (sh_out(buf, sizeof(buf), "connmanctl technologies 2>/dev/null") != 0)
-        return false;
+        return -1;
     bool in_wifi = false;
     char *save = NULL;
     for (char *line = strtok_r(buf, "\n", &save); line;
@@ -1126,11 +1620,16 @@ static bool wifi_powered(void)
             continue;
         }
         if (!in_wifi) continue;
-        if (!strncmp(p, "Powered = ", 10))
-            return !strcmp(trim(p + 10), "True");
+        if (!strncmp(p, "Powered = ", 10)) {
+            if (!strcmp(trim(p + 10), "True")) return 1;
+            if (!strcmp(trim(p + 10), "False")) return 0;
+            return -1;
+        }
     }
-    return false;
+    return -1;
 }
+
+static bool wifi_powered(void) { return wifi_power_state() == 1; }
 
 /* Load the driver, evict the OEM manager, and leave a supplicant under our
  * control.  Used by scan, client connect and CarPlay AP start. */
@@ -1153,7 +1652,32 @@ static bool ensure_wifi_ready(void)
         usleep(250000);
     }
     log_msg("wifi technology not powered after enable");
-    return wpa_ping();
+    set_msg("WiFi technology did not power on");
+    return false;
+}
+
+static bool decode_control_ssid(char *out, size_t n, const char *value)
+{
+    size_t at = 0;
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+        unsigned char c = *p;
+        if (c == '\\') {
+            p++;
+            if (!*p) return false;
+            if (*p == 'x' && p[1] && p[2] && isxdigit(p[1]) && isxdigit(p[2])) {
+                char hex[3] = {(char)p[1], (char)p[2], 0};
+                c = (unsigned char)strtol(hex, NULL, 16); p += 2;
+            } else if (*p == 'n') c = '\n';
+            else if (*p == 'r') c = '\r';
+            else if (*p == 't') c = '\t';
+            else if (*p == '\\' || *p == '"') c = *p;
+            else return false;
+        }
+        if (!c || at + 1 >= n) return false;
+        out[at++] = (char)c;
+    }
+    out[at] = 0;
+    return true;
 }
 
 static bool wpa_state_completed(void)
@@ -1161,7 +1685,18 @@ static bool wpa_state_completed(void)
     char buf[2048];
     if (sh_out(buf, sizeof(buf), "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 status 2>/dev/null") != 0)
         return false;
-    return strstr(buf, "wpa_state=COMPLETED") != NULL;
+    bool completed = false, station = false, same_ssid = false;
+    char *save = NULL;
+    for (char *line = strtok_r(buf, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        if (!strcmp(line, "wpa_state=COMPLETED")) completed = true;
+        else if (!strcmp(line, "mode=station")) station = true;
+        else if (!strncmp(line, "ssid=", 5)) {
+            char actual[80];
+            same_ssid = decode_control_ssid(actual, sizeof(actual), line + 5) && !strcmp(actual, g_cfg.ssid);
+        }
+    }
+    return completed && station && same_ssid;
 }
 
 static int channel_to_freq(void)
@@ -1176,8 +1711,194 @@ static int channel_to_freq(void)
     return 5000 + ch * 5;
 }
 
+/* Read-only, shared by startup, teardown, observation, SSH and scanning.
+ * A failed command is unknown. Neither a stored identifier nor an IPv4
+ * address on its own establishes that wlan0 is broadcasting our AP. */
+static void ap_probe(ap_probe_t *p)
+{
+    memset(p, 0, sizeof(*p));
+    p->sampled_ms = now_ms();
+    p->role = -1;
+    p->tether = tethering_state(p->configured_ssid, sizeof(p->configured_ssid));
+    char buf[4096], iw_ssid[80] = "", wpa_ssid[80] = "";
+    int wpa_role = -1;
+    bool completed = false;
+    if (!iface_present()) p->role = 0;
+    else if (sh_out(buf, sizeof(buf), "iw dev wlan0 info 2>/dev/null") == 0) {
+        char *save = NULL;
+        for (char *line = strtok_r(buf, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+            char *s = line;
+            while (isspace((unsigned char)*s)) s++;
+            if (!strncmp(s, "type ", 5)) {
+                const char *type = trim(s + 5);
+                p->role = !strcmp(type, "AP") ? 1 : !strcmp(type, "managed") ? 0 : -1;
+            }
+            if (!strncmp(s, "ssid ", 5) && !decode_control_ssid(iw_ssid, sizeof(iw_ssid), s + 5)) iw_ssid[0] = 0;
+        }
+    }
+    if (sh_out(buf, sizeof(buf), "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 status 2>/dev/null") == 0) {
+        char *save = NULL;
+        for (char *line = strtok_r(buf, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+            if (!strcmp(line, "mode=AP")) wpa_role = 1;
+            else if (!strcmp(line, "mode=station")) wpa_role = 0;
+            else if (!strcmp(line, "wpa_state=COMPLETED")) completed = true;
+            else if (!strncmp(line, "ssid=", 5) && !decode_control_ssid(wpa_ssid, sizeof(wpa_ssid), line + 5)) wpa_ssid[0] = 0;
+        }
+    }
+    if ((p->role < 0 || (p->role == 1 && !iw_ssid[0] && wpa_role != 1)) &&
+        sh_out(buf, sizeof(buf), "iwconfig wlan0 2>/dev/null") == 0) {
+        int role = strstr(buf, "Mode:Master") ? 1 : strstr(buf, "Mode:Managed") ? 0 : -1;
+        if (p->role < 0) p->role = role;
+        else if (role >= 0 && role != p->role) p->conflict = true;
+        char *ssid = strstr(buf, "ESSID:\"");
+        if (role == 1 && ssid) {
+            ssid += 7;
+            char *end = ssid;
+            for (; *end; end++) {
+                if (*end == '\\' && end[1]) { end++; continue; }
+                if (*end == '"') break;
+            }
+            if (*end == '"') {
+                *end = 0;
+                if (!decode_control_ssid(iw_ssid, sizeof(iw_ssid), ssid)) iw_ssid[0] = 0;
+            }
+        }
+    }
+    p->station = wpa_role == 0 && completed;
+    if (p->role < 0 && wpa_role == 1 && completed) p->role = 1;
+    p->conflict = p->conflict || (p->role == 1 && p->station) || (p->role == 0 && wpa_role == 1 && completed);
+    if (p->role == 1) {
+        str_copy(p->ssid, sizeof(p->ssid), iw_ssid[0] ? iw_ssid : wpa_role == 1 ? wpa_ssid : "");
+        if (iw_ssid[0] && wpa_role == 1 && wpa_ssid[0] && strcmp(iw_ssid, wpa_ssid)) p->conflict = true;
+    }
+    if (wlan_ip(p->ip, sizeof(p->ip))) {
+        struct in_addr address;
+        if (inet_pton(AF_INET, p->ip, &address) != 1 ||
+            (ntohl(address.s_addr) >> 24) == 0 || (ntohl(address.s_addr) >> 28) >= 14 ||
+            (ntohl(address.s_addr) >> 24) == 127 ||
+            (ntohl(address.s_addr) & 0xffff0000U) == 0xa9fe0000U) p->ip[0] = 0;
+    } else p->ip[0] = 0;
+    char station_ip[64] = "";
+    read_file(AP_STATION_IP, station_ip, sizeof(station_ip));
+    p->state = AP_UNKNOWN;
+    if (!p->conflict) {
+        if (p->role == 0 && p->tether == 0) p->state = AP_ABSENT;
+        else if (p->role == 1) {
+            p->state = AP_INTERFACE_UP;
+            if (!strcmp(p->ssid, g_cfg.cp_ssid) && p->ip[0] && strcmp(p->ip, trim(station_ip)))
+                p->state = AP_READY;
+        }
+    }
+    if (now_ms() - p->sampled_ms > 6000) p->state = AP_UNKNOWN;
+}
+
+static void ap_evidence(const char *stage, const ap_probe_t *p)
+{
+    /* Deliberately do not log raw technologies/status/CLI output (keys). */
+    char actual[512], configured[512];
+    json_escape(actual, sizeof(actual), p->ssid);
+    json_escape(configured, sizeof(configured), p->configured_ssid);
+    log_msg("AP stage=%s mono_ms=%lld state=%d role=%d tether=%d actual_ssid=%s configured_ssid=%s ip=%s station=%d conflict=%d",
+            stage, (long long)p->sampled_ms, p->state, p->role, p->tether,
+            actual, configured, p->ip, p->station, p->conflict);
+}
+
+/* Call only for an explicit stop or after actual absence, never as a
+ * response to Tethering=False on an otherwise working AP. */
+static bool ap_disable(bool explicit_stop)
+{
+    if (!explicit_stop) {
+        ap_probe_t before;
+        ap_probe(&before);
+        if (before.role != 0 || before.conflict || now_ms() - before.sampled_ms > 6000) {
+            ap_evidence("late-AP-before-teardown", &before);
+            return false;
+        }
+    }
+    int rc = sh("connmanctl tether wifi off 2>/dev/null");
+    int absent = 0;
+    int64_t deadline = now_ms() + 6000;
+    ap_probe_t p;
+    for (int i = 0; i < 14 && !g_stop && now_ms() < deadline; i++) {
+        ap_probe(&p);
+        if (p.state == AP_ABSENT) {
+            if (++absent >= 2) return true;
+        } else absent = 0;
+        usleep(500000);
+    }
+    log_msg("AP teardown unconfirmed (command rc=%d)", rc);
+    return false;
+}
+
+static bool client_disconnect(void);
+
+static bool ap_remember_station(const ap_probe_t *p)
+{
+    return !p->station || !p->ip[0] || write_file_atomic(AP_STATION_IP, p->ip, 0600) == 0;
+}
+
+typedef enum { AP_WAIT_READY, AP_WAIT_NEVER, AP_WAIT_PENDING, AP_WAIT_LOST, AP_WAIT_UNKNOWN } ap_wait_t;
+
+static ap_wait_t ap_wait_ready(bool seen, ap_probe_t *last)
+{
+    int ready = 0, absent = 0, lost = 0, station_polls = 0;
+    bool reconciled = false;
+    int64_t deadline = now_ms() + 30000;
+    for (int i = 0; i < 62 && !g_stop && now_ms() < deadline; i++) {
+        ap_probe(last);
+        if (last->role == 1) seen = true;
+        if (last->station) {
+            if (!reconciled) {
+                if (!ap_remember_station(last) || !client_disconnect()) return AP_WAIT_UNKNOWN;
+                reconciled = true;
+                log_msg("AP startup: unexpected station association reconciled through ConnMan");
+            } else if (++station_polls >= 10) return AP_WAIT_UNKNOWN;
+        }
+        if (last->state == AP_READY) {
+            if (++ready >= 3) {
+                if (last->tether != 1) ap_evidence("ready-property-disagreement", last);
+                return AP_WAIT_READY;
+            }
+        } else ready = 0;
+        if (last->state == AP_ABSENT) absent++; else absent = 0;
+        if (seen && last->role == 0 && !last->conflict) {
+            if (++lost >= 3) return AP_WAIT_LOST;
+        } else lost = 0;
+        usleep(500000);
+    }
+    if (g_stop) return AP_WAIT_UNKNOWN;
+    if (seen) return last->role == 1 ? AP_WAIT_PENDING : AP_WAIT_UNKNOWN;
+    return absent >= 2 ? AP_WAIT_NEVER : AP_WAIT_UNKNOWN;
+}
+
 static bool ap_start(void)
 {
+    if (!g_cfg.cp_ssid[0] || strlen(g_cfg.cp_ssid) > 32 ||
+        strlen(g_cfg.cp_psk) < 8 || strlen(g_cfg.cp_psk) > 63) {
+        set_msg("CarPlay AP requires a 1-32 byte SSID and an 8-63 character key");
+        return false;
+    }
+    ap_probe_t p;
+    ap_probe(&p);
+    if (p.role != 1 && (p.role < 0 || p.conflict || now_ms() - p.sampled_ms > 6000)) {
+        ap_evidence("initial-state-unknown", &p);
+        set_msg("CarPlay AP initial state unknown; stack left unchanged");
+        return false;
+    }
+    if (!ap_remember_station(&p)) {
+        set_msg("CarPlay AP cannot record previous station address");
+        return false;
+    }
+    if (p.role == 1) {
+        /* Reuse an existing AP, or let pending DHCP settle. Do not toggle a
+         * functioning radio just because ConnMan's property disagrees. */
+        ap_wait_t result = ap_wait_ready(true, &p);
+        if (result == AP_WAIT_READY) return true;
+        ap_evidence(result == AP_WAIT_LOST ? "enabled_then_lost" : "existing-unready", &p);
+        set_msg("CarPlay AP existing interface %s; stop AP before retrying/changing SSID",
+                result == AP_WAIT_LOST ? "enabled_then_lost" : "not ready/unknown");
+        return false;
+    }
     char ssid_q[256], psk_q[256];
     shq(ssid_q, sizeof(ssid_q), g_cfg.cp_ssid);
     shq(psk_q, sizeof(psk_q), g_cfg.cp_psk);
@@ -1188,11 +1909,43 @@ static bool ap_start(void)
         return false;
     }
 
+    /* Recheck after stack/power setup; an in-flight AP may have appeared. */
+    ap_probe(&p);
+    if (!ap_remember_station(&p)) {
+        set_msg("CarPlay AP cannot record station transition address");
+        return false;
+    }
+    if (p.role == 1) {
+        if (ap_wait_ready(true, &p) == AP_WAIT_READY) return true;
+        set_msg("CarPlay AP pending interface did not become ready");
+        return false;
+    }
+    if (p.role != 0 || p.conflict || (p.tether != 0 && !ap_disable(false))) {
+        ap_evidence("pre-start-unknown", &p);
+        set_msg("CarPlay AP previous teardown/absence not confirmed");
+        return false;
+    }
+    if (!client_disconnect()) {
+        set_msg("CarPlay AP station disconnect could not be confirmed");
+        return false;
+    }
+    int64_t station_deadline = now_ms() + 6000;
+    for (int i = 0; i < 12 && !g_stop && now_ms() < station_deadline; i++) {
+        ap_probe(&p);
+        if (!ap_remember_station(&p)) {
+            set_msg("CarPlay AP cannot record station transition address");
+            return false;
+        }
+        if (!p.station && !p.conflict) break;
+        usleep(500000);
+    }
+    if (p.station || p.conflict || p.state != AP_ABSENT || g_stop) {
+        ap_evidence("station-transition-unconfirmed", &p);
+        set_msg("CarPlay AP station transition/absence not confirmed");
+        return false;
+    }
     sh("connmanctl tether_carplay_ie wifi off 2>/dev/null");
-    sh("connmanctl tether wifi off 2>/dev/null");
-    sh("connmanctl enable wifi 2>/dev/null");
-    sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 disconnect 2>/dev/null");
-    iface_up();
+    g_carplay_ie = false;
 
     /* This vendor connmanctl parses tether options, not positionals.
      * Verified by executing the car binary with its own loader:
@@ -1201,57 +1954,74 @@ static bool ap_start(void)
      * Positional "<hidden> <frequency> <maxsta>" yields
      * "unknown option [?][no]" and "unknown option [?][5180]" - the exact
      * errors in the on-car log.  --appinfo 1 marks the AP as CarPlay. */
-    char out[4096] = "";
-    int rc = sh_out(out, sizeof(out),
+    for (int attempt = 0; attempt < 2 && !g_stop; attempt++) {
+        ap_probe(&p);
+        if (p.role == 1) {
+            if (ap_wait_ready(true, &p) == AP_WAIT_READY) return true;
+            set_msg("CarPlay AP appeared before enable but is not ready; no new tether request");
+            return false;
+        }
+        if (p.state != AP_ABSENT || p.station) {
+            set_msg("CarPlay AP absence not confirmed immediately before enable");
+            return false;
+        }
+        char out[4096] = "";
+        int rc = sh_out(out, sizeof(out),
                     "connmanctl tether wifi on %s %s --hidden %s "
                     "--frequency %d --maxsta %d --appinfo 1 2>&1",
                     ssid_q, psk_q, g_cfg.cp_hidden ? "yes" : "no", freq,
                     g_cfg.cp_max_sta);
-    log_msg("tether 5GHz rc=%d out=%s", rc, trim(out));
-
-    bool up = false;
-    for (int i = 0; i < 20 && !up; i++) {
-        if (tethering_on(NULL, 0)) up = true;
-        else usleep(500000);
-    }
-
-    if (!up) {
-        /* 5 GHz / channel 36 may be rejected by the driver or regdomain.
-         * Retry on 2.4 GHz channel 6 and remember it if that works. */
-        rc = sh_out(out, sizeof(out),
-                    "connmanctl tether wifi on %s %s --hidden %s "
-                    "--frequency %d --maxsta %d --appinfo 1 2>&1",
-                    ssid_q, psk_q, g_cfg.cp_hidden ? "yes" : "no", 2437,
-                    g_cfg.cp_max_sta);
-        log_msg("tether 2.4GHz rc=%d out=%s", rc, trim(out));
-        for (int i = 0; i < 20 && !up; i++) {
-            if (tethering_on(NULL, 0)) up = true;
-            else usleep(500000);
+        bool denied = strstr(out, "Permission denied") != NULL;
+        bool rejected = rc != 0 || denied || strstr(out, "Error ") != NULL;
+        log_msg("AP tether request frequency=%d rc=%d rejected=%d permission_denied=%d", freq, rc, rejected, denied);
+        ap_wait_t result = ap_wait_ready(false, &p);
+        if (result == AP_WAIT_READY) {
+            if (attempt) {
+                g_cfg.cp_band = 1;
+                g_cfg.cp_channel = 6;
+                log_msg("CarPlay AP fell back to 2.4 GHz channel 6");
+            }
+            return true;
         }
-        if (up) {
-            g_cfg.cp_band = 1;
-            g_cfg.cp_channel = 6;
-            config_save();
-            log_msg("CarPlay AP fell back to 2.4 GHz channel 6");
+        ap_evidence(result == AP_WAIT_LOST ? "enabled_then_lost" : result == AP_WAIT_NEVER ? "never_enabled" : "pending_or_unknown", &p);
+        if (result != AP_WAIT_NEVER || attempt || freq < 5000 || denied) {
+            set_msg("CarPlay AP %s%s (rc=%d)",
+                    result == AP_WAIT_LOST ? "enabled_then_lost" :
+                    result == AP_WAIT_PENDING ? "interface up; SSID/address not ready" :
+                    result == AP_WAIT_NEVER ? "never enabled" : "state unknown; no destructive retry",
+                    denied ? "; tether permission denied" : "", rc);
+            return false;
         }
+        /* Only a never-observed AP with confirmed absence may change band.
+         * A second enable while teardown is pending is not a fallback. */
+        if (!ap_disable(false)) {
+            set_msg("CarPlay AP teardown did not finish; fallback aborted");
+            return false;
+        }
+        if (!ensure_wifi_ready()) return false;
+        if (!client_disconnect()) {
+            set_msg("CarPlay AP fallback station reconciliation failed");
+            return false;
+        }
+        ap_probe(&p);
+        if (p.state != AP_ABSENT || p.station) {
+            set_msg("CarPlay AP fallback absence/station transition not confirmed");
+            return false;
+        }
+        freq = 2437;
     }
-    if (up) return true;
-
-    char tech[4096];
-    if (sh_out(tech, sizeof(tech), "connmanctl technologies 2>/dev/null") == 0)
-        log_msg("technologies after tether failure: %s", trim(tech));
-    set_msg("CarPlay AP failed: %s",
-            out[0] ? trim(out) : "tether did not come up");
+    set_msg("CarPlay AP canceled");
     return false;
 }
 
 static void carplay_fw_close(void);
 
-static void ap_stop(void)
+static bool ap_stop(void)
 {
+    g_carplay_ie = false;
     carplay_fw_close();
     sh("connmanctl tether_carplay_ie wifi off 2>/dev/null");
-    sh("connmanctl tether wifi off 2>/dev/null");
+    return ap_disable(true);
 }
 
 static bool json_get_string_value(const char *path, const char *key,
@@ -1384,6 +2154,10 @@ static void home_monitor_line(const char *line)
 static void home_monitor_start(void)
 {
     if (g_home_fd >= 0) return;
+    if (g_home_pid > 0) {
+        if (waitpid(g_home_pid, NULL, WNOHANG) == 0) { kill(g_home_pid, SIGKILL); return; }
+        g_home_pid = -1;
+    }
 
     char addr[1024];
     if (!session_bus_address(addr, sizeof(addr)))
@@ -1470,6 +2244,7 @@ static void home_monitor_cleanup(void)
     if (g_home_fd >= 0) { close(g_home_fd); g_home_fd = -1; }
     if (g_home_pid > 0) {
         kill(g_home_pid, SIGTERM);
+        waitpid(g_home_pid, NULL, WNOHANG);
         g_home_pid = -1;
     }
     g_home_monitor = false;
@@ -1491,11 +2266,11 @@ static int session_dbus(char *out, size_t n, const char *dest, const char *path,
 
     if (arg && arg[0])
         return sh_out(out, n,
-                      "DBUS_SESSION_BUS_ADDRESS=%s dbus-send --session --print-reply "
+                      "DBUS_SESSION_BUS_ADDRESS=%s dbus-send --session --print-reply --reply-timeout=1200 "
                       "--dest=%s %s %s.%s %s 2>&1",
                       addr_q, dest_q, path_q, iface_q, method, arg);
     return sh_out(out, n,
-                  "DBUS_SESSION_BUS_ADDRESS=%s dbus-send --session --print-reply "
+                  "DBUS_SESSION_BUS_ADDRESS=%s dbus-send --session --print-reply --reply-timeout=1200 "
                   "--dest=%s %s %s.%s 2>&1",
                   addr_q, dest_q, path_q, iface_q, method);
 }
@@ -1653,6 +2428,7 @@ static bool bt_fetch_address(void)
 
 static void bt_state_save(void)
 {
+    if (g_in_child) return; /* generation-checked result is the only handoff */
     char buf[768];
     snprintf(buf, sizeof(buf),
              "discoverable=%d\npairable=%d\naddress=%s\nmessage=%s\n",
@@ -1661,55 +2437,63 @@ static void bt_state_save(void)
     write_file_atomic(BT_STATE, buf, 0600);
 }
 
-static void bt_state_load(void)
+/* Read back a boolean property; falls back to the intended value when the
+ * vendor adapter does not expose a getter. */
+static bool bt_get_prop_bool(const char *name, bool fallback)
 {
-    char buf[1024];
-    if (read_file(BT_STATE, buf, sizeof(buf)) <= 0) return;
-    char *save = NULL;
-    for (char *line = strtok_r(buf, "\n", &save); line;
-         line = strtok_r(NULL, "\n", &save)) {
-        char *eq = strchr(line, '=');
-        if (!eq) continue;
-        *eq = 0;
-        char *k = trim(line);
-        char *v = trim(eq + 1);
-        if (!strcmp(k, "discoverable")) g_bt_discoverable = atoi(v) != 0;
-        else if (!strcmp(k, "pairable")) g_bt_pairable = atoi(v) != 0;
-        else if (!strcmp(k, "address")) str_copy(g_cfg.cp_btaddr, sizeof(g_cfg.cp_btaddr), v);
-        else if (!strcmp(k, "message")) str_copy(g_pair_msg, sizeof(g_pair_msg), v);
+    char out[4096] = "";
+    if (bt_props_get(name, out, sizeof(out))) {
+        if (strstr(out, "true")) return true;
+        if (strstr(out, "false")) return false;
     }
+    return fallback;
 }
 
 static bool bt_set_pairing(bool on)
 {
     bool powered = on ? bt_set_prop("Powered", true) : true;
-    bool disc = bt_set_prop("Discoverable", on);
-    bool pair = bt_set_prop("Pairable", on);
-    if (on && (!disc || !pair)) {
+    bool disc_set = bt_set_prop("Discoverable", on);
+    bool pair_set = bt_set_prop("Pairable", on);
+    if (on && (!disc_set || !pair_set)) {
         usleep(1000000);
-        if (!disc) disc = bt_set_prop("Discoverable", true);
-        if (!pair) pair = bt_set_prop("Pairable", true);
+        if (!disc_set) disc_set = bt_set_prop("Discoverable", true);
+        if (!pair_set) pair_set = bt_set_prop("Pairable", true);
     }
     (void)powered;
-    g_bt_discoverable = disc;
-    g_bt_pairable = pair;
+    /* Record the resulting state, not the setter's success: setting
+     * Discoverable=false successfully must not be reported as "on". */
+    g_bt_discoverable = bt_get_prop_bool("Discoverable", disc_set ? on : g_bt_discoverable);
+    g_bt_pairable = bt_get_prop_bool("Pairable", pair_set ? on : g_bt_pairable);
 
     if (on) {
         bt_fetch_address();
-        if (disc || pair)
+        /* The readback races the vendor pairing window: on a successful
+         * pairing vbtd closes the window immediately (Discoverable ->
+         * false), so an all-false readback right after the SETs were
+         * accepted usually means "a device paired", not "control
+         * unavailable" (observed on-car 2026-11-10 11:47: the iPhone
+         * paired at :25 and the readback at :46 reported unavailable). */
+        if (g_bt_discoverable || g_bt_pairable)
             snprintf(g_pair_msg, sizeof(g_pair_msg),
                      "Pairing on - %s - discoverable %s - pairable %s",
                      g_cfg.cp_btaddr[0] ? g_cfg.cp_btaddr : "BT address unknown",
-                     disc ? "yes" : "no", pair ? "yes" : "no");
+                     g_bt_discoverable ? "yes" : "no",
+                     g_bt_pairable ? "yes" : "no");
+        else if (disc_set && pair_set)
+            snprintf(g_pair_msg, sizeof(g_pair_msg),
+                     "Pairing window closed - a device may have paired; check Settings > Bluetooth");
         else
             snprintf(g_pair_msg, sizeof(g_pair_msg),
                      "Bluetooth control unavailable; use Settings > Bluetooth on the car");
     } else {
-        snprintf(g_pair_msg, sizeof(g_pair_msg), "Pairing stopped");
+        snprintf(g_pair_msg, sizeof(g_pair_msg), "%s",
+                 (!disc_set || !pair_set || g_bt_discoverable || g_bt_pairable) ?
+                 "Pairing stop not confirmed" : "Pairing stopped");
     }
     set_msg("%s", g_pair_msg);
     bt_state_save();
-    return disc || pair;
+    if (!on) g_pair_stop_confirmed = disc_set && pair_set && !g_bt_discoverable && !g_bt_pairable;
+    return on ? (g_bt_discoverable || g_bt_pairable || (disc_set && pair_set)) : g_pair_stop_confirmed;
 }
 
 static bool carplay_ie_on(void)
@@ -1779,28 +2563,42 @@ static bool carplay_ie_on(void)
         return false;
     }
 
-    char out[2048];
+    char out[2048] = "";
     int rc = sh_out(out, sizeof(out),
                     "connmanctl tether_carplay_ie wifi on %s %s %s %s %s 2>&1",
                     mfg, model, name, id, bt);
-    if (rc != 0) {
-        log_msg("CarPlay IE rc=%d out=%s", rc, out);
-        set_msg("CarPlay IE command failed (manufacturer/model/id/BT may need fixing)");
-    } else {
-        set_msg("CarPlay IE enabled");
+    /* The vendor connmanctl can print an asynchronous D-Bus error on stderr
+     * and still exit 0, so rc alone is not success.  Treat an error string
+     * in the captured output as failure too. */
+    bool text_err = strstr(out, "Error") || strstr(out, "error") ||
+                    strstr(out, "failed");
+    if (rc != 0 || text_err) {
+        log_msg("CarPlay IE rc=%d out=%s", rc, trim(out));
+        set_msg("CarPlay IE command failed: %s",
+                trim(out)[0] ? trim(out) : "see daemon log");
+        return false;
     }
-    return rc == 0;
+    set_msg("CarPlay IE enabled");
+    return true;
 }
 
 static void carplay_ie_off(void)
 {
     sh("connmanctl tether_carplay_ie wifi off 2>/dev/null");
+    g_carplay_ie = false;
 }
 
 static void ensure_carplay_services(void)
 {
-    if (sh("systemctl is-active --quiet carplay_mdnsd.service 2>/dev/null") != 0)
-        sh("systemctl start carplay_mdnsd.service 2>/dev/null");
+    /* The vendor carplay_mdnsd.service is RemainAfterExit=true: after the
+     * process dies the unit still reports "active", so is-active cannot
+     * detect a dead mdnsd (observed on-car: BonjourBrowser
+     * kDNSServiceErr_ServiceNotRunning).  Check the process itself and
+     * restart the unit when it is gone. */
+    if (pid_by_executable("mdnsd") <= 0) {
+        log_msg("mdnsd not running; restarting carplay_mdnsd.service");
+        sh("systemctl restart carplay_mdnsd.service 2>/dev/null");
+    }
     if (sh("systemctl is-active --quiet carplay_iAP2.service 2>/dev/null") != 0)
         sh("systemctl start carplay_iAP2.service 2>/dev/null");
 }
@@ -1909,14 +2707,19 @@ static bool vbt_set_wireless_carplay(bool value, bool *changed)
 
         mkdir(VBT_BAK_DIR, 0755);
         char bak[512];
-        snprintf(bak, sizeof(bak), VBT_BAK_DIR "/VBTConfig.json.%ld",
-                 (long)time(NULL));
-        write_file_atomic(bak, before, 0600);
+        snprintf(bak, sizeof(bak), VBT_BAK_DIR "/vbt-%s.original", i == 0 ? "app" : "rw");
+        if (!file_exists(bak) && write_file_atomic(bak, before, 0600) != 0) {
+            log_msg("cannot preserve VBT baseline for %s", paths[i]);
+            continue;
+        }
         if (write_file_atomic(paths[i], text, 0644) != 0) {
             log_msg("cannot write %s (continuing to next VBT path)", paths[i]);
             continue;
         }
         if (changed) *changed = true;
+        char applied[512];
+        snprintf(applied, sizeof(applied), VBT_BAK_DIR "/vbt-%s.applied", i == 0 ? "app" : "rw");
+        write_file_atomic(applied, text, 0600);
         ok = true;
         log_msg("patched %s ENABLE_WIRELESS_CARPLAY=%s",
                 paths[i], value ? "true" : "false");
@@ -1964,27 +2767,87 @@ static bool bt_pair_start(void)
 static void bt_pair_stop(void)
 {
     bt_set_pairing(false);
-    set_msg("CarPlay pairing stopped");
+    set_msg("%s", g_pair_msg);
 }
 
-static void client_disconnect(void)
+static bool client_disconnect(void)
 {
-    char out[8192];
-    if (sh_out(out, sizeof(out), "connmanctl services 2>/dev/null") == 0) {
-        char service[256];
-        if (g_cfg.ssid[0] && find_service(out, g_cfg.ssid, service, sizeof(service)))
-            sh("connmanctl disconnect %s 2>/dev/null", service);
+    char out[16384];
+    if (sh_out(out, sizeof(out), "connmanctl services 2>/dev/null") != 0) return false;
+    bool ok = true;
+    int count = 0;
+    char *save = NULL;
+    for (char *line = strtok_r(out, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        char *token = NULL;
+        for (char *s = line; (s = strstr(s, "wifi_")); s += 5)
+            if (s == line || isspace((unsigned char)s[-1])) token = s;
+        if (!token) {
+            if (!strncmp(trim(line), "Error", 5)) return false;
+            continue;
+        }
+        size_t len = strcspn(token, " \t\r");
+        token[len] = 0;
+        if (!len || strspn(token, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != len)
+            continue;
+        if (++count > 32) return false;
+        char detail[8192];
+        if (sh_out(detail, sizeof(detail), "connmanctl services %s 2>/dev/null", token) != 0) {
+            ok = false;
+            continue;
+        }
+        bool active = false, known = false;
+        char *d_save = NULL;
+        for (char *d = strtok_r(detail, "\n", &d_save); d; d = strtok_r(NULL, "\n", &d_save)) {
+            d = trim(d);
+            if (strncmp(d, "State = ", 8)) continue;
+            known = true;
+            const char *state = trim(d + 8);
+            active = !strcmp(state, "association") || !strcmp(state, "configuration") ||
+                     !strcmp(state, "ready") || !strcmp(state, "online");
+        }
+        if (!known) ok = false;
+        if (active) {
+            /* No cellular/ethernet changes, saved-profile deletion, or
+             * persistent AutoConnect changes. Read back radio state later. */
+            log_msg("station reconciliation: disconnecting active WiFi service");
+            if (sh("connmanctl disconnect %s 2>/dev/null", token) != 0) ok = false;
+        }
     }
+    return ok;
 }
 
 static void write_status(void);
 
-static bool client_wait_ip(int attempts)
+/* In client mode an address alone is not proof of connection: a leftover AP
+ * address (10.42.0.1) or another interface's address must not count.  Require
+ * an actual 4-way-handshake-complete association via the supplicant. */
+static bool client_associated(void)
+{
+    return wpa_state_completed();
+}
+
+static bool client_service_ready(const char *service, const char *ip)
+{
+    char out[8192], compact[8192];
+    if (sh_out(out, sizeof(out), "connmanctl services %s 2>/dev/null", service) != 0) return false;
+    size_t at = 0;
+    for (const char *p = out; *p && at + 1 < sizeof(compact); p++)
+        if (!isspace((unsigned char)*p)) compact[at++] = *p;
+    compact[at] = 0;
+    if (!strstr(compact, "State=ready") && !strstr(compact, "State=online")) return false;
+    char address[96]; snprintf(address, sizeof(address), "Address=%s", ip);
+    const char *hit = strstr(compact, address);
+    if (!hit) return false;
+    char next = hit[strlen(address)];
+    return next == ',' || next == ']' || next == '\0';
+}
+
+static bool client_wait_ip(const char *service, int attempts)
 {
     for (int i = 0; i < attempts; i++) {
         char ip[64];
-        if (wlan_ip(ip, sizeof(ip))) {
-            set_msg("client connected to '%s' (%s)", g_cfg.ssid, ip);
+        if (wlan_ip(ip, sizeof(ip)) && client_associated() && client_service_ready(service, ip)) {
+            set_msg("client connected to '%s' (%s)", net_ssid(g_client_net), ip);
             return true;
         }
         if (g_stop) return false;
@@ -1999,122 +2862,127 @@ static bool client_connman_find(char *service, size_t service_n)
 {
     char out[32768];
     for (int i = 0; i < 16; i++) {
-        if (sh_out(out, sizeof(out), "connmanctl services 2>/dev/null") == 0 &&
-            find_service(out, g_cfg.ssid, service, service_n))
-            return true;
+        if (sh_out(out, sizeof(out), "connmanctl services 2>/dev/null") == 0) {
+            int net = find_service_any(out, service, service_n, NULL, 0);
+            if (net >= 0) {
+                g_client_net = net;
+                return true;
+            }
+        }
         usleep(500000);
     }
     return false;
 }
 
-static bool client_connect_wpa_cli(void)
+typedef struct { bool registered, secret_sent, connected, failed; } agent_state_t;
+
+/* This is deliberately driven by received prompts, not elapsed sleeps. It
+ * also gives the tests the exact credential-interaction state machine. */
+static bool agent_reply(agent_state_t *s, const char *received,
+                        const char *service, char *reply, size_t n)
 {
-    char idbuf[64];
-    sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 remove_network all >/dev/null 2>&1");
-    if (sh_out(idbuf, sizeof(idbuf),
-               "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 add_network 2>/dev/null") != 0)
-        return false;
-    char *idp = trim(idbuf);
-    if (!*idp || !strncmp(idp, "FAIL", 4)) {
-        log_msg("wpa_cli add_network failed: %s", idp);
+    reply[0] = 0;
+    if (strstr(received, "Error") || strstr(received, "connect-failed") ||
+        strstr(received, "cancelled") || strstr(received, "Retry (yes/no)")) {
+        s->failed = true;
         return false;
     }
-    int id = atoi(idp);
-
-    char quoted[512], q[600];
-    snprintf(quoted, sizeof(quoted), "\"%s\"", g_cfg.ssid);
-    shq(q, sizeof(q), quoted);
-    sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 set_network %d ssid %s >/dev/null 2>&1", id, q);
-
-    if (g_cfg.psk[0]) {
-        snprintf(quoted, sizeof(quoted), "\"%s\"", g_cfg.psk);
-        shq(q, sizeof(q), quoted);
-        sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 set_network %d psk %s >/dev/null 2>&1", id, q);
-        sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 set_network %d key_mgmt WPA-PSK >/dev/null 2>&1", id);
-    } else {
-        sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 set_network %d key_mgmt NONE >/dev/null 2>&1", id);
+    if (!s->registered && strstr(received, "Agent registered")) {
+        s->registered = true;
+        snprintf(reply, n, "connect %s\n", service);
+    } else if (s->registered && strstr(received, "Passphrase?")) {
+        const char *psk = net_psk(g_client_net);
+        if (s->secret_sent || !psk[0]) { s->failed = true; return false; }
+        s->secret_sent = true;
+        snprintf(reply, n, "%s\n", psk);
+    } else if (s->registered && (strstr(received, "Connected ") ||
+                                strstr(received, "Connection successful"))) {
+        s->connected = true;
     }
-    sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 enable_network %d >/dev/null 2>&1", id);
-    sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 select_network %d >/dev/null 2>&1", id);
-    log_msg("wpa_cli network %d for '%s'", id, g_cfg.ssid);
-
-    for (int i = 0; i < 30; i++) {
-        if (wpa_state_completed()) return true;
-        if (g_stop) return false;
-        if ((i % 4) == 3) write_status();
-        usleep(500000);
-    }
-    return false;
+    return true;
 }
 
-/* This vendor connmanctl has no `config --wifi`: the only config options
- * are nameservers/timeservers/domains/ipv4/ipv6/proxy/autoconnect/remove.
- * The passphrase must be supplied by a registered agent, so run the
- * interactive command loop non-interactively:
- *
- *     agent on
- *     connect <service>
- *     <passphrase>
- *     quit
- *
- * Verified against the car binary: it prints "Passphrase? " and reads the
- * next stdin line when connmand raises RequestInput.  The script lives in
- * a 0600 file (never argv) and is removed immediately. */
+/* Keep ConnMan as the sole association/DHCP owner. Credentials travel only
+ * over the child's stdin after RequestInput; never a script, argv or log. */
 static bool client_connman_agent(const char *service)
 {
-    if (strchr(g_cfg.psk, '\n') || strchr(g_cfg.psk, '\r')) {
+    const char *psk = net_psk(g_client_net);
+    if (strchr(psk, '\n') || strchr(psk, '\r')) {
         log_msg("client: passphrase contains a newline; refusing agent flow");
         return false;
     }
 
-    /* Feed the interactive loop in real time.  Piping all four lines at
-     * once races the RequestInput callback: readline can consume the
-     * passphrase as a command before connmand asks for it.  A short paced
-     * script lets connmanctl register the agent and raise "Passphrase? "
-     * first.  The passphrase is in a 0600 script, never in argv, and the
-     * script is removed immediately after the run. */
-    char path[128];
-    snprintf(path, sizeof(path), APP_DIR "/connman.agent");
-    FILE *f = fopen(path, "w");
-    if (!f) {
-        log_msg("client: cannot create %s: %s", path, strerror(errno));
-        return false;
+    int in[2], out[2];
+    if (pipe2(in, O_CLOEXEC) != 0) return false;
+    if (pipe2(out, O_CLOEXEC) != 0) { close(in[0]); close(in[1]); return false; }
+    pid_t pid = fork();
+    if (pid == 0) {
+        signal(SIGTERM, SIG_DFL); signal(SIGINT, SIG_DFL);
+        dup2(in[0], STDIN_FILENO);
+        dup2(out[1], STDOUT_FILENO); dup2(out[1], STDERR_FILENO);
+        close(in[0]); close(in[1]); close(out[0]); close(out[1]);
+        execlp("connmanctl", "connmanctl", (char *)NULL);
+        _exit(127);
     }
-
-    char psk_q[512];
-    shq(psk_q, sizeof(psk_q), g_cfg.psk);
-
-    fputs("#!/bin/sh\n", f);
-    fputs("printf 'agent on\\n'\n", f);
-    fputs("sleep 1\n", f);
-    fprintf(f, "printf 'connect %s\\n'\n", service);
-    /* Give connmand time to raise RequestInput and install its
-     * "Passphrase? " readline prompt before the key line arrives. */
-    fputs("sleep 5\n", f);
-    if (g_cfg.psk[0])
-        fprintf(f, "printf '%%s\\n' %s\n", psk_q);
-    fputs("sleep 6\n", f);
-    fputs("printf 'quit\\n'\n", f);
-    if (fclose(f) != 0) {
-        log_msg("client: cannot write %s: %s", path, strerror(errno));
-        unlink(path);
-        return false;
+    close(in[0]); close(out[1]);
+    if (pid < 0) { close(in[1]); close(out[0]); return false; }
+    fcntl(out[0], F_SETFL, O_NONBLOCK);
+    agent_state_t state = {0};
+    char received[8192] = "";
+    size_t used = 0;
+    bool reaped = false;
+    int st = 0;
+    (void)write(in[1], "agent on\n", 9);
+    int64_t deadline = now_ms() + 45000;
+    while (!g_stop && now_ms() < deadline && !state.failed && !state.connected) {
+        char chunk[512];
+        ssize_t nr = read(out[0], chunk, sizeof(chunk));
+        if (nr > 0) {
+            if (used + (size_t)nr >= sizeof(received)) { state.failed = true; break; }
+            memcpy(received + used, chunk, (size_t)nr); used += (size_t)nr;
+            received[used] = 0;
+            char reply[512];
+            agent_reply(&state, received, service, reply, sizeof(reply));
+            if (reply[0]) {
+                size_t len = strlen(reply);
+                if (write(in[1], reply, len) != (ssize_t)len) state.failed = true;
+                memset(reply, 0, sizeof(reply));
+                used = 0; received[0] = 0;
+            }
+        } else if (nr == 0) { break; }
+        if (waitpid(pid, &st, WNOHANG) == pid) { reaped = true; break; }
+        struct pollfd pfd = {.fd = out[0], .events = POLLIN};
+        poll(&pfd, 1, 100);
     }
-    chmod(path, 0600);
-
-    char out[4096] = "";
-    int rc = sh_out(out, sizeof(out), "sh %s | connmanctl 2>&1", path);
-    unlink(path);
-    redact_secret(out, g_cfg.psk);
-    log_msg("connmanctl agent rc=%d out=%s", rc, trim(out));
-    return rc == 0 && !strstr(out, "Error");
+    /* No raw interactive transcript: it may echo credentials or cached keys. */
+    log_msg("ConnMan agent: registered=%d requested_key=%d connected=%d failed=%d",
+            state.registered, state.secret_sent, state.connected, state.failed);
+    close(in[1]); close(out[0]);
+    if (!reaped) {
+        kill(pid, SIGKILL);
+        while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+    }
+    return !g_stop && state.connected && !state.failed;
 }
 
 static bool client_connect(void)
 {
-    if (!g_cfg.ssid[0]) {
+    if (net_total() == 0) {
         set_msg("no client SSID imported (use wifi.txt)");
         return false;
+    }
+    /* Validate every configured network's key up front: the connect target
+     * is chosen by scan visibility, so a bad key must fail before the
+     * 20-60s stack bring-up, not after it. */
+    for (int i = 0; i < WIFI_NETS_MAX; i++) {
+        const char *ssid = net_ssid(i);
+        if (!ssid[0]) continue;
+        size_t keylen = strlen(net_psk(i));
+        if (keylen && (keylen < 8 || keylen > 64 ||
+            (keylen == 64 && strspn(net_psk(i), "0123456789abcdefABCDEF") != 64))) {
+            set_msg("client: WPA key for '%s' must be 8-63 characters or 64 hexadecimal digits", ssid);
+            return false;
+        }
     }
     if (!ensure_wifi_ready()) {
         set_msg("client: WiFi stack not ready");
@@ -2123,39 +2991,38 @@ static bool client_connect(void)
 
     sh("connmanctl enable wifi 2>/dev/null");
     iface_up();
+    bool station = false;
+    for (int i = 0; i < 20 && !g_stop; i++) {
+        char info[2048];
+        if (sh_out(info, sizeof(info), "iw dev wlan0 info 2>/dev/null") == 0 && strstr(info, "type managed")) {
+            station = true; break;
+        }
+        usleep(250000);
+    }
+    if (!station) {
+        set_msg("client: AP teardown did not yield a managed station interface");
+        return false;
+    }
     sh("connmanctl scan wifi 2>/dev/null");
-    sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 scan >/dev/null 2>&1");
 
     char service[256];
     bool found = client_connman_find(service, sizeof(service));
-    if (found) {
-        if (client_connman_agent(service) && client_wait_ip(40))
-            return true;
-        log_msg("ConnMan agent connect to '%s' did not yield an IP; trying wpa_cli",
-                g_cfg.ssid);
-    }
-
-    /* Direct wpa_cli path.  This also covers networks ConnMan did not list
-     * (hidden/imported SSID).  ConnMan is then used only for DHCP. */
-    if (!client_connect_wpa_cli()) {
-        char st[2048];
-        sh_out(st, sizeof(st), "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 status 2>/dev/null");
-        set_msg("client: could not associate with '%s': %s",
-                g_cfg.ssid, trim(st));
+    if (!found) {
+        set_msg("client: none of the %d configured network%s visible; hidden-network provisioning is not supported",
+                net_total(), net_total() == 1 ? "" : "s");
         return false;
     }
-
-    /* The supplicant is associated; let ConnMan register the service and
-     * take over DHCP.  If it needs the key, the agent supplies it. */
-    found = client_connman_find(service, sizeof(service));
-    if (found)
-        client_connman_agent(service);
-
-    if (client_wait_ip(40)) return true;
+    if (client_associated() && client_wait_ip(service, 2)) return true;
+    bool agent_ok = client_connman_agent(service);
+    /* A cached connection can finish between the precheck and connect reply
+     * (including an AlreadyConnected error). Actual identity/DHCP readback is
+     * authoritative, not the CLI's wording or exit code. */
+    if (client_wait_ip(service, 40)) return true;
 
     char st[2048];
     sh_out(st, sizeof(st), "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 status 2>/dev/null");
-    set_msg("client connected to '%s' but no IP: %s", g_cfg.ssid, trim(st));
+    set_msg("client: expected station association/address not ready for '%s'%s",
+            net_ssid(g_client_net), agent_ok ? "" : " (agent failed or timed out)");
     return false;
 }
 
@@ -2187,21 +3054,54 @@ static void fw_tool(char *out, size_t n)
     str_copy(out, n, "iptables");
 }
 
-static void fw_open(int port)
+/* Dedicated chains make cleanup independent of a cancelled child's port
+ * handoff, and never remove an identical vendor/owner INPUT accept rule.
+ * The chain is hooked into INPUT (inbound CarPlay/mDNS/SSH) and OUTPUT
+ * (outbound mDNS announcements): the vendor HARDEN_LOUT chain silently
+ * drops all multicast (224.0.0.0/4 and ff00::/8) unless a rule accepts
+ * it first, and the stock rules only do that for ncm0 — without the
+ * OUTPUT hook the phone can never see the car's _airplay._tcp records
+ * even with the AP up. */
+static bool fw_chain_ensure(const char *tool, const char *chain)
+{
+    sh("%s -N %s 2>/dev/null", tool, chain);
+    if (sh("%s -C INPUT -i wlan0 -j %s 2>/dev/null", tool, chain) != 0 &&
+        sh("%s -I INPUT -i wlan0 -j %s 2>/dev/null", tool, chain) != 0) {
+        log_msg("cannot install owned firewall chain %s (INPUT)", chain);
+        return false;
+    }
+    if (sh("%s -C OUTPUT -o wlan0 -j %s 2>/dev/null", tool, chain) != 0 &&
+        sh("%s -I OUTPUT -o wlan0 -j %s 2>/dev/null", tool, chain) != 0) {
+        log_msg("cannot install owned firewall chain %s (OUTPUT)", chain);
+        return false;
+    }
+    return true;
+}
+
+static void fw_chain_close(const char *tool, const char *chain)
+{
+    for (int i = 0; i < 4 && sh("%s -C INPUT -i wlan0 -j %s 2>/dev/null", tool, chain) == 0; i++)
+        sh("%s -D INPUT -i wlan0 -j %s 2>/dev/null", tool, chain);
+    for (int i = 0; i < 4 && sh("%s -C OUTPUT -o wlan0 -j %s 2>/dev/null", tool, chain) == 0; i++)
+        sh("%s -D OUTPUT -o wlan0 -j %s 2>/dev/null", tool, chain);
+    sh("%s -F %s 2>/dev/null", tool, chain);
+    sh("%s -X %s 2>/dev/null", tool, chain);
+}
+
+static bool fw_open(int port)
 {
     char tool[256];
     fw_tool(tool, sizeof(tool));
-    if (sh("%s -C INPUT -i wlan0 -p tcp --dport %d -j ACCEPT 2>/dev/null",
-           tool, port) != 0)
-        sh("%s -I INPUT -i wlan0 -p tcp --dport %d -j ACCEPT 2>/dev/null",
-           tool, port);
+    if (!fw_chain_ensure(tool, "WIFI_APP_SSH")) return false;
+    return sh("%s -C WIFI_APP_SSH -p tcp --dport %d -j ACCEPT 2>/dev/null", tool, port) == 0 ||
+           sh("%s -I WIFI_APP_SSH -p tcp --dport %d -j ACCEPT 2>/dev/null", tool, port) == 0;
 }
 
 static void fw_close(int port)
 {
     char tool[256];
     fw_tool(tool, sizeof(tool));
-    sh("%s -D INPUT -i wlan0 -p tcp --dport %d -j ACCEPT 2>/dev/null",
+    sh("%s -D WIFI_APP_SSH -p tcp --dport %d -j ACCEPT 2>/dev/null",
        tool, port);
 }
 
@@ -2229,88 +3129,48 @@ static void fw6_tool(char *out, size_t n)
     str_copy(out, n, "ip6tables");
 }
 
-static void fw6_port_add(const char *proto, int port)
+static bool fw6_port_add(const char *proto, int port)
 {
     char tool[256];
     fw6_tool(tool, sizeof(tool));
-    if (sh("%s -C INPUT -i wlan0 -p %s --dport %d -j ACCEPT 2>/dev/null",
-           tool, proto, port) != 0)
-        sh("%s -I INPUT -i wlan0 -p %s --dport %d -j ACCEPT 2>/dev/null",
-           tool, proto, port);
+    if (!fw_chain_ensure(tool, "WIFI_APP_CP")) return false;
+    return sh("%s -C WIFI_APP_CP -p %s --dport %d -j ACCEPT 2>/dev/null", tool, proto, port) == 0 ||
+           sh("%s -I WIFI_APP_CP -p %s --dport %d -j ACCEPT 2>/dev/null", tool, proto, port) == 0;
 }
 
-static void fw6_port_del(const char *proto, int port)
-{
-    char tool[256];
-    fw6_tool(tool, sizeof(tool));
-    sh("%s -D INPUT -i wlan0 -p %s --dport %d -j ACCEPT 2>/dev/null",
-       tool, proto, port);
-}
-
-static void fw_port_add(const char *proto, int port)
+static bool fw_port_add(const char *proto, int port)
 {
     char tool[256];
     fw_tool(tool, sizeof(tool));
-    if (sh("%s -C INPUT -i wlan0 -p %s --dport %d -j ACCEPT 2>/dev/null",
-           tool, proto, port) != 0)
-        sh("%s -I INPUT -i wlan0 -p %s --dport %d -j ACCEPT 2>/dev/null",
-           tool, proto, port);
+    if (!fw_chain_ensure(tool, "WIFI_APP_CP")) return false;
+    return sh("%s -C WIFI_APP_CP -p %s --dport %d -j ACCEPT 2>/dev/null", tool, proto, port) == 0 ||
+           sh("%s -I WIFI_APP_CP -p %s --dport %d -j ACCEPT 2>/dev/null", tool, proto, port) == 0;
 }
 
-static void fw_port_del(const char *proto, int port)
-{
-    char tool[256];
-    fw_tool(tool, sizeof(tool));
-    sh("%s -D INPUT -i wlan0 -p %s --dport %d -j ACCEPT 2>/dev/null",
-       tool, proto, port);
-}
-
-static void carplay_fw_open(void)
+static bool carplay_fw_open(void)
 {
     /* AirPlay / CarPlay / DHCP / mDNS on the AP interface.  The stock
      * firewall only opens these on ncm0 (USB CarPlay); wireless needs
      * its own wlan0 rules. */
-    fw_port_add("udp", 67);
-    fw_port_add("udp", 5353);
-    fw_port_add("udp", 5020);
-    fw_port_add("udp", 6000);
-    fw_port_add("udp", 6003);
-    fw_port_add("udp", 6011);
-    fw_port_add("tcp", 5000);
-    fw_port_add("tcp", 5001);
-    fw_port_add("tcp", 6030);
-    fw_port_add("tcp", 7000);
+    bool ok = true;
+    const int udp[] = {67, 5353, 5020, 6000, 6003, 6011};
+    const int tcp[] = {5000, 5001, 6030, 7000};
+    for (size_t i = 0; i < sizeof(udp)/sizeof(udp[0]); i++) if (!fw_port_add("udp", udp[i])) ok = false;
+    for (size_t i = 0; i < sizeof(tcp)/sizeof(tcp[0]); i++) if (!fw_port_add("tcp", tcp[i])) ok = false;
 
     /* mDNS and AirPlay also arrive over IPv6 link-local. */
-    fw6_port_add("udp", 5353);
-    fw6_port_add("tcp", 5000);
-    fw6_port_add("tcp", 5001);
-    fw6_port_add("tcp", 7000);
-    fw6_port_add("udp", 6000);
-    fw6_port_add("udp", 6003);
-    fw6_port_add("udp", 6011);
+    const int udp6[] = {5353, 6000, 6003, 6011};
+    const int tcp6[] = {5000, 5001, 7000};
+    for (size_t i = 0; i < sizeof(udp6)/sizeof(udp6[0]); i++) if (!fw6_port_add("udp", udp6[i])) ok = false;
+    for (size_t i = 0; i < sizeof(tcp6)/sizeof(tcp6[0]); i++) if (!fw6_port_add("tcp", tcp6[i])) ok = false;
+    return ok;
 }
 
 static void carplay_fw_close(void)
 {
-    fw_port_del("udp", 67);
-    fw_port_del("udp", 5353);
-    fw_port_del("udp", 5020);
-    fw_port_del("udp", 6000);
-    fw_port_del("udp", 6003);
-    fw_port_del("udp", 6011);
-    fw_port_del("tcp", 5000);
-    fw_port_del("tcp", 5001);
-    fw_port_del("tcp", 6030);
-    fw_port_del("tcp", 7000);
-
-    fw6_port_del("udp", 5353);
-    fw6_port_del("tcp", 5000);
-    fw6_port_del("tcp", 5001);
-    fw6_port_del("tcp", 7000);
-    fw6_port_del("udp", 6000);
-    fw6_port_del("udp", 6003);
-    fw6_port_del("udp", 6011);
+    char tool[256];
+    fw_tool(tool, sizeof(tool)); fw_chain_close(tool, "WIFI_APP_CP");
+    fw6_tool(tool, sizeof(tool)); fw_chain_close(tool, "WIFI_APP_CP");
 }
 
 static bool line_prefix_present(const char *path, const char *prefix)
@@ -2332,7 +3192,9 @@ static bool line_prefix_present(const char *path, const char *prefix)
 
 static int append_line(const char *path, const char *line)
 {
-    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    /* Open read+write: pread() on an O_WRONLY descriptor fails, which used
+     * to concatenate a new account entry onto a file lacking a final \n. */
+    int fd = open(path, O_RDWR | O_CREAT | O_APPEND, 0644);
     if (fd < 0) return -1;
     struct stat st;
     if (fstat(fd, &st) == 0 && st.st_size > 0) {
@@ -2349,7 +3211,17 @@ static int append_line(const char *path, const char *line)
 static bool ensure_line(const char *path, const char *prefix, const char *line)
 {
     if (line_prefix_present(path, prefix)) return true;
-    return append_line(path, line) == 0;
+    char marker[512] = "";
+    if (!strcmp(prefix, "car:")) {
+        mkdir(VBT_BAK_DIR, 0700);
+        mkdir(VBT_BAK_DIR "/accounts", 0700);
+        const char *base = strrchr(path, '/');
+        snprintf(marker, sizeof(marker), VBT_BAK_DIR "/accounts/%s", base ? base + 1 : path);
+        if (write_file_atomic(marker, line, 0600) != 0) return false;
+    }
+    bool ok = append_line(path, line) == 0;
+    if (!ok && marker[0]) unlink(marker);
+    return ok;
 }
 
 /*
@@ -2360,6 +3232,9 @@ static bool ensure_line(const char *path, const char *prefix, const char *line)
  */
 static bool ensure_car_user(void)
 {
+#ifdef WIFI_TEST
+    return true; /* never touch host accounts from the unit-test binary */
+#endif
     bool ok = true;
 
     if (!ensure_line("/etc/passwd", "car:", CAR_PASSWD_LINE))
@@ -2439,10 +3314,23 @@ static bool pid_is_our_dropbear(int pid)
     snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
     int n = read_file(path, cmd, sizeof(cmd));
     if (n <= 0) return false;
-    for (int i = 0; i < n; i++)
-        if (cmd[i] == 0) cmd[i] = ' ';
-    if (!strstr(cmd, "dropbear")) return false;
-    return strstr(cmd, DROPBEAR_BIN) || strstr(cmd, DROPBEAR_MULTI);
+    /* argv[0], not arbitrary shell text or dropbearkey arguments. */
+    return !strcmp(cmd, DROPBEAR_BIN) || !strcmp(cmd, DROPBEAR_MULTI);
+}
+
+static int owned_dropbear_pid(void)
+{
+    DIR *d = opendir("/proc");
+    if (!d) return -1;
+    struct dirent *de;
+    int pid = -1;
+    while ((de = readdir(d))) {
+        if (isdigit((unsigned char)de->d_name[0]) && pid_is_our_dropbear(atoi(de->d_name))) {
+            pid = atoi(de->d_name); break;
+        }
+    }
+    closedir(d);
+    return pid;
 }
 
 static bool ssh_running(void)
@@ -2452,9 +3340,7 @@ static bool ssh_running(void)
         int pid = atoi(buf);
         if (pid_is_our_dropbear(pid)) return true;
     }
-    if (pid_by_cmdline(DROPBEAR_BIN) > 0) return true;
-    if (pid_by_cmdline(DROPBEAR_MULTI) > 0) return true;
-    return false;
+    return owned_dropbear_pid() > 0;
 }
 
 static void ssh_stop(void)
@@ -2465,16 +3351,24 @@ static void ssh_stop(void)
         if (pid_is_our_dropbear(pid))
             kill_pid(pid);
     }
-    int pid = pid_by_cmdline(DROPBEAR_BIN);
-    if (pid > 0) kill_pid(pid);
-    pid = pid_by_cmdline(DROPBEAR_MULTI);
-    if (pid > 0) kill_pid(pid);
-    if (g_ssh_active_port) {
-        fw_close(g_ssh_active_port);
-        g_ssh_active_port = 0;
-    } else {
-        fw_close(g_cfg.ssh_port);
+    DIR *d = opendir("/proc");
+    if (d) {
+        struct dirent *de;
+        while ((de = readdir(d))) {
+            int pid = atoi(de->d_name);
+            if (pid_is_our_dropbear(pid)) kill_pid(pid);
+        }
+        closedir(d);
     }
+    for (int i = 0; i < 10; i++) {
+        int pid = owned_dropbear_pid();
+        if (pid <= 0) break;
+        if (i == 9 && pid_is_our_dropbear(pid)) kill(pid, SIGKILL);
+        usleep(50000);
+    }
+    char tool[256]; fw_tool(tool, sizeof(tool));
+    fw_chain_close(tool, "WIFI_APP_SSH");
+    g_ssh_active_port = 0;
     g_ssh_port_fallback = false;
     g_ssh_bound_ip[0] = 0;
     unlink(SSH_PID);
@@ -2483,13 +3377,26 @@ static void ssh_stop(void)
 
 static bool ssh_start(void)
 {
-    if (!file_exists(DROPBEAR_BIN) && !file_exists(DROPBEAR_MULTI)) {
-        set_msg("dropbear binary missing");
+    char ip[64] = "";
+    bool ready = false;
+    if (g_cfg.wlan_on && g_cfg.mode == MODE_CARPLAY) {
+        ap_probe_t p;
+        ap_probe(&p);
+        ready = p.state == AP_READY;
+        if (ready) str_copy(ip, sizeof(ip), p.ip);
+    } else if (g_cfg.wlan_on && g_cfg.mode == MODE_CLIENT && client_associated() && wlan_ip(ip, sizeof(ip))) {
+        char services[16384], service[256];
+        ready = sh_out(services, sizeof(services), "connmanctl services 2>/dev/null") == 0 &&
+                find_service_any(services, service, sizeof(service), NULL, 0) >= 0 &&
+                client_service_ready(service, ip);
+    }
+    if (!ready) {
+        ssh_stop();
+        set_msg("SSH deferred: requested WLAN role/address not ready");
         return false;
     }
-    char ip[64];
-    if (!wlan_ip(ip, sizeof(ip))) {
-        set_msg("SSH deferred: no WLAN IP");
+    if (!file_exists(DROPBEAR_BIN) && !file_exists(DROPBEAR_MULTI)) {
+        set_msg("dropbear binary missing");
         return false;
     }
     if (ssh_running()) {
@@ -2517,21 +3424,33 @@ static bool ssh_start(void)
     mkdir(SSH_HOME, 0700);
     mkdir(SSH_HOME "/.ssh", 0700);
 
+    /* Replace (not append to) the effective authorized_keys: importing a new
+     * key set must revoke the previous one.  write_file_atomic renames, so
+     * dropbear never sees a half-written file. */
     if (file_exists(SSH_KEYS)) {
         char keys[16384];
         if (read_file(SSH_KEYS, keys, sizeof(keys)) > 0) {
-            int fd = open(SSH_HOME "/.ssh/authorized_keys",
-                          O_WRONLY | O_CREAT | O_APPEND, 0600);
-            if (fd >= 0) {
-                write(fd, keys, strlen(keys));
-                close(fd);
-                sh("sort -u " SSH_HOME "/.ssh/authorized_keys -o " SSH_HOME "/.ssh/authorized_keys 2>/dev/null");
+            char eff[512];
+            snprintf(eff, sizeof(eff), SSH_HOME "/.ssh/authorized_keys");
+            if (write_file_atomic(eff, keys, 0600) != 0) {
+                log_msg("cannot write effective authorized_keys: %s", strerror(errno));
+                set_msg("SSH not started: effective key replacement failed");
+                return false;
             }
+        } else {
+            set_msg("SSH not started: imported keys are empty or unreadable");
+            return false;
         }
+    } else {
+        unlink(SSH_HOME "/.ssh/authorized_keys");
     }
 
     g_ssh_active_port = g_cfg.ssh_port;
-    fw_open(g_ssh_active_port);
+    if (!fw_open(g_ssh_active_port)) {
+        set_msg("SSH not started: owned firewall rule could not be installed");
+        g_ssh_active_port = 0;
+        return false;
+    }
 
     const char *bin = file_exists(DROPBEAR_BIN) ? DROPBEAR_BIN : DROPBEAR_MULTI;
     const char *keygen = file_exists(DROPBEAR_KEY) ? DROPBEAR_KEY : NULL;
@@ -2573,6 +3492,7 @@ static bool ssh_start(void)
 
 static void stop_all(void)
 {
+    g_carplay_ie = false;
     ssh_stop();
     ap_stop();
     client_disconnect();
@@ -2584,21 +3504,32 @@ static void stop_all(void)
 static const char *mode_name(void);
 
 /* Runs in the apply child.  All slow network work lives here so the HTTP
- * loop and status polling stay responsive. */
+ * loop and status polling stay responsive.  The child never writes the
+ * config: it reports observed adjustments (band fallback, chosen SSH port)
+ * as "set key=value" lines and the parent alone persists them, so a canceled
+ * or stale child cannot save a config it did not apply. */
 static bool apply_mode_work(bool pair)
 {
     if (!g_cfg.wlan_on || g_cfg.mode == MODE_OFF) {
+        stop_oem_wifi();
         stop_all();
-        set_msg("WLAN off");
-        config_save();
-        return true;
+        bt_pair_stop();
+        ap_probe_t p;
+        ap_probe(&p);
+        bool off = !wpa_process_alive() && !ssh_running() && p.state == AP_ABSENT &&
+                   (!iface_present() || wifi_power_state() == 0);
+        set_msg("%s", off ? "WLAN off" : "WLAN-off cleanup could not be confirmed; recovery will retry");
+        return off;
     }
 
-    if (!ensure_wifi_ready())
-        return false;
-
     if (g_cfg.mode == MODE_CLIENT) {
-        ap_stop();
+        bt_pair_stop();
+        if (!ensure_wifi_ready()) { ssh_stop(); return false; }
+        if (!ap_stop()) {
+            ssh_stop();
+            set_msg("Client mode blocked: AP teardown not confirmed");
+            return false;
+        }
         carplay_ie_off();
         bool ok = client_connect();
         /* Capture the real association/DHCP error before ssh_start() can
@@ -2607,137 +3538,267 @@ static bool apply_mode_work(bool pair)
          * the on-car log. */
         char why[256] = "";
         if (!ok) str_copy(why, sizeof(why), g_last_msg);
-        if (g_cfg.ssh_enabled) ssh_start();
+        if (ok && g_cfg.ssh_enabled) ssh_start();
+        else ssh_stop();
         if (ok) set_msg("client mode: %s", g_cfg.ssid);
         else set_msg("client mode failed: %s", why);
-        config_save();
         return ok;
     }
 
     /* MODE_CARPLAY */
+    if (g_ap_restart_requested) {
+        ssh_stop();
+        if (!ap_stop()) {
+            set_msg("CarPlay explicit restart blocked: AP teardown not confirmed");
+            return false;
+        }
+    }
     if (pair)
         bt_pair_start();
-    client_disconnect();
+    else if (g_pairing_stop_requested)
+        bt_pair_stop();
     if (!ap_start()) {
-        set_msg("CarPlay AP failed to start (SSID=%s)", g_cfg.cp_ssid);
-        config_save();
+        /* ap_start() already recorded the stage-specific failure; do not
+         * replace it with a generic message. */
+        char why[256] = "";
+        str_copy(why, sizeof(why), g_last_msg);
+        ssh_stop();
+        ap_probe_t failure;
+        ap_probe(&failure);
+        ap_evidence("apply-failed", &failure);
+        char scan[128];
+        int rc = sh_out(scan, sizeof(scan), "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 get ap_scan 2>/dev/null");
+        char *value = trim(scan);
+        log_msg("AP failure: get ap_scan rc=%d value=%s (vendor support unverified)", rc,
+                !strcmp(value, "0") || !strcmp(value, "1") || !strcmp(value, "2") ? value : "unknown/unsupported");
+        set_msg("CarPlay AP failed to start (SSID=%s): %s", g_cfg.cp_ssid, why);
         return false;
     }
-    carplay_fw_open();
+    bool fw_ok = carplay_fw_open();
     bool ie_ok = carplay_ie_on();
+    g_carplay_ie = ie_ok;
     ensure_carplay_services();
 
     bool vbt_changed = false;
-    vbt_set_wireless_carplay(true, &vbt_changed);
+    bool vbt_ok = vbt_set_wireless_carplay(true, &vbt_changed);
     restart_vbtd_if_needed(vbt_changed);
 
     if (g_cfg.ssh_enabled) ssh_start();
-    char ap_ssid[80] = {0};
-    tethering_on(ap_ssid, sizeof(ap_ssid));
+    else ssh_stop();
+    ap_probe_t p;
+    ap_probe(&p);
+    if (p.state != AP_READY) {
+        ssh_stop();
+        ap_evidence("lost-during-service-setup", &p);
+        set_msg("CarPlay AP lost readiness during service setup");
+        return false;
+    }
     set_msg("CarPlay AP running (SSID=%s, %d MHz)%s",
-            ap_ssid[0] ? ap_ssid : g_cfg.cp_ssid, channel_to_freq(),
+            p.ssid, channel_to_freq(),
             ie_ok ? "" : " - CarPlay IE not set");
-    config_save();
-    return true;
+    bool services_ok = sh("systemctl is-active --quiet carplay_iAP2.service 2>/dev/null") == 0 &&
+                       sh("systemctl is-active --quiet carplay_mdnsd.service 2>/dev/null") == 0;
+    if (!services_ok) set_msg("CarPlay AP up, but transport services are not ready");
+    if (!vbt_ok) set_msg("CarPlay AP up, but wireless CarPlay configuration could not be confirmed");
+    if (!fw_ok) set_msg("CarPlay AP up, but owned firewall rules could not be installed");
+    return ie_ok && services_ok && vbt_ok && fw_ok;
 }
 
-/* Cancel an in-flight apply: the newest user intent wins. */
+/* Cancel an in-flight apply: the newest user intent wins.  The child runs in
+ * its own process group so shell/connmanctl descendants are signaled too,
+ * not just the worker PID. */
 static void apply_cancel(void)
 {
     if (g_apply_pid <= 0) return;
+    g_apply_cancelled = true;
+    g_cancel_ms = now_ms();
+    kill(-g_apply_pid, SIGTERM);
     kill(g_apply_pid, SIGTERM);
-    for (int i = 0; i < 20; i++) {
-        pid_t r = waitpid(g_apply_pid, NULL, WNOHANG);
-        if (r == g_apply_pid || (r < 0 && errno == ECHILD)) {
-            g_apply_pid = 0;
-            return;
-        }
-        usleep(100000);
-    }
-    kill(g_apply_pid, SIGKILL);
-    waitpid(g_apply_pid, NULL, 0);
-    g_apply_pid = 0;
 }
 
-/* Reap the apply child and fold its result into the live state. */
-static void apply_reap(void)
-{
-    if (g_apply_pid <= 0) return;
-    int st = 0;
-    pid_t r = waitpid(g_apply_pid, &st, WNOHANG);
-    if (r == 0) {
-        /* Client mode can spend ~20 s waiting for the supplicant, ~8 s
-         * finding the ConnMan service, ~9 s in the agent flow, then the
-         * wpa_cli fallback and DHCP waits.  150 s covers that path; a new
-         * mode request cancels the child immediately. */
-        if (now_ms() - g_apply_start_ms > 150000) {
-            log_msg("apply: timed out; killing");
-            kill(g_apply_pid, SIGKILL);
-            waitpid(g_apply_pid, NULL, 0);
-            g_apply_pid = 0;
-            g_apply_failed = true;
-            set_msg("apply timed out");
-            write_status();
-        }
-        return;
-    }
-    if (r < 0) {
-        if (errno == ECHILD) g_apply_pid = 0;
-        return;
-    }
-    g_apply_pid = 0;
+static bool dump_logs_to_usb(bool verbose);
+static void scan_networks(char *out, size_t n);
+static void start_pending_work(void);
 
-    char buf[512] = "";
-    int n = read_file(APPLY_RESULT, buf, sizeof(buf));
-    unlink(APPLY_RESULT);
-    bool ok = false;
-    char msg[256] = "apply finished";
-    if (n > 0) {
-        char *nl = strchr(buf, '\n');
-        if (nl) {
-            ok = atoi(buf) != 0;
-            str_copy(msg, sizeof(msg), trim(nl + 1));
-        }
+/* Entire result must belong to the current generation before any mutation,
+ * including messages, success flags, Bluetooth or SSH observations. */
+static bool accept_apply_result(char *buf)
+{
+    char *save = NULL;
+    char *l1 = strtok_r(buf, "\n", &save), *msg = strtok_r(NULL, "\n", &save);
+    int gen = -1, ok = -1;
+    char extra;
+    if (!l1 || !msg || sscanf(l1, "%d %d %c", &gen, &ok, &extra) != 2 ||
+        (ok != 0 && ok != 1) || gen != g_apply_gen) return false;
+    char *line;
+    while ((line = strtok_r(NULL, "\n", &save))) {
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq++ = 0;
+        int v = atoi(eq);
+        if (!strcmp(line, "cp_band") && v >= 0 && v <= 2) g_cfg.cp_band = v;
+        else if (!strcmp(line, "cp_channel") && v > 0 && v <= 165) g_cfg.cp_channel = v;
+        else if (!strcmp(line, "ssh_port") && v > 0 && v <= 65535) g_cfg.ssh_port = v;
+        else if (!strcmp(line, "carplay_ie")) g_carplay_ie = v == 1;
+        else if (!strcmp(line, "ssh_active_port")) g_ssh_active_port = v;
+        else if (!strcmp(line, "ssh_fallback")) g_ssh_port_fallback = v == 1;
+        else if (!strcmp(line, "bt_discoverable")) g_bt_discoverable = v == 1;
+        else if (!strcmp(line, "bt_pairable")) g_bt_pairable = v == 1;
+        else if (!strcmp(line, "pair_stop_ok") && v == 1) g_pairing_stop_requested = false;
+        else if (!strcmp(line, "bt_address")) str_copy(g_cfg.cp_btaddr, sizeof(g_cfg.cp_btaddr), eq);
+        else if (!strcmp(line, "cp_id")) str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), eq);
+        else if (!strcmp(line, "pair_message")) str_copy(g_pair_msg, sizeof(g_pair_msg), eq);
     }
     g_apply_failed = !ok;
+    if (g_work_kind == WORK_MODE) g_network_failed = !ok;
     set_msg("%s", msg);
-    log_msg("apply %s: %s", ok ? "ok" : "failed", msg);
+    if (!config_save()) {
+        g_apply_failed = true;
+        set_msg("State applied, but preferences could not be saved; they may revert at reboot");
+    }
+    bt_state_save();
+    return true;
+}
+
+static void request_work(work_t kind, bool pair)
+{
+    if (!g_cfg.wlan_on || g_cfg.mode != MODE_CARPLAY) g_ap_restart_requested = false;
+    if (kind == WORK_DUMP && (g_apply_pid > 0 || g_work_pending)) {
+        g_dump_requested = true;
+        return;
+    }
+    /* An SSH/import change during a mode transition must complete that
+     * transition using the latest preferences, not leave it half applied. */
+    if (kind == WORK_SSH && (g_work_pending || g_apply_pid > 0) &&
+        (g_work_kind == WORK_MODE || g_pending_kind == WORK_MODE ||
+         g_work_kind == WORK_SCAN || g_pending_kind == WORK_SCAN)) {
+        kind = WORK_MODE;
+        pair = g_current_pair || g_pending_pair;
+    }
+    apply_cancel();
+    if (kind != WORK_DUMP) g_apply_gen++;
+    g_last_apply_ms = now_ms();
+    g_apply_failed = false;
+    if (kind == WORK_MODE) g_last_mode_ms = g_last_apply_ms;
+    if (kind == WORK_DUMP) g_last_dump_try_ms = g_last_apply_ms;
+    g_pending_kind = kind;
+    g_pending_pair = pair;
+    g_work_pending = true;
+    config_save();  /* persist user intent, including Off, before slow work */
+    set_msg("%s", kind == WORK_SCAN ? "Scanning..." :
+            kind == WORK_DUMP ? "Saving logs..." :
+            kind == WORK_SSH ? "Updating SSH..." :
+            kind == WORK_PAIR_STOP ? "Stopping pairing..." : "Applying mode...");
+    start_pending_work();
     write_status();
 }
 
-static void apply_mode(bool pair)
-{
-    apply_cancel();
-    g_last_apply_ms = now_ms();
-    g_apply_failed = false;
-    unlink(APPLY_RESULT);
-    set_msg("applying %s...", mode_name());
-    write_status();
+static void apply_mode(bool pair) { request_work(WORK_MODE, pair); }
 
+static void start_pending_work(void)
+{
+    if (g_apply_pid > 0 || !g_work_pending || g_stop) return;
+    g_work_kind = g_pending_kind;
+    g_current_pair = g_pending_pair;
+    g_work_pending = false;
+    g_apply_cancelled = false;
+    unlink(APPLY_RESULT);
     pid_t pid = fork();
     if (pid == 0) {
         g_in_child = true;
+        setpgid(0, 0);
         /* Do not hold the HTTP listen/connection sockets open while the
          * apply runs; otherwise the client connection would stay half-open
          * until the apply finishes. */
-        for (int fd = 3; fd < 256; fd++) close(fd);
-        bool ok = apply_mode_work(pair);
-        char msg[256], buf[512];
-        str_copy(msg, sizeof(msg), g_last_msg);
-        snprintf(buf, sizeof(buf), "%d\n%s\n", ok ? 1 : 0, msg);
-        write_file_atomic(APPLY_RESULT, buf, 0600);
+        close_child_fds(-1);
+        g_apply_pid = 0;
+        bool ok = false;
+#ifdef WIFI_TEST
+        if (test_work) ok = test_work(g_work_kind, g_current_pair);
+        else
+#endif
+        if (g_work_kind == WORK_MODE) ok = apply_mode_work(g_current_pair);
+        else if (g_work_kind == WORK_SSH) {
+            if (g_pairing_stop_requested) bt_pair_stop();
+            ssh_stop();
+            ok = !g_cfg.ssh_enabled || !g_cfg.wlan_on || g_cfg.mode == MODE_OFF || ssh_start();
+        } else if (g_work_kind == WORK_PAIR_STOP) {
+            bt_pair_stop();
+            ok = g_pair_stop_confirmed;
+        } else if (g_work_kind == WORK_DUMP) ok = dump_logs_to_usb(true);
+        else if (g_work_kind == WORK_SCAN) {
+            char scan[32768];
+            scan_networks(scan, sizeof(scan));
+            ok = strstr(scan, "\"ok\":true") != NULL;
+            if (!g_stop) write_file_atomic(SCAN_RESULT, scan, 0600);
+        }
+        char buf[2048];
+        snprintf(buf, sizeof(buf), "%d %d\n%s\ncp_band=%d\ncp_channel=%d\n"
+                 "ssh_port=%d\ncarplay_ie=%d\nssh_active_port=%d\nssh_fallback=%d\n"
+                 "bt_discoverable=%d\nbt_pairable=%d\npair_stop_ok=%d\nbt_address=%s\ncp_id=%s\npair_message=%s\n",
+                 g_apply_gen, ok ? 1 : 0, g_last_msg,
+                 g_cfg.cp_band, g_cfg.cp_channel, g_cfg.ssh_port,
+                 g_carplay_ie, g_ssh_active_port, g_ssh_port_fallback,
+                 g_bt_discoverable, g_bt_pairable, g_pair_stop_confirmed,
+                 g_cfg.cp_btaddr, g_cfg.cp_id, g_pair_msg);
+        if (!g_stop) write_file_atomic(APPLY_RESULT, buf, 0600);
         _exit(0);
     }
     if (pid < 0) {
         g_apply_failed = true;
+        if (g_work_kind == WORK_MODE) g_network_failed = true;
         set_msg("apply: fork failed");
         return;
     }
+    setpgid(pid, pid);
     g_apply_pid = pid;
     g_apply_start_ms = now_ms();
 }
 
-static bool dump_logs_to_usb(bool verbose);
+static void apply_reap(void)
+{
+    if (g_apply_pid <= 0) { start_pending_work(); return; }
+    int st = 0;
+    pid_t pid = g_apply_pid;
+    pid_t r = waitpid(pid, &st, WNOHANG);
+    if (r == 0) {
+        if (g_apply_cancelled && now_ms() - g_cancel_ms > 300) {
+            kill(-pid, SIGKILL); kill(pid, SIGKILL);
+        } else if (!g_apply_cancelled && now_ms() - g_apply_start_ms > 150000) {
+            g_apply_failed = true;
+            if (g_work_kind == WORK_MODE) g_network_failed = true;
+            set_msg("apply timed out");
+            apply_cancel();
+        }
+        return;
+    }
+    if (r < 0 && errno != ECHILD) return;
+    /* Always clean the command group, even when its leader exited first. */
+    kill(-pid, SIGKILL);
+    g_apply_pid = 0;
+    char buf[2048] = "";
+    bool valid = !g_apply_cancelled && WIFEXITED(st) && WEXITSTATUS(st) == 0 &&
+                 read_file(APPLY_RESULT, buf, sizeof(buf)) > 0 && accept_apply_result(buf);
+    unlink(APPLY_RESULT);
+    if (g_work_kind == WORK_MODE && (!g_apply_cancelled || !g_work_pending)) g_ap_restart_requested = false;
+    if (!valid && !g_apply_cancelled) {
+        g_apply_failed = true;
+        if (g_work_kind == WORK_MODE) g_network_failed = true;
+        set_msg("worker failed; result absent, invalid or stale");
+    }
+    if (g_work_kind == WORK_DUMP) {
+        g_last_dump_try_ms = now_ms();
+        if (valid && !g_apply_failed) { g_boot_dumped = true; g_last_autodump_ms = now_ms(); }
+    }
+    g_apply_cancelled = false;
+    g_last_probe_ms = 0;
+    start_pending_work();
+    if (!g_apply_pid && !g_work_pending && g_dump_requested) {
+        g_dump_requested = false;
+        request_work(WORK_DUMP, false);
+    }
+    write_status();
+}
 
 static void watchdog(void)
 {
@@ -2745,10 +3806,7 @@ static void watchdog(void)
     if (now - g_last_watchdog_ms < 10000) return;
     g_last_watchdog_ms = now;
 
-    if (pid_by_comm("supplicantmanager") > 0) {
-        log_msg("watchdog: OEM supplicantmanager respawned; stopping it");
-        stop_oem_wifi();
-    }
+    bool oem_respawned = pid_by_executable("supplicantmanager") > 0;
 
     /* Log dumps: one attempt ~15 s after start (captures the install), and
      * a throttled dump while applies keep failing so the failure state
@@ -2756,56 +3814,94 @@ static void watchdog(void)
     if (!g_boot_dumped && g_start_ms && now - g_start_ms > 15000 &&
         (!g_last_dump_try_ms || now - g_last_dump_try_ms > 60000)) {
         g_last_dump_try_ms = now;
-        if (dump_logs_to_usb(false))
-            g_boot_dumped = true;
+        request_work(WORK_DUMP, false);
     }
-    if (g_apply_failed &&
-        (!g_last_autodump_ms || now - g_last_autodump_ms > 600000))
-        dump_logs_to_usb(false);
+    if (g_network_failed &&
+        (!g_last_dump_try_ms || now - g_last_dump_try_ms > 600000))
+        request_work(WORK_DUMP, false);
 
-    if (!g_cfg.wlan_on || g_cfg.mode == MODE_OFF) return;
-
-    if (g_apply_pid == 0 && !wpa_ping()) {
-        log_msg("watchdog: wpa_supplicant missing; restarting WiFi stack");
-        ensure_wifi_ready();
+    if (g_apply_pid > 0 || g_work_pending) return;
+    if (!g_cfg.wlan_on || g_cfg.mode == MODE_OFF) {
+        if ((oem_respawned || wpa_process_alive() || g_observed.ap.role == 1 || g_observed.ssh_ours) &&
+            now - g_last_mode_ms > (g_network_failed ? 60000 : 15000)) apply_mode(false);
+        return;
     }
 
-    int64_t retry_ms = g_apply_failed ? 60000 : 15000;
+    /* Recovery goes through the serialized apply worker with backoff; never
+     * call blocking ensure_wifi_ready() from the HTTP loop.  A live supplicant
+     * with a temporarily missing socket is an interface transition, not a
+     * reason to tear the stack down. */
+    int64_t retry_ms = g_network_failed ? 60000 : 15000;
+    bool stack_dead = !wpa_process_alive();
+    if ((stack_dead || oem_respawned) && now - g_last_mode_ms > retry_ms) {
+        log_msg("watchdog: supplicant process gone; re-applying (backoff=%ds)",
+                g_apply_failed ? 60 : 15);
+        apply_mode(false);
+        return;
+    }
+
+    /* Missing/stale observations are not evidence of a radio failure. */
+    if (!g_observed_ms || now - g_observed_ms > 15000 || g_observed.gen != g_apply_gen) {
+        g_ap_unready_ms = 0;
+        return;
+    }
+    if (g_ap_unready_gen != g_apply_gen) {
+        g_ap_unready_gen = g_apply_gen;
+        g_ap_unready_ms = 0;
+    }
+    if (g_cfg.mode == MODE_CARPLAY && !g_observed.ap_on) {
+        if (g_observed.ap.state == AP_UNKNOWN) {
+            g_ap_unready_ms = 0;
+            if (g_observed.ssh_ours) request_work(WORK_SSH, false);
+            return;
+        }
+        if (!g_ap_unready_ms) g_ap_unready_ms = now;
+        /* A pending AP gets its address/SSID grace period. ap_start() will
+         * reuse/wait for the interface, not turn it off on property lag. */
+        if (now - g_ap_unready_ms < 30000) {
+            if (g_observed.ssh_ours) request_work(WORK_SSH, false);
+            return;
+        }
+    } else g_ap_unready_ms = 0;
+
     if (g_apply_pid == 0 &&
-        g_cfg.mode == MODE_CARPLAY && !tethering_on(NULL, 0)) {
-        if (now - g_last_apply_ms > retry_ms) {
+        g_cfg.mode == MODE_CARPLAY &&
+        (!g_observed.ap_on || !g_carplay_ie || !g_observed.carplay_svc || !g_observed.mdns_svc)) {
+        if (now - g_last_mode_ms > retry_ms) {
             log_msg("watchdog: CarPlay AP down; re-applying (backoff=%ds)",
                     g_apply_failed ? 60 : 15);
             apply_mode(false);
+            return;
         }
     } else if (g_apply_pid == 0 && g_cfg.mode == MODE_CLIENT) {
-        char ip[64];
-        if (!wlan_ip(ip, sizeof(ip)) && now - g_last_apply_ms > retry_ms + 5000) {
-            log_msg("watchdog: client has no IP; re-applying (backoff=%ds)",
+        if ((!g_observed.ip[0] || !g_observed.associated) &&
+            now - g_last_mode_ms > retry_ms + 5000) {
+            log_msg("watchdog: client not associated; re-applying (backoff=%ds)",
                     g_apply_failed ? 60 : 15);
             apply_mode(false);
+            return;
         }
     }
     if (g_cfg.ssh_enabled) {
-        char ip[64];
-        if (wlan_ip(ip, sizeof(ip))) {
-            if (!ssh_running()) {
+        bool role_ready = (g_cfg.mode == MODE_CARPLAY && g_observed.ap_on) ||
+                          (g_cfg.mode == MODE_CLIENT && g_observed.associated);
+        if (g_observed.ip[0] && role_ready) {
+            if (!g_observed.ssh_ours) {
                 log_msg("watchdog: SSH down; restarting");
-                ssh_start();
+                request_work(WORK_SSH, false);
             } else {
                 char bound[64] = "";
                 if (read_file(SSH_BOUND, bound, sizeof(bound)) > 0) {
                     char *b = trim(bound);
-                    if (*b && strcmp(b, ip)) {
+                    if (*b && strcmp(b, g_observed.ip)) {
                         /* dropbear is bound to the old address; rebind. */
                         log_msg("watchdog: wlan IP changed %s -> %s; rebinding SSH",
-                                b, ip);
-                        ssh_stop();
-                        ssh_start();
+                                b, g_observed.ip);
+                        request_work(WORK_SSH, false);
                     }
                 }
             }
-        }
+        } else if (g_observed.ssh_ours) request_work(WORK_SSH, false);
     }
 }
 
@@ -2819,36 +3915,99 @@ static const char *mode_name(void)
     return g_cfg.mode == MODE_CARPLAY ? "carplay" : "client";
 }
 
-static void build_status(char *out, size_t n)
+static void collect_observation(observation_t *o)
 {
-    if (!g_in_child)
-        bt_state_load();
-    char ip[64] = "";
-    char ssid[80] = "";
-    int signal = 0;
-    char ap_ssid[80] = "";
-    bool ap_on = tethering_on(ap_ssid, sizeof(ap_ssid));
-    int clients = ap_on ? ap_clients() : 0;
-    bool connected = wlan_ip(ip, sizeof(ip));
-    bool carplay_svc = sh("systemctl is-active --quiet carplay_iAP2.service 2>/dev/null") == 0;
-    bool mdns_svc = sh("systemctl is-active --quiet carplay_mdnsd.service 2>/dev/null") == 0;
-    bool ssh_ours = ssh_running();
-    bool vendor_ssh_22 = port_listening(22) && !ssh_ours;
-    bool debug_console = file_exists("/tmp/secure_console_disable");
-    int secure_console = -1;
+    memset(o, 0, sizeof(*o));
+    o->gen = g_apply_gen;
+    o->driver = iface_present();
+    ap_probe(&o->ap);
+    o->ap_on = o->ap.state == AP_READY;
+    str_copy(o->ap_ssid, sizeof(o->ap_ssid), o->ap.ssid);
+    o->clients = o->ap_on ? ap_clients() : 0;
+    o->associated = g_cfg.mode == MODE_CLIENT && client_associated();
+    if (g_cfg.wlan_on && g_cfg.mode == MODE_CARPLAY && o->ap_on)
+        str_copy(o->ip, sizeof(o->ip), o->ap.ip);
+    if (g_cfg.wlan_on && g_cfg.mode == MODE_CLIENT && o->associated)
+        wlan_ip(o->ip, sizeof(o->ip));
+    if (o->associated && o->ip[0]) {
+        char services[16384], service[256];
+        if (sh_out(services, sizeof(services), "connmanctl services 2>/dev/null") != 0 ||
+            find_service_any(services, service, sizeof(service), NULL, 0) < 0 ||
+            !client_service_ready(service, o->ip)) {
+            o->associated = false;
+            o->ip[0] = 0;
+        }
+    }
+    if (o->associated) wlan_link(o->ssid, sizeof(o->ssid), &o->signal);
+    o->carplay_svc = sh("systemctl is-active --quiet carplay_iAP2.service 2>/dev/null") == 0;
+    /* RemainAfterExit makes is-active lie for mdnsd; report the process. */
+    o->mdns_svc = pid_by_executable("mdnsd") > 0;
+    o->ssh_ours = ssh_running();
+    o->vendor_ssh_22 = port_listening(22) && !(o->ssh_ours && g_ssh_active_port == 22);
+    o->debug_console = file_exists("/tmp/secure_console_disable");
+    o->secure_console = -1;
     char scbuf[32];
     if (read_file("/sys/module/micom/parameters/secure_console", scbuf, sizeof(scbuf)) > 0)
-        secure_console = atoi(trim(scbuf));
-    int active_ssh_port = g_ssh_active_port ? g_ssh_active_port : g_cfg.ssh_port;
+        o->secure_console = atoi(trim(scbuf));
+}
 
-    if (connected) wlan_link(ssid, sizeof(ssid), &signal);
+/* Slow status probes are read-only children, never part of the HTTP loop.
+ * The pipe result is accepted only for the current user-intent generation. */
+static void probe_tick(void)
+{
+    int64_t now = now_ms();
+    if (g_probe_pid > 0) {
+        int st = 0;
+        pid_t r = waitpid(g_probe_pid, &st, WNOHANG);
+        if (r == 0) {
+            if (now - g_probe_start_ms > 12000) kill(-g_probe_pid, SIGKILL);
+            return;
+        }
+        if (r < 0 && errno != ECHILD) return;
+        observation_t sample;
+        ssize_t n = read(g_probe_fd, &sample, sizeof(sample));
+        if (r > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0 &&
+            n == sizeof(sample) && sample.gen == g_apply_gen) {
+            g_observed = sample;
+            g_observed_ms = sample.ap.sampled_ms;
+        }
+        kill(-g_probe_pid, SIGKILL);
+        close(g_probe_fd); g_probe_fd = -1; g_probe_pid = 0;
+        g_last_probe_ms = now;
+    }
+    if (g_stop || now - g_last_probe_ms < 2000) return;
+    int fds[2];
+    if (pipe2(fds, O_CLOEXEC | O_NONBLOCK) != 0) return;
+    pid_t pid = fork();
+    if (pid == 0) {
+        setpgid(0, 0); g_in_child = true; g_probe_child = true;
+        close_child_fds(fds[1]);
+        observation_t sample;
+        collect_observation(&sample);
+        if (write(fds[1], &sample, sizeof(sample)) != sizeof(sample)) _exit(1);
+        _exit(0);
+    }
+    close(fds[1]);
+    if (pid < 0) { close(fds[0]); return; }
+    setpgid(pid, pid);
+    g_probe_pid = pid; g_probe_fd = fds[0]; g_probe_start_ms = now;
+}
+
+static void build_status(char *out, size_t n)
+{
+    bool fresh = g_observed_ms > 0 && now_ms() - g_observed_ms < 15000 &&
+                 g_observed.gen == g_apply_gen;
+    observation_t unknown = {.secure_console = -1};
+    const observation_t *o = fresh ? &g_observed : &unknown;
+    int active_ssh_port = g_ssh_active_port ? g_ssh_active_port : g_cfg.ssh_port;
 
     char ssid_e[256], ip_e[128], ap_e[256], msg_e[512];
     char imp_e[512], cps_e[256], cpsk_e[256], bt_e[128], id_e[128];
-    char client_e[256], pair_e[512];
-    json_escape(ssid_e, sizeof(ssid_e), ssid);
-    json_escape(ip_e, sizeof(ip_e), ip);
-    json_escape(ap_e, sizeof(ap_e), ap_ssid);
+    char client_e[256], pair_e[512], nets_e[640];
+    char nets_raw[512];
+    json_escape(ssid_e, sizeof(ssid_e), o->ssid);
+    json_escape(ip_e, sizeof(ip_e), o->ip);
+    json_escape(ap_e, sizeof(ap_e), o->ap_ssid);
     json_escape(msg_e, sizeof(msg_e), g_last_msg);
     json_escape(imp_e, sizeof(imp_e), g_cfg.imported_from);
     json_escape(cps_e, sizeof(cps_e), g_cfg.cp_ssid);
@@ -2857,9 +4016,26 @@ static void build_status(char *out, size_t n)
     json_escape(id_e, sizeof(id_e), g_cfg.cp_id);
     json_escape(client_e, sizeof(client_e), g_cfg.ssid);
     json_escape(pair_e, sizeof(pair_e), g_pair_msg);
+    /* Priority-ordered client network list for the UI, e.g.
+     * "iPhone|House LANnister" (never the passphrases). */
+    {
+        size_t at = 0;
+        for (int i = 0; i < WIFI_NETS_MAX; i++) {
+            const char *ssid = net_ssid(i);
+            if (!ssid[0]) continue;
+            if (at && at + 1 < sizeof(nets_raw)) nets_raw[at++] = '|';
+            for (const char *p = ssid; *p && at + 1 < sizeof(nets_raw); p++)
+                nets_raw[at++] = *p;
+        }
+        nets_raw[at] = 0;
+    }
+    json_escape(nets_e, sizeof(nets_e), nets_raw);
 
     snprintf(out, n,
              "{\"ok\":true,"
+             "\"build_id\":\"%s\","
+             "\"updated_ms\":%lld,"
+             "\"observations_fresh\":%s,"
              "\"mode\":\"%s\","
              "\"applying\":%s,"
              "\"home_seq\":%d,"
@@ -2874,9 +4050,13 @@ static void build_status(char *out, size_t n)
              "\"ssid\":\"%s\","
              "\"signal\":%d,"
              "\"ap_active\":%s,"
+             "\"ap_interface\":%s,"
+             "\"ap_state\":%d,"
+             "\"ap_tether_field\":%d,"
              "\"ap_ssid\":\"%s\","
              "\"ap_clients\":%d,"
              "\"carplay_ready\":%s,"
+             "\"carplay_ie\":%s,"
              "\"carplay_iap2\":%s,"
              "\"carplay_mdns\":%s,"
              "\"ssh_active\":%s,"
@@ -2889,6 +4069,8 @@ static void build_status(char *out, size_t n)
              "\"imported\":%s,"
              "\"imported_from\":\"%s\","
              "\"client_ssid\":\"%s\","
+             "\"client_networks\":\"%s\","
+             "\"client_net_count\":%d,"
              "\"carplay_ssid\":\"%s\","
              "\"carplay_psk\":\"%s\","
              "\"carplay_psk_set\":%s,"
@@ -2900,26 +4082,32 @@ static void build_status(char *out, size_t n)
              "\"bt_pairable\":%s,"
              "\"pair_message\":\"%s\","
              "\"message\":\"%s\"}\n",
+             WIFI_BUILD_ID, (long long)(time(NULL) * 1000LL), fresh ? "true" : "false",
              mode_name(),
-             g_apply_pid > 0 ? "true" : "false",
+             (g_apply_pid > 0 || g_work_pending) ? "true" : "false",
              g_home_seq, g_home_epoch, g_home_source, g_home_last_key,
              g_home_monitor ? "true" : "false",
              g_cfg.wlan_on ? "true" : "false",
-             iface_present() ? "true" : "false",
-             ip_e, ssid_e, signal,
-             ap_on ? "true" : "false", ap_e, clients,
-             (ap_on && (carplay_svc || mdns_svc)) ? "true" : "false",
-             carplay_svc ? "true" : "false",
-             mdns_svc ? "true" : "false",
-             ssh_ours ? "true" : "false",
+             o->driver ? "true" : "false",
+             ip_e, ssid_e, o->signal,
+             o->ap_on ? "true" : "false", o->ap.role == 1 ? "true" : "false",
+             o->ap.state, fresh ? o->ap.tether : -1, ap_e, o->clients,
+             /* "ready" requires every wireless-CarPlay component, not just
+              * one of the two services. */
+             (g_cfg.mode == MODE_CARPLAY && g_cfg.wlan_on && !g_network_failed && o->ap_on &&
+              g_carplay_ie && o->carplay_svc && o->mdns_svc) ? "true" : "false",
+             g_carplay_ie ? "true" : "false",
+             o->carplay_svc ? "true" : "false",
+             o->mdns_svc ? "true" : "false",
+             o->ssh_ours ? "true" : "false",
              g_cfg.ssh_enabled ? "true" : "false",
              active_ssh_port,
              g_ssh_port_fallback ? "true" : "false",
-             vendor_ssh_22 ? "true" : "false",
-             secure_console,
-             debug_console ? "true" : "false",
+             o->vendor_ssh_22 ? "true" : "false",
+             o->secure_console,
+             o->debug_console ? "true" : "false",
              g_cfg.imported ? "true" : "false", imp_e,
-             client_e, cps_e, cpsk_e, g_cfg.cp_psk[0] ? "true" : "false",
+             client_e, nets_e, net_total(), cps_e, cpsk_e, g_cfg.cp_psk[0] ? "true" : "false",
              g_cfg.cp_band, g_cfg.cp_channel, bt_e, id_e,
              g_bt_discoverable ? "true" : "false",
              g_bt_pairable ? "true" : "false",
@@ -2942,19 +4130,35 @@ static void write_status(void);
 
 static void scan_networks(char *out, size_t n)
 {
-    apply_cancel();
-
-    /* Scanning must not change the configured mode: the client-mode
-     * watchdog would auto-connect without the user asking for it. */
-    if (g_cfg.mode == MODE_CARPLAY && tethering_on(NULL, 0)) {
+    /* Validate before canceling: a scan request while the CarPlay AP is up
+     * must not kill the running apply as a side effect.  Scanning must also
+     * not change the configured mode; if the stack was off, bring it up for
+     * the scan only and put it back down afterwards. */
+    if (g_cfg.mode == MODE_CARPLAY) {
         snprintf(out, n,
                  "{\"ok\":false,\"error\":\"Stop the CarPlay AP before scanning\"}\n");
         return;
     }
-
+    ap_probe_t ap;
+    ap_probe(&ap);
+    if (ap.state != AP_ABSENT) {
+        snprintf(out, n, "{\"ok\":false,\"error\":\"AP absence not confirmed; scanning blocked\"}\n");
+        return;
+    }
+    bool was_off = !g_cfg.wlan_on || g_cfg.mode == MODE_OFF;
+    if (was_off) {
+        /* Scan-only bring-up: do not persist mode/wlan_on. */
+        g_cfg.wlan_on = true;
+        g_cfg.mode = MODE_CLIENT;
+    }
     set_msg("Scanning...");
     write_status();
     if (!ensure_wifi_ready()) {
+        if (was_off) {
+            stop_all();
+            g_cfg.wlan_on = false;
+            g_cfg.mode = MODE_OFF;
+        }
         char msg_e[512];
         json_escape(msg_e, sizeof(msg_e), g_last_msg);
         snprintf(out, n, "{\"ok\":false,\"error\":\"%s\"}\n", msg_e);
@@ -2967,7 +4171,7 @@ static void scan_networks(char *out, size_t n)
     char buf[32768];
     int rc = -1;
     for (int attempt = 0; attempt < 2 && rc != 0; attempt++) {
-        sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 scan >/dev/null 2>&1");
+        sh("connmanctl scan wifi 2>/dev/null");
         sleep(3);
         rc = sh_out(buf, sizeof(buf), "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 scan_results 2>/dev/null");
         if (rc == 0 && strchr(buf, '\t'))
@@ -2975,7 +4179,8 @@ static void scan_networks(char *out, size_t n)
     }
     size_t used = 0;
     int count = 0;
-    used += (size_t)snprintf(out + used, n - used, "{\"ok\":true,\"networks\":[");
+    used += (size_t)snprintf(out + used, n - used,
+                              "{\"ok\":true,\"gen\":%d,\"scanning\":false,\"networks\":[", g_apply_gen);
 
     if (rc == 0 && buf[0]) {
         char *save = NULL;
@@ -3055,6 +4260,12 @@ static void scan_networks(char *out, size_t n)
         set_msg("scan: %d network(s) found", count);
     else
         set_msg("scan: no networks found");
+    if (was_off) {
+        /* Restore the configured off state; the scan was temporary. */
+        stop_all();
+        g_cfg.wlan_on = false;
+        g_cfg.mode = MODE_OFF;
+    }
     write_status();
 }
 
@@ -3122,8 +4333,79 @@ static void copy_if_exists(const char *dst_dir, const char *src)
 {
     const char *base = strrchr(src, '/');
     base = base ? base + 1 : src;
-    if (!file_exists(src)) return;
-    sh("cp -f %s %s/%s 2>/dev/null", src, dst_dir, base);
+    FILE *in = fopen(src, "r");
+    if (!in) return;
+    char path[768]; snprintf(path, sizeof(path), "%s/%s", dst_dir, base);
+    FILE *out = fopen(path, "w");
+    if (out) {
+        char buf[4096]; size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), in)))
+            if (fwrite(buf, 1, n, out) != n) break;
+        fclose(out);
+    }
+    fclose(in);
+}
+
+static bool credential_line(const char *s)
+{
+    return strcasestr(s, "passphrase") || strcasestr(s, "password") ||
+           strcasestr(s, "psk") || strstr(s, "set_network") ||
+           strstr(s, "connmanctl>") || strstr(s, "Error '") ||
+           strcasestr(s, "hexdump") || strcasestr(s, "private key");
+}
+
+/* Old logs may contain credentials no longer in g_cfg. Export only recognised
+ * event lines, not raw CLI transcripts, arbitrary historical continuation
+ * lines or key dumps. Keep the original logs private on the head unit. */
+static void copy_event_log(const char *dst_dir, const char *src)
+{
+    FILE *in = fopen(src, "r");
+    if (!in) return;
+    const char *base = strrchr(src, '/');
+    char path[768]; snprintf(path, sizeof(path), "%s/%s", dst_dir, base ? base + 1 : src);
+    FILE *out = fopen(path, "w");
+    if (!out) { fclose(in); return; }
+    fputs("Sanitized event-only export; raw transcripts and key material omitted.\n", out);
+    char line[4096];
+    while (fgets(line, sizeof(line), in)) {
+        bool whole = strchr(line, '\n') != NULL;
+        if (!whole) { int c; while ((c = fgetc(in)) != EOF && c != '\n') {} continue; }
+        if (credential_line(line)) continue;
+        bool event = strstr(line, "State:") || strstr(line, "CTRL-EVENT-") ||
+                     strstr(line, "AP-ENABLED") || strstr(line, "AP-DISABLED") ||
+                      strstr(line, "Failed to start AP functionality") ||
+                      strstr(line, " AP stage=") || strstr(line, " AP tether request frequency=") ||
+                      strstr(line, " AP failure: get ap_scan") || strstr(line, " station reconciliation:") ||
+                      strstr(line, " AP startup: unexpected station") ||
+                      strstr(line, "[ Disconnect ] wpas_dbus_handler_disconnect") ||
+                      strstr(line, "nl80211 driver interface is not designed to be used with ap_scan=2") ||
+                     strstr(line, " wifi_daemon started:") ||
+                     strstr(line, " watchdog:") || strstr(line, " apply ") ||
+                     strstr(line, " worker ") || strstr(line, " started wpa_supplicant") ||
+                     strstr(line, " control socket ") || strstr(line, " msg:");
+        if (!event) continue;
+        redact_secret(line, g_cfg.cp_psk); redact_secret(line, g_cfg.psk);
+        fputs(line, out);
+    }
+    fclose(in); fclose(out);
+}
+
+static void scrub_snapshot(char *out)
+{
+    redact_secret(out, g_cfg.cp_psk); redact_secret(out, g_cfg.psk);
+    char *p = out;
+    while (*p) {
+        char *end = strchr(p, '\n');
+        char saved = end ? *end : 0;
+        if (end) *end = 0;
+        bool sensitive = credential_line(p);
+        if (end) *end = saved;
+        if (sensitive) {
+            if (end) memmove(p, end + 1, strlen(end + 1) + 1);
+            else *p = 0;
+        } else if (end) p = end + 1;
+        else break;
+    }
 }
 
 /* config.conf with the client and CarPlay keys removed. */
@@ -3139,6 +4421,9 @@ static void copy_config_redacted(const char *dst_dir)
          line = strtok_r(NULL, "\n", &save)) {
         const char *emit = line;
         if (!strncmp(line, "psk=", 4)) emit = "psk=<redacted>";
+        else if (!strncmp(line, "net2_psk=", 9)) emit = "net2_psk=<redacted>";
+        else if (!strncmp(line, "net3_psk=", 9)) emit = "net3_psk=<redacted>";
+        else if (!strncmp(line, "net4_psk=", 9)) emit = "net4_psk=<redacted>";
         else if (!strncmp(line, "carplay_psk=", 12)) emit = "carplay_psk=<redacted>";
         size_t len = strlen(emit);
         if (j + len + 2 >= sizeof(out)) break;
@@ -3152,93 +4437,113 @@ static void copy_config_redacted(const char *dst_dir)
     write_file_atomic(dst, out, 0644);
 }
 
+/* Run a snapshot command and scrub known secret material (the AP passphrase
+ * appears both in config.conf and in connmanctl's TetheringPassphrase) before
+ * writing it to the USB bundle. */
 static void snap_cmd(FILE *f, const char *cmd)
 {
-    char out[16384];
+    char out[16384] = "";
     fprintf(f, "\n$ %s\n", cmd);
     sh_out(out, sizeof(out), "%s 2>&1", cmd);
+    scrub_snapshot(out);
     fputs(out, f);
     fprintf(f, "\n");
+}
+
+static bool redact_json_string(char *buf, size_t n, const char *field)
+{
+    char needle[80]; snprintf(needle, sizeof(needle), "\"%s\"", field);
+    char *start = buf, *key;
+    while ((key = strstr(start, needle))) {
+        char *value = key + strlen(needle);
+        while (isspace((unsigned char)*value)) value++;
+        if (*value != ':') { start = value; continue; }
+        value++;
+        while (isspace((unsigned char)*value)) value++;
+        if (*value != '"') return false;
+        char *end = value + 1;
+        while (*end && *end != '"') {
+            if (*end == '\\' && end[1]) end++;
+            end++;
+        }
+        if (*end != '"') return false;
+        end++;
+        const char *redacted = "\"<redacted>\"";
+        size_t prefix = (size_t)(value - buf), tail = strlen(end);
+        if (prefix + strlen(redacted) + tail + 1 >= n) return false;
+        memmove(value + strlen(redacted), end, tail + 1);
+        memcpy(value, redacted, strlen(redacted));
+        start = value + strlen(redacted);
+    }
+    return true;
+}
+
+/* Preserve the recorded observations/timestamps, including in one-shot dumps
+ * that have no live observation cache. Scrub fields structurally so historical
+ * keys need not equal the current configuration. Omit free-form old messages. */
+static void copy_status_redacted(const char *dst_dir)
+{
+    char buf[8192];
+    if (read_file(g_status_path, buf, sizeof(buf)) <= 0) return;
+    const char *fields[] = {"carplay_psk", "psk", "password", "message", NULL};
+    for (int i = 0; fields[i]; i++)
+        if (!redact_json_string(buf, sizeof(buf), fields[i])) return;
+    char dst[512];
+    snprintf(dst, sizeof(dst), "%s/status.json", dst_dir);
+    write_file_atomic(dst, buf, 0644);
 }
 
 /* Keep only the newest LOG_DUMP_KEEP bundles; stamps are fixed width so
  * a lexical sort is a chronological sort. */
 #define LOG_DUMP_KEEP 5
-
-/* A prune candidate must be exactly a bundle this daemon itself wrote:
- * the "wifi_logs_" prefix plus the fixed-width %Y%m%d%H%M%S stamp and
- * nothing else.  Whatever else a stick carries — however it is named —
- * is data, never a command (rule 9): not a candidate, not deleted. */
 static bool is_pruneable_name(const char *name)
 {
-    if (!name || strncmp(name, "wifi_logs_", 10)) return false;
-    const char *stamp = name + 10;
-    for (int i = 0; i < 14; i++)
-        if (!isdigit((unsigned char)stamp[i])) return false;
-    return stamp[14] == '\0';
+    if (!name || strlen(name) != 24 || strncmp(name, "wifi_logs_", 10)) return false;
+    for (int i = 10; i < 24; i++) if (!isdigit((unsigned char)name[i])) return false;
+    return true;
 }
 
-/* rm -rf without a shell: lstat first so a symlink is unlinked, never
- * followed; depth-capped so a pathological tree cannot recurse without
- * bound.  Returns false on any refusal — the caller logs and keeps it. */
-#define PRUNE_MAX_DEPTH 12
-static bool safe_rmtree(const char *path, int depth)
+static bool remove_tree_at(int parent, const char *name, int depth)
 {
     struct stat st;
-    if (lstat(path, &st) != 0) return errno == ENOENT;
-    if (!S_ISDIR(st.st_mode)) return unlink(path) == 0;
-    if (depth >= PRUNE_MAX_DEPTH) return false;
-    DIR *d = opendir(path);
-    if (!d) return false;
+    if (fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) != 0) return errno == ENOENT;
+    if (!S_ISDIR(st.st_mode)) return unlinkat(parent, name, 0) == 0;
+    if (depth >= 16) return false;
+    int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return false;
+    DIR *d = fdopendir(fd);
+    if (!d) { close(fd); return false; }
     struct dirent *de;
     bool ok = true;
     while ((de = readdir(d))) {
         if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
-        char child[768];
-        if (snprintf(child, sizeof(child), "%s/%s", path, de->d_name)
-            >= (int)sizeof(child)) { ok = false; continue; }
-        if (!safe_rmtree(child, depth + 1)) ok = false;
+        if (!remove_tree_at(fd, de->d_name, depth + 1)) ok = false;
     }
     closedir(d);
-    return ok && rmdir(path) == 0;
+    return ok && unlinkat(parent, name, AT_REMOVEDIR) == 0;
 }
+
+static int dump_filter(const struct dirent *de) { return is_pruneable_name(de->d_name); }
 
 static void prune_old_dumps(const char *usb)
 {
-    DIR *d = opendir(usb);
-    if (!d) return;
-    char names[16][40];
-    int count = 0;
-    struct dirent *de;
-    while ((de = readdir(d)) && count < 16) {
-        if (!is_pruneable_name(de->d_name)) continue;
-        size_t len = strlen(de->d_name);
-        if (len >= sizeof(names[0])) continue;
-        memcpy(names[count], de->d_name, len + 1);
-        count++;
+    int fd = open(usb, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return;
+    struct dirent **names = NULL;
+    int count = scandir(usb, &names, dump_filter, alphasort);
+    int directories = 0;
+    for (int i = 0; i < count; i++) {
+        struct stat st;
+        if (fstatat(fd, names[i]->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(st.st_mode)) directories++;
     }
-    closedir(d);
-
-    for (int i = 1; i < count; i++) {
-        char key[40];
-        memcpy(key, names[i], sizeof(key));
-        int j = i - 1;
-        while (j >= 0 && strcmp(names[j], key) > 0) {
-            memcpy(names[j + 1], names[j], sizeof(names[0]));
-            j--;
-        }
-        memcpy(names[j + 1], key, sizeof(names[0]));
+    for (int i = 0; i < count; i++) {
+        struct stat st;
+        if (directories > LOG_DUMP_KEEP &&
+            fstatat(fd, names[i]->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISDIR(st.st_mode) &&
+            remove_tree_at(fd, names[i]->d_name, 0)) directories--;
+        free(names[i]);
     }
-    for (int i = 0; i + LOG_DUMP_KEEP < count; i++) {
-        char path[600];
-        if (snprintf(path, sizeof(path), "%s/%s", usb, names[i])
-            >= (int)sizeof(path)) {
-            log_msg("prune: path too long for %s", names[i]);
-            continue;
-        }
-        if (!safe_rmtree(path, 0))
-            log_msg("prune: cannot remove %s", path);
-    }
+    free(names); close(fd);
 }
 
 static bool dump_logs_to_usb(bool verbose)
@@ -3249,7 +4554,8 @@ static bool dump_logs_to_usb(bool verbose)
         if (verbose) set_msg("log dump: no USB stick found");
         return false;
     }
-    sh("mount -o remount,rw %s 2>/dev/null", usb);
+    char usb_q[2200]; shq(usb_q, sizeof(usb_q), usb);
+    sh("mount -o remount,rw %s 2>/dev/null", usb_q);
 
     char stamp[32];
     time_t t = time(NULL);
@@ -3259,17 +4565,19 @@ static bool dump_logs_to_usb(bool verbose)
 
     char dir[768];
     snprintf(dir, sizeof(dir), "%s/wifi_logs_%s", usb, stamp);
-    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+    /* Never follow pre-existing bundle/file symlinks or overwrite a bundle
+     * created by another request in the same second. */
+    if (mkdir(dir, 0700) != 0) {
         log_msg("log dump: mkdir %s failed: %s", dir, strerror(errno));
         if (verbose) set_msg("log dump failed: %s", strerror(errno));
         return false;
     }
 
-    copy_if_exists(dir, LOG_PATH);
-    copy_if_exists(dir, WPA_LOG);
-    copy_if_exists(dir, APP_DIR "/ssh.log");
-    copy_if_exists(dir, APP_DIR "/install.log");
-    copy_if_exists(dir, g_status_path);
+    copy_event_log(dir, LOG_PATH);
+    copy_event_log(dir, WPA_LOG);
+    copy_event_log(dir, APP_DIR "/ssh.log");
+    copy_event_log(dir, APP_DIR "/install.log");
+    copy_status_redacted(dir);
     copy_if_exists(dir, HOME_STATE);
     copy_config_redacted(dir);
 
@@ -3277,7 +4585,7 @@ static bool dump_logs_to_usb(bool verbose)
     snprintf(state, sizeof(state), "%s/state.txt", dir);
     FILE *f = fopen(state, "w");
     if (f) {
-        fprintf(f, "wifi log dump %s\n", stamp);
+        fprintf(f, "wifi log dump %s build_id=%s mono_ms=%lld\n", stamp, WIFI_BUILD_ID, (long long)now_ms());
         snap_cmd(f, "uname -a");
         snap_cmd(f, "cat /proc/mounts");
         snap_cmd(f, "date");
@@ -3285,12 +4593,20 @@ static bool dump_logs_to_usb(bool verbose)
         snap_cmd(f, "connmanctl technologies");
         snap_cmd(f, "connmanctl services");
         snap_cmd(f, "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 status");
+        snap_cmd(f, "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 get ap_scan");
         snap_cmd(f, "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 scan_results");
         snap_cmd(f, "ls -la " WPA_CTRL_DIR);
         snap_cmd(f, "getfattr -n security.SMACK64 /rw_data/wifi/wifi_daemon /rw_data/wifi/bin/dropbearmulti");
         snap_cmd(f, "getfattr -n security.SMACK64EXEC /rw_data/wifi/wifi_daemon /rw_data/wifi/bin/dropbearmulti");
         snap_cmd(f, "systemctl is-enabled supplicantmanager.path supplicantmanager.service");
         snap_cmd(f, "iw dev wlan0 info");
+        snap_cmd(f, "iwconfig wlan0");
+        snap_cmd(f,
+                 "grep -RIn 'wifiPage\\.\\(visible\\|open\\|close\\)' "
+                 "/app/share/AppHomeScreen/qml_eco3.0 2>/dev/null | head -80");
+        snap_cmd(f,
+                 "journalctl -b --no-pager 2>/dev/null | "
+                 "grep -iE 'WifiPage|qml' | tail -n 200");
         snap_cmd(f, "iw dev wlan0 link");
         snap_cmd(f, "ifconfig wlan0");
         snap_cmd(f, "iptables -S");
@@ -3373,9 +4689,20 @@ static bool query_get(const char *query, const char *name, char *out, size_t n)
 static void http_handle(int fd)
 {
     char req[4096];
-    ssize_t nr = read(fd, req, sizeof(req) - 1);
-    if (nr <= 0) { close(fd); return; }
-    req[nr] = 0;
+    size_t used = 0;
+    req[0] = 0;
+    int64_t deadline = now_ms() + 200;
+    while (used + 1 < sizeof(req) && !strchr(req, '\n') && now_ms() < deadline) {
+        ssize_t nr = recv(fd, req + used, sizeof(req) - used - 1, MSG_DONTWAIT);
+        if (nr > 0) { used += (size_t)nr; req[used] = 0; continue; }
+        if (nr == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) break;
+        struct pollfd pfd = {.fd = fd, .events = POLLIN};
+        poll(&pfd, 1, 10);
+    }
+    if (!strchr(req, '\n')) {
+        http_reply(fd, 400, "{\"ok\":false,\"error\":\"incomplete request line\"}\n");
+        close(fd); return;
+    }
 
     char method[8] = {0}, path[256] = {0};
     if (sscanf(req, "%7s %255s", method, path) != 2) {
@@ -3395,7 +4722,25 @@ static void http_handle(int fd)
     } else if (!strcmp(method, "GET") && !strcmp(path, "/health")) {
         snprintf(body, sizeof(body), "{\"ok\":true}\n");
     } else if (!strcmp(method, "GET") && !strcmp(path, "/scan")) {
-        scan_networks(body, sizeof(body));
+        char poll_value[8];
+        if (query_get(query, "poll", poll_value, sizeof(poll_value))) {
+            if (g_scan_gen != g_apply_gen)
+                snprintf(body, sizeof(body), "{\"ok\":false,\"scanning\":false,\"error\":\"scan cancelled\"}\n");
+            else if (read_file(SCAN_RESULT, body, sizeof(body)) <= 0)
+                snprintf(body, sizeof(body), "{\"ok\":true,\"scanning\":%s,\"networks\":[]}\n",
+                         (g_apply_pid || g_work_pending) ? "true" : "false");
+        } else if (g_cfg.mode == MODE_CARPLAY || !g_observed_ms ||
+                   now_ms() - g_observed_ms > 15000 || g_observed.gen != g_apply_gen ||
+                   g_observed.ap.state != AP_ABSENT) {
+            code = 409;
+            snprintf(body, sizeof(body), "{\"ok\":false,\"scanning\":false,\"error\":\"Wait for confirmed AP absence before scanning\"}\n");
+        } else {
+            unlink(SCAN_RESULT);
+            request_work(WORK_SCAN, false);
+            g_scan_gen = g_apply_gen;
+            code = 202;
+            snprintf(body, sizeof(body), "{\"ok\":true,\"scanning\":true,\"networks\":[]}\n");
+        }
     } else if (!strcmp(method, "GET") && !strcmp(path, "/logs")) {
         char src[64] = "";
         const char *log_path = LOG_PATH;
@@ -3404,35 +4749,50 @@ static void http_handle(int fd)
             log_path = WPA_LOG;
         else if (!strcmp(src, "ssh"))
             log_path = APP_DIR "/ssh.log";
-        char log[16384];
+        char log[16384] = "";
         int n = read_tail(log_path, log, sizeof(log));
-        if (n < 0) n = 0;
-        char esc[32768];
-        json_escape(esc, sizeof(esc), log);
-        snprintf(body, sizeof(body), "{\"ok\":true,\"log\":\"%s\"}\n", esc);
+        if (n < 0) {
+            log[0] = 0;
+            snprintf(body, sizeof(body),
+                     "{\"ok\":false,\"error\":\"cannot read log\"}\n");
+            code = 500;
+        } else {
+            char esc[32768];
+            json_escape(esc, sizeof(esc), log);
+            snprintf(body, sizeof(body), "{\"ok\":true,\"log\":\"%s\"}\n", esc);
+        }
     } else if (!strcmp(method, "POST") && !strcmp(path, "/import")) {
+        /* Import only stores credentials; it must never activate a mode or
+         * SSH by itself.  Activation stays an explicit user action. */
         bool ok = import_wifi();
-        if (ok && g_cfg.wlan_on) { apply_mode(false); changed = true; }
+        if (ok) {
+            if (g_apply_pid || g_work_pending) apply_mode(false);
+            else g_apply_gen++; /* invalidate old read-only probes */
+        }
+        char ssid_e[256], cps_e2[256], from_e[512];
+        json_escape(ssid_e, sizeof(ssid_e), g_cfg.ssid);
+        json_escape(cps_e2, sizeof(cps_e2), g_cfg.cp_ssid);
+        json_escape(from_e, sizeof(from_e), g_cfg.imported_from);
         snprintf(body, sizeof(body),
                  "{\"ok\":%s,\"ssid\":\"%s\",\"carplay_ssid\":\"%s\",\"from\":\"%s\"}\n",
-                 ok ? "true" : "false", g_cfg.ssid, g_cfg.cp_ssid,
-                 g_cfg.imported_from);
+                 ok ? "true" : "false", ssid_e, cps_e2, from_e);
         if (!ok) code = 404;
     } else if (!strcmp(method, "POST") && !strcmp(path, "/ssh/import")) {
         bool ok = import_authorized_keys();
-        if (ok && g_cfg.ssh_enabled) { ssh_stop(); ssh_start(); }
+        if (ok && g_cfg.ssh_enabled) request_work(WORK_SSH, false);
         snprintf(body, sizeof(body), "{\"ok\":%s}\n", ok ? "true" : "false");
         if (!ok) code = 404;
     } else if (!strcmp(method, "POST") && !strcmp(path, "/mode")) {
         char v[64];
-        if (!query_get(query, "value", v, sizeof(v))) { code = 400; snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"missing value\"}\n"); }
+        if (!query_get(query, "value", v, sizeof(v)) ||
+            (strcmp(v, "off") && strcmp(v, "client") && strcmp(v, "carplay"))) {
+            code = 400; snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"invalid mode\"}\n");
+        }
         else {
             if (!strcmp(v, "client")) g_cfg.mode = MODE_CLIENT;
             else if (!strcmp(v, "carplay")) g_cfg.mode = MODE_CARPLAY;
             else g_cfg.mode = MODE_OFF;
             g_cfg.wlan_on = g_cfg.mode != MODE_OFF;
-            if (g_cfg.mode != MODE_CARPLAY)
-                bt_pair_stop();
             apply_mode(false);
             snprintf(body, sizeof(body), "{\"ok\":true,\"mode\":\"%s\"}\n", mode_name());
         }
@@ -3442,8 +4802,6 @@ static void http_handle(int fd)
         else {
             g_cfg.wlan_on = atoi(v) != 0;
             if (g_cfg.wlan_on && g_cfg.mode == MODE_OFF) g_cfg.mode = MODE_CLIENT;
-            if (!g_cfg.wlan_on)
-                bt_pair_stop();
             apply_mode(false);
             snprintf(body, sizeof(body), "{\"ok\":true,\"wlan_on\":%s}\n",
                      g_cfg.wlan_on ? "true" : "false");
@@ -3451,7 +4809,6 @@ static void http_handle(int fd)
     } else if (!strcmp(method, "POST") && !strcmp(path, "/client/connect")) {
         g_cfg.mode = MODE_CLIENT;
         g_cfg.wlan_on = true;
-        bt_pair_stop();
         apply_mode(false);
         snprintf(body, sizeof(body), "{\"ok\":true}\n");
     } else if (!strcmp(method, "POST") && !strcmp(path, "/client/disconnect")) {
@@ -3467,33 +4824,36 @@ static void http_handle(int fd)
     } else if (!strcmp(method, "POST") && !strcmp(path, "/carplay/stop")) {
         g_cfg.mode = MODE_OFF;
         g_cfg.wlan_on = false;
-        bt_pair_stop();
         apply_mode(false);
         snprintf(body, sizeof(body), "{\"ok\":true}\n");
     } else if (!strcmp(method, "POST") && !strcmp(path, "/carplay/restart")) {
         g_cfg.mode = MODE_CARPLAY;
         g_cfg.wlan_on = true;
+        g_ap_restart_requested = true;
         apply_mode(false);
         snprintf(body, sizeof(body), "{\"ok\":true}\n");
     } else if (!strcmp(method, "POST") && !strcmp(path, "/carplay/pair")) {
         g_cfg.mode = MODE_CARPLAY;
         g_cfg.wlan_on = true;
+        g_pairing_stop_requested = false;
         apply_mode(true);
         snprintf(body, sizeof(body),
                  "{\"ok\":true,\"applying\":true,"
                  "\"message\":\"starting CarPlay pairing\"}\n");
     } else if (!strcmp(method, "POST") && !strcmp(path, "/carplay/pair/stop")) {
-        bt_pair_stop();
+        /* A running pair apply could re-enable pairing after this point;
+         * cancel it so the stop is authoritative. */
+        g_pairing_stop_requested = true;
+        g_pair_stop_confirmed = false;
+        request_work((g_apply_pid || g_work_pending) ? WORK_MODE : WORK_PAIR_STOP, false);
         snprintf(body, sizeof(body),
-                 "{\"ok\":true,\"discoverable\":false,\"pairable\":false}\n");
+                 "{\"ok\":true,\"discoverable\":%s,\"pairable\":%s}\n",
+                 g_bt_discoverable ? "true" : "false",
+                 g_bt_pairable ? "true" : "false");
     } else if (!strcmp(method, "POST") && !strcmp(path, "/logs/dump")) {
-        bool ok = dump_logs_to_usb(true);
-        char msg_e[512];
-        json_escape(msg_e, sizeof(msg_e), g_last_msg);
-        snprintf(body, sizeof(body),
-                 "{\"ok\":%s,\"message\":\"%s\"}\n",
-                 ok ? "true" : "false", msg_e);
-        if (!ok) code = 500;
+        request_work(WORK_DUMP, false);
+        code = 202;
+        snprintf(body, sizeof(body), "{\"ok\":true,\"queued\":true}\n");
     } else if (!strcmp(method, "POST") && !strcmp(path, "/ssh")) {
         char en[64], port[64];
         bool has_en = query_get(query, "enabled", en, sizeof(en));
@@ -3503,10 +4863,7 @@ static void http_handle(int fd)
             if (p > 0 && p < 65536) g_cfg.ssh_port = p;
         }
         if (has_en) g_cfg.ssh_enabled = atoi(en) != 0;
-        ssh_stop();
-        if (g_cfg.ssh_enabled && g_cfg.wlan_on && g_cfg.mode != MODE_OFF)
-            ssh_start();
-        config_save();
+        request_work(WORK_SSH, false);
         snprintf(body, sizeof(body),
                  "{\"ok\":true,\"enabled\":%s,\"port\":%d}\n",
                  g_cfg.ssh_enabled ? "true" : "false", g_cfg.ssh_port);
@@ -3542,6 +4899,7 @@ static void usage(const char *argv0)
 
 int main(int argc, char **argv)
 {
+    umask(0077);
     int port = DEFAULT_HTTP_PORT;
     const char *one_shot = NULL;
     const char *one_mode = NULL;
@@ -3563,20 +4921,31 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(argv[0]); return 0; }
     }
 
-    mkdir("/rw_data", 0755);
-    mkdir(APP_DIR, 0755);
-    mkdir(APP_DIR "/bin", 0755);
-    mkdir(SSH_DIR, 0700);
-    unlink(BT_STATE);
+    /* One-shot CLI mode: no side effects, no daemon state, stderr logging.
+     * Pure queries (--status, --choose-port) must not create directories,
+     * delete state, ensure users or save config. */
+    g_log_stderr = one_shot != NULL;
+    bool pure_query = one_shot && (!strcmp(one_shot, "status") ||
+                                   !strcmp(one_shot, "choose-port") ||
+                                   !strcmp(one_shot, "dump-logs"));
+    g_pure_query = pure_query;
+    if (!pure_query) {
+        mkdir(APP_DIR, 0755);
+        mkdir(APP_DIR "/bin", 0755);
+        mkdir(SSH_DIR, 0700);
+        unlink(BT_STATE);
+    }
     config_load();
-    if (g_config_migrated)
+    if (g_config_migrated && !pure_query)
         config_save();
-    ensure_car_user();
-    if (!g_cfg.cp_ssid[0])
-        str_copy(g_cfg.cp_ssid, sizeof(g_cfg.cp_ssid), "IONIQ5-CarPlay");
-    if (!g_cfg.cp_psk[0]) {
-        random_psk(g_cfg.cp_psk, sizeof(g_cfg.cp_psk));
-        config_save();
+    if (!pure_query) {
+        if (!one_shot || !strcmp(one_shot, "ensure-user")) ensure_car_user();
+        if (!g_cfg.cp_ssid[0])
+            str_copy(g_cfg.cp_ssid, sizeof(g_cfg.cp_ssid), "IONIQ5-CarPlay");
+        if (!g_cfg.cp_psk[0]) {
+            random_psk(g_cfg.cp_psk, sizeof(g_cfg.cp_psk));
+            config_save();
+        }
     }
 
     signal(SIGINT, on_signal);
@@ -3585,6 +4954,9 @@ int main(int argc, char **argv)
 
     if (one_shot) {
         if (!strcmp(one_shot, "status")) {
+            g_probe_child = true;
+            collect_observation(&g_observed);
+            g_observed_ms = now_ms();
             char buf[8192];
             build_status(buf, sizeof(buf));
             fputs(buf, stdout);
@@ -3592,13 +4964,18 @@ int main(int argc, char **argv)
         }
         if (!strcmp(one_shot, "import")) {
             bool ok = import_wifi();
-            printf("{\"ok\":%s,\"ssid\":\"%s\"}\n", ok ? "true" : "false", g_cfg.ssid);
+            char ssid_e[256];
+            json_escape(ssid_e, sizeof(ssid_e), g_cfg.ssid);
+            printf("{\"ok\":%s,\"ssid\":\"%s\"}\n", ok ? "true" : "false", ssid_e);
             return ok ? 0 : 1;
         }
         if (!strcmp(one_shot, "import-file") && one_file) {
             bool ok = import_wifi_path(one_file);
+            char ssid_e[256], cps_e[256];
+            json_escape(ssid_e, sizeof(ssid_e), g_cfg.ssid);
+            json_escape(cps_e, sizeof(cps_e), g_cfg.cp_ssid);
             printf("{\"ok\":%s,\"ssid\":\"%s\",\"carplay_ssid\":\"%s\"}\n",
-                   ok ? "true" : "false", g_cfg.ssid, g_cfg.cp_ssid);
+                   ok ? "true" : "false", ssid_e, cps_e);
             return ok ? 0 : 1;
         }
         if (!strcmp(one_shot, "mode") && one_mode) {
@@ -3606,12 +4983,14 @@ int main(int argc, char **argv)
             else if (!strcmp(one_mode, "carplay")) g_cfg.mode = MODE_CARPLAY;
             else g_cfg.mode = MODE_OFF;
             g_cfg.wlan_on = g_cfg.mode != MODE_OFF;
-            apply_cancel();
-            apply_mode_work(false);
+            config_save();
+            bool ok = apply_mode_work(false);
+            collect_observation(&g_observed);
+            g_observed_ms = now_ms();
             char buf[8192];
             build_status(buf, sizeof(buf));
             fputs(buf, stdout);
-            return 0;
+            return ok ? 0 : 1;
         }
         if (!strcmp(one_shot, "ssh") && one_ssh) {
             g_cfg.ssh_enabled = !strcmp(one_ssh, "on");
@@ -3696,12 +5075,7 @@ int main(int argc, char **argv)
     /* Bring up the configured mode at service start. */
     if (g_cfg.wlan_on && g_cfg.mode != MODE_OFF) {
         apply_mode(false);
-    } else {
-        stop_oem_wifi();
-        stop_all();
-        set_msg("WLAN off");
-        write_status();
-    }
+    } else apply_mode(false);
 
     while (!g_stop) {
         struct pollfd pfd = {.fd = srv, .events = POLLIN};
@@ -3710,14 +5084,16 @@ int main(int argc, char **argv)
             int c = accept(srv, NULL, NULL);
             if (c >= 0) {
                 fcntl(c, F_SETFD, FD_CLOEXEC);
-                struct timeval tv = {.tv_sec = 30, .tv_usec = 0};
+                struct timeval tv = {.tv_sec = 0, .tv_usec = 200000};
                 setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
                 http_handle(c);
             }
         }
-        watchdog();
         apply_reap();
         home_monitor_tick();
+        probe_tick();
+        watchdog();
         int64_t now = now_ms();
         if (now - g_last_status_ms > 2000) {
             write_status();
@@ -3725,6 +5101,37 @@ int main(int argc, char **argv)
         }
     }
 
+    /* Coordinated shutdown: cancel any in-flight apply and undo the network
+     * state we own (tether, firewall rules, supplicant, SSH) so stopping the
+     * daemon does not leave ConnMan tethering or iptables rules behind. */
+    apply_cancel();
+    g_work_pending = false; g_dump_requested = false;
+    int64_t until = now_ms() + 1500;
+    while (g_apply_pid > 0 && now_ms() < until) {
+        apply_reap();
+        usleep(20000);
+    }
+    if (g_probe_pid > 0) {
+        kill(-g_probe_pid, SIGKILL); kill(g_probe_pid, SIGKILL);
+        waitpid(g_probe_pid, NULL, WNOHANG);
+    }
+    /* Cleanup is unconditional: configured Off is not proof an interrupted
+     * previous apply removed its firewall/AP/SSH state. Keep it bounded and
+     * outside the parent, including on SIGTERM when g_stop is already set. */
+    pid_t cleanup = fork();
+    if (cleanup == 0) {
+        setpgid(0, 0); g_in_child = true; g_stop = 0;
+        close_child_fds(-1);
+        stop_all(); bt_pair_stop();
+        _exit(0);
+    }
+    if (cleanup > 0) {
+        setpgid(cleanup, cleanup);
+        until = now_ms() + 18000;
+        while (waitpid(cleanup, NULL, WNOHANG) == 0 && now_ms() < until) usleep(20000);
+        kill(-cleanup, SIGKILL); kill(cleanup, SIGKILL);
+        waitpid(cleanup, NULL, WNOHANG);
+    }
     home_monitor_cleanup();
     close(srv);
     log_msg("wifi_daemon stopped");

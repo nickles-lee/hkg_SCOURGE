@@ -1,9 +1,15 @@
 # wifi.txt — place this at the ROOT of the USB stick, then press
 # "Import USB" in the WiFi app.
 #
-# Client (station) network:
+# Client (station) networks in PRIORITY ORDER: the daemon scans once and
+# connects to the first configured network that is visible.  The plain
+# ssid/psk pair is network 1 (highest priority); ssid2/psk2 .. ssid4/psk4
+# add lower-priority networks (e.g. phone hotspot first, home network
+# second).
 ssid=MyHomeWiFi
 psk=MyHomePassword
+# ssid2=iPhone
+# psk2=iphone-hotspot-password
 
 # Wireless CarPlay access point.  If omitted, the app generates/uses
 # IONIQ5-CarPlay and a random key.
@@ -14,8 +20,15 @@ carplay_channel=36
 carplay_hidden=0
 carplay_max_sta=2
 
-# SSH is enabled by the installer.  Set ssh=0 to keep it off.
-ssh=1
+# carplay_btaddr is the car's Bluetooth MAC.  It is REQUIRED for the
+# CarPlay information element: without it the daemon skips the IE with
+# "Bluetooth address unknown" and the iPhone will not offer wireless
+# CarPlay. Use the actual Bluetooth MAC of your own head unit; do not
+# infer it from the WiFi MAC on other hardware.
+# carplay_btaddr=02:00:00:00:00:01
+
+# SSH stays off after install; enable it explicitly in the app UI.
+# (ssh= in this file is ignored; activation is never automatic.)
 ssh_port=2222
 
 # Optional overrides:
@@ -23,4 +36,3 @@ ssh_port=2222
 # carplay_model=Ioniq 5
 # carplay_name=Ioniq 5
 # carplay_id=IONIQ5-260128
-# carplay_btaddr=00:00:00:00:00:00

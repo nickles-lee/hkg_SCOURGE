@@ -16,11 +16,10 @@
 
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-BIN="${WIFI_DAEMON_BIN:-$ROOT/src/wifi_daemon}"
-[ -x "$BIN" ] || make -C "$ROOT/src"
-
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/wifi-prune.XXXXXX")
+TMP=$(mktemp -d "${TMPDIR:-/tmp/opencode}/wifi-prune.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
+BIN="$TMP/daemon"
+gcc -O1 -DWIFI_TEST -DAPP_DIR="\"$TMP/state\"" "$ROOT/src/wifi_daemon.c" -o "$BIN"
 USB="$TMP/usb"
 RUN="$TMP/run"
 mkdir -p "$USB" "$RUN"
@@ -33,8 +32,7 @@ for stamp in 20200101000000 20200201000000 20200301000000 20200401000000 \
 done
 
 # A benign stray FILE with a valid bundle name (newer than all bundles):
-# same semantics as before — it is a candidate, unlinked not rmdir'd, and
-# new enough to be kept.
+# non-directories and symlinks are never prune candidates.
 echo "stray file" > "$USB/wifi_logs_20250101000000"
 
 # Decoys: skipped untouched.  These are the injection payloads the old
@@ -74,15 +72,15 @@ for d in "wifi_logs_a'; touch pwned_quote; #" \
     fi
 done
 
-# 3. Exactly the oldest 4 bundles pruned (7 bundles + stray file + fresh
-#    dump = 9 candidates; newest 5 kept: fresh, stray, 202005..202007).
-for stamp in 20200101000000 20200201000000 20200301000000 20200401000000; do
+# 3. Exactly the oldest 3 directories pruned (7 bundles + fresh dump = 8;
+#    newest 5 kept). The stray file does not count towards retention.
+for stamp in 20200101000000 20200201000000 20200301000000; do
     if [ -e "$USB/wifi_logs_$stamp" ]; then
         echo "FAIL: old bundle survived: $stamp" >&2
         exit 1
     fi
 done
-for stamp in 20200501000000 20200601000000 20200701000000; do
+for stamp in 20200401000000 20200501000000 20200601000000 20200701000000; do
     if [ ! -d "$USB/wifi_logs_$stamp" ]; then
         echo "FAIL: kept bundle missing: $stamp" >&2
         exit 1
