@@ -1680,12 +1680,13 @@ static bool decode_control_ssid(char *out, size_t n, const char *value)
     return true;
 }
 
-static bool wpa_state_completed(void)
+static int client_station_net(void)
 {
     char buf[2048];
     if (sh_out(buf, sizeof(buf), "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 status 2>/dev/null") != 0)
-        return false;
-    bool completed = false, station = false, same_ssid = false;
+        return -1;
+    bool completed = false, station = false;
+    int net = -1;
     char *save = NULL;
     for (char *line = strtok_r(buf, "\n", &save); line;
          line = strtok_r(NULL, "\n", &save)) {
@@ -1693,10 +1694,24 @@ static bool wpa_state_completed(void)
         else if (!strcmp(line, "mode=station")) station = true;
         else if (!strncmp(line, "ssid=", 5)) {
             char actual[80];
-            same_ssid = decode_control_ssid(actual, sizeof(actual), line + 5) && !strcmp(actual, g_cfg.ssid);
+            if (decode_control_ssid(actual, sizeof(actual), line + 5)) {
+                for (int i = 0; i < WIFI_NETS_MAX; i++)
+                    if (net_ssid(i)[0] && !strcmp(actual, net_ssid(i))) { net = i; break; }
+            }
         }
     }
-    return completed && station && same_ssid;
+    return completed && station ? net : -1;
+}
+
+static bool wpa_state_completed(void) { return client_station_net() >= 0; }
+
+/* Visibility/priority chooses a new connection. Health checks must instead
+ * inspect the network actually associated, including a lower-priority one. */
+static bool find_connected_service(const char *services, char *service, size_t n)
+{
+    int net = client_station_net();
+    return net >= 0 && find_service_psk(services, net_ssid(net),
+                                       net_psk(net)[0] ? "_psk" : "_none", service, n);
 }
 
 static int channel_to_freq(void)
@@ -2846,7 +2861,7 @@ static bool client_wait_ip(const char *service, int attempts)
 {
     for (int i = 0; i < attempts; i++) {
         char ip[64];
-        if (wlan_ip(ip, sizeof(ip)) && client_associated() && client_service_ready(service, ip)) {
+        if (wlan_ip(ip, sizeof(ip)) && client_station_net() == g_client_net && client_service_ready(service, ip)) {
             set_msg("client connected to '%s' (%s)", net_ssid(g_client_net), ip);
             return true;
         }
@@ -3387,7 +3402,7 @@ static bool ssh_start(void)
     } else if (g_cfg.wlan_on && g_cfg.mode == MODE_CLIENT && client_associated() && wlan_ip(ip, sizeof(ip))) {
         char services[16384], service[256];
         ready = sh_out(services, sizeof(services), "connmanctl services 2>/dev/null") == 0 &&
-                find_service_any(services, service, sizeof(service), NULL, 0) >= 0 &&
+                find_connected_service(services, service, sizeof(service)) &&
                 client_service_ready(service, ip);
     }
     if (!ready) {
@@ -3932,7 +3947,7 @@ static void collect_observation(observation_t *o)
     if (o->associated && o->ip[0]) {
         char services[16384], service[256];
         if (sh_out(services, sizeof(services), "connmanctl services 2>/dev/null") != 0 ||
-            find_service_any(services, service, sizeof(service), NULL, 0) < 0 ||
+            !find_connected_service(services, service, sizeof(service)) ||
             !client_service_ready(service, o->ip)) {
             o->associated = false;
             o->ip[0] = 0;

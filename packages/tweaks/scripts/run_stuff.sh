@@ -97,9 +97,21 @@ set_exec_label() {
     chsmack -e "$SMACK_SELF" "$_bin" >> "$LOG" 2>&1 || \
         fail "exec label failed: $_bin"
     _actual=$(getfattr -n security.SMACK64EXEC --only-values "$_bin" 2>/dev/null || true)
-    [ "$_actual" = "$SMACK_SELF" ] || \
-        fail "exec label readback failed: $_bin (expected '$SMACK_SELF', got '${_actual:-none}')"
-    log "exec label ok: $_bin = $SMACK_SELF"
+    # Readback-unreadable is a WARNING, not a gate failure — this is the
+    # on-car-proven onlycap=Privileged behavior (2026-11-10 install log:
+    # getfattr returns "Operation not permitted" from the '_' installer
+    # context; state.txt shows SMACK64EXEC "No such attribute" while the
+    # daemons run as '_' via systemd inheritance).  Compensating controls:
+    #   - a READABLE wrong label is still fatal (the case that matters);
+    #   - the daemon's running label is verified below (smack_check);
+    #   - the persist helper is exec'd by that daemon, so it inherits the
+    #     verified '_' context when the exec attribute is absent.
+    if [ -z "$_actual" ]; then
+        log "WARNING: cannot read back SMACK64EXEC for $_bin; trusting chsmack"
+    elif [ "$_actual" != "$SMACK_SELF" ]; then
+        fail "exec label readback failed: $_bin (expected '$SMACK_SELF', got '$_actual')"
+    fi
+    log "exec label ok: $_bin = ${_actual:-unverified}"
 }
 
 mount -o remount,rw "$USB_DIR" 2>/dev/null || true
@@ -276,17 +288,17 @@ fi
 log "HU backup: $BACKUP_HU"
 
 # ---- rootfs rw ---------------------------------------------------------
-was_ro=0
-grep -q ' / .* ro[, ]' /proc/mounts && was_ro=1
-if [ "$was_ro" = 1 ]; then
-    mount -o remount,rw / 2>/dev/null || fail "cannot remount / rw"
-fi
+. "$PAYLOAD/lib/install_io.sh"
+io_init || fail "cannot identify root mount"
+trap 'io_restore_root || true' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+io_settle_root || fail "root filesystem is not stably writable"
 
 # ---- assets / icons ----------------------------------------------------
-mkdir -p "$ASSET_DIR" 2>/dev/null || fail "cannot create $ASSET_DIR"
 for f in "$PAYLOAD/assets/tweaks/"*; do
     [ -f "$f" ] || continue
-    cp -f "$f" "$ASSET_DIR/" || fail "asset copy failed: $f"
+    io_asset "$f" "$ASSET_DIR/$(basename "$f")"
 done
 chmod 644 "$ASSET_DIR/"* 2>/dev/null || true
 
@@ -303,7 +315,7 @@ chown 0:0 "$RW_DIR/tweaks_daemon" 2>/dev/null || true
 # `Privileged`: it has no micommanager or system-bus rule.
 set_exec_label "$RW_DIR/tweaks_daemon"
 DAEMON_SMACK=$(getfattr -n security.SMACK64EXEC --only-values "$RW_DIR/tweaks_daemon" 2>/dev/null || true)
-[ -n "$DAEMON_SMACK" ] || DAEMON_SMACK=unset
+[ -n "$DAEMON_SMACK" ] || DAEMON_SMACK=unverified
 PERSIST_SMACK=absent
 
 if [ -f "$PAYLOAD/bin/tweaks_persist" ]; then
@@ -313,7 +325,7 @@ if [ -f "$PAYLOAD/bin/tweaks_persist" ]; then
     chown 0:0 "$RW_DIR/tweaks_persist" 2>/dev/null || true
     set_exec_label "$RW_DIR/tweaks_persist"
     PERSIST_SMACK=$(getfattr -n security.SMACK64EXEC --only-values "$RW_DIR/tweaks_persist" 2>/dev/null || true)
-    [ -n "$PERSIST_SMACK" ] || PERSIST_SMACK=unset
+    [ -n "$PERSIST_SMACK" ] || PERSIST_SMACK=unverified
     # The vendor library normally has this SONAME symlink already; make it
     # best-effort if a stripped rootfs is missing it.
     if [ ! -e /usr/lib/libpersistence_client_library.so.7 ]; then
@@ -346,12 +358,12 @@ WRANDR_LABEL=""
 if [ -e "$WRANDR" ]; then
     WRANDR_LABEL=$(getfattr -n security.SMACK64 --only-values "$WRANDR" 2>/dev/null || true)
 fi
-cp -f "$PAYLOAD/bin/wrandr" "$WRANDR" || fail "wrapper copy failed"
+io_copy "$PAYLOAD/bin/wrandr" "$WRANDR" || fail "wrapper copy failed"
 chmod 755 "$WRANDR" 2>/dev/null || true
 chown 0:0 "$WRANDR" 2>/dev/null || true
 [ -n "$WRANDR_LABEL" ] && setfattr -n security.SMACK64 -v "$WRANDR_LABEL" "$WRANDR" 2>/dev/null || true
 
-cp -f "$PAYLOAD/systemd/tweaks-daemon.service" "$SERVICE" || fail "service copy failed"
+io_copy "$PAYLOAD/systemd/tweaks-daemon.service" "$SERVICE" || fail "service copy failed"
 chmod 644 "$SERVICE" 2>/dev/null || true
 chown 0:0 "$SERVICE" 2>/dev/null || true
 
@@ -456,8 +468,8 @@ install_qml() {
     ref="$3"
     [ -f "$src" ] || fail "payload QML missing: $src"
     label=$(getfattr -n security.SMACK64 --only-values "$ref" 2>/dev/null || true)
-    mkdir -p "$(dirname "$dst")" 2>/dev/null || fail "cannot create dir for $dst"
-    cp -f "$src" "$dst" || fail "copy failed: $dst"
+    io_mkdir "$(dirname "$dst")" || fail "cannot create dir for $dst"
+    io_copy "$src" "$dst" || fail "copy failed: $dst"
     chmod 644 "$dst" 2>/dev/null || true
     chown 0:0 "$dst" 2>/dev/null || true
     [ -n "$label" ] && setfattr -n security.SMACK64 -v "$label" "$dst" 2>/dev/null || true
@@ -524,9 +536,7 @@ if [ "$daemon_status" != "systemd-ok" ]; then
 fi
 log "daemon=$daemon_status"
 
-if [ "$was_ro" = 1 ]; then
-    mount -o remount,ro / 2>/dev/null || true
-fi
+io_restore_root || fail "cannot restore root mount state"
 
 # ---- restart AppHomeScreen --------------------------------------------
 restart="not-attempted"
@@ -591,23 +601,42 @@ if [ -z "$RUNNING_SMACK" ]; then
     done
 fi
 smack_check=unknown
-if [ "$DAEMON_SMACK" != "$SMACK_SELF" ]; then
-    smack_check=mismatch
-    log "SMACK MISMATCH: tweaks_daemon file label='$DAEMON_SMACK' expected='$SMACK_SELF'"
-elif [ -n "$RUNNING_SMACK" ]; then
-    if [ "$RUNNING_SMACK" = "$SMACK_SELF" ]; then
-        smack_check=ok
-    else
+case "$DAEMON_SMACK" in
+    "$SMACK_SELF")
+        if [ -n "$RUNNING_SMACK" ]; then
+            if [ "$RUNNING_SMACK" = "$SMACK_SELF" ]; then
+                smack_check=ok
+            else
+                smack_check=mismatch
+                log "SMACK MISMATCH: running tweaks_daemon='$RUNNING_SMACK' expected='$SMACK_SELF'"
+            fi
+        else
+            log "SMACK UNKNOWN: tweaks_daemon is not running"
+        fi
+        ;;
+    unverified)
+        if [ "$RUNNING_SMACK" = "$SMACK_SELF" ]; then
+            smack_check=ok
+        elif [ -n "$RUNNING_SMACK" ]; then
+            smack_check=mismatch
+            log "SMACK MISMATCH: running tweaks_daemon='$RUNNING_SMACK' expected='$SMACK_SELF'"
+        else
+            log "SMACK UNKNOWN: tweaks_daemon file label unreadable and process not found"
+        fi
+        ;;
+    *)
         smack_check=mismatch
-        log "SMACK MISMATCH: running tweaks_daemon='$RUNNING_SMACK' expected='$SMACK_SELF'"
-    fi
-else
-    log "SMACK UNKNOWN: tweaks_daemon is not running"
-fi
-if [ "$PERSIST_SMACK" != "$SMACK_SELF" ] && [ "$PERSIST_SMACK" != "absent" ]; then
+        log "SMACK MISMATCH: tweaks_daemon file label='$DAEMON_SMACK' expected='$SMACK_SELF'"
+        ;;
+esac
+if [ "$PERSIST_SMACK" != "$SMACK_SELF" ] && [ "$PERSIST_SMACK" != "absent" ] && [ "$PERSIST_SMACK" != "unverified" ]; then
     log "SMACK MISMATCH: tweaks_persist='$PERSIST_SMACK' expected='$SMACK_SELF'"
     smack_check=mismatch
 fi
+# PERSIST_SMACK=unverified is accepted only because the helper is exec'd by
+# the daemon whose running label smack_check verifies (see set_exec_label):
+# with no readable exec attribute the helper inherits the daemon's '_'
+# context.  A readable wrong label above remains fatal.
 final_status=OK
 [ "$smack_check" = "ok" ] || final_status=FAIL
 
@@ -617,7 +646,7 @@ result "status=$final_status" "variant=$adv_variant/$wide_variant/$all_variant/$
        "persist_smack=$PERSIST_SMACK" "daemon_smack=${RUNNING_SMACK:-none}" \
        "smack_check=$smack_check" \
        "disclaimer=next-boot" "tzdata=$(cat "$RW_DIR/tzdata_version" 2>/dev/null | head -n 1)" \
-       "ota_block=$(cfg_value ota_block 0)" "log=$LOG"
+       "ota_block=$(cfg_value ota_block 0)" "asset_warnings=$ASSET_WARNINGS" "log=$LOG"
 log "=== tweaks payload done ==="
 [ "$final_status" = "OK" ] || exit 1
 exit 0

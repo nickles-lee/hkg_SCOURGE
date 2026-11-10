@@ -28,7 +28,14 @@ args=sys.argv[1:]
 failure=os.environ.get('FAIL_POINT','')
 with (root/'commands.log').open('a') as f: f.write(name+' '+repr(args)+'\n')
 def save(): statefile.write_text(json.dumps(state))
-if name in ('sleep','mount','sync','chown','iptables','ip6tables'): sys.exit(0)
+if name in ('sleep','sync','chown','iptables','ip6tables'): sys.exit(0)
+if name=='mount':
+ mounts=root/'root/proc/mounts'
+ if mounts.exists():
+  lines=mounts.read_text().splitlines()
+  mode='ro' if 'remount,ro' in args else 'rw'
+  mounts.write_text('device '+str(root/'root')+' ext4 '+mode+' 0 0\n'+''.join(l+'\n' for l in lines if l.startswith('smackfs ')))
+ sys.exit(0)
 if name=='setfattr': sys.exit(1 if failure=='qml-label' else 0)
 if name=='date':
  print('20260101T000000Z' if any(a.startswith('+') for a in args) else 'fixture time'); sys.exit(0)
@@ -37,6 +44,15 @@ if name=='getfattr':
  sys.exit(1)
 if name=='chsmack': sys.exit(1 if failure=='label' else 0)
 if name=='cp':
+ if failure=='icons' and '/payload/assets/' in args[-2]:
+  print('cp: optional icon: Read-only file system',file=sys.stderr); sys.exit(1)
+ if failure in ('copy-race','rollback-race') and '/payload/qml/' in args[-2] and not state.get('raced'):
+  state['raced']=True;save()
+  (root/'root/proc/mounts').write_text('device '+str(root/'root')+' ext4 ro 0 0\n')
+  print('cp: Read-only file system',file=sys.stderr);sys.exit(1)
+ if failure=='rollback-race' and args[-1].endswith('/HomeScreen/WifiPage.qml') and '/usb/payload/' in args[-2]:
+  (root/'root/proc/mounts').write_text('device '+str(root/'root')+' ext4 ro 0 0\n')
+  sys.exit(1)
  if failure=='qml' and args[-1].endswith('/HomeScreen/WifiPage.qml') and '/usb/payload/' in args[-2]: sys.exit(1)
  os.execv('/usr/bin/cp',['cp',*args])
 if name=='pidof':
@@ -89,7 +105,7 @@ class Fixture:
             (self.bin / name).symlink_to(command)
         for directory in ("etc/systemd/system", "tmp", "proc", "home", "rw_data/wifi"):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
-        (self.root / "proc/mounts").write_text("")
+        (self.root / "proc/mounts").write_text(f"device {self.root} ext4 rw 0 0\n")
         (self.root / "tmp/shells").write_text("")
         for name in ("passwd.legacy", "passwd.secure"):
             (self.root / "etc" / name).write_text("root:x:0:0:root:/root:/bin/sh\n")
@@ -136,6 +152,7 @@ class Fixture:
             text = re.sub(r"@@(.*?)@@", lambda m: str(self.path / m.group(1)), text)
             (self.path / script).write_text(text)
         self.env = dict(os.environ, FIXTURE=str(self.path), WIFI_PATH=str(self.bin) + ":/usr/bin:/bin",
+                        INSTALL_IO_ROOT=str(self.root), INSTALL_IO_MOUNTS=str(self.root / "proc/mounts"),
                         USB_DIR=str(self.usb), WIFI_RW_DIR=str(self.rw),
                         WIFI_QML_ROOT=str(self.qml.parent), WIFI_SERVICE=str(self.root / "etc/systemd/system/wifi-daemon.service"))
 
@@ -146,7 +163,8 @@ class Fixture:
 
     def run(self, restore=False, failure="", success=True):
         env = dict(self.env, FAIL_POINT=failure)
-        if failure in ("label", "qml-label"): (self.root / "proc/mounts").write_text("smackfs /sys/fs/smackfs smackfs rw 0 0\n")
+        if failure in ("label", "qml-label"):
+            (self.root / "proc/mounts").write_text(f"device {self.root} ext4 rw 0 0\nsmackfs /sys/fs/smackfs smackfs rw 0 0\n")
         script = self.path / ("run_stuff_restore.sh" if restore else "run_stuff.sh")
         result = subprocess.run(["sh", str(script)], env=env, capture_output=True, text=True, timeout=25)
         report = (self.usb / "run_stuff_result.txt").read_text()
@@ -211,16 +229,17 @@ if KIND == "stock":
     for owner_dropin in (False, True):
         with tempfile.TemporaryDirectory(prefix="wifi-mdns-rollback-", dir="/tmp/opencode") as directory:
             fixture = Fixture(directory)
-            stock = b"stock-mdns-fixture\n"
-            rooted = b"rooted-mdns-fixture\n"
+            stock, rooted = b"stock-mdns-fixture\n", b"rooted-mdns-fixture\n"
             target = fixture.root / "app/bin/mdnsd"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(stock)
             inode = target.stat().st_ino
-            dropin = fixture.root / "etc/systemd/system/carplay_mdnsd.service.d/override.conf"
+            dropin = fixture.root / "etc/systemd/system/carplay_mdnsd.service.d/50-scourge-restart.conf"
+            owner = dropin.with_name("override.conf")
+            owner.parent.mkdir(parents=True, exist_ok=True)
+            owner.write_text("[Service]\nRestart=on-failure\n")
             if owner_dropin:
-                dropin.parent.mkdir(parents=True, exist_ok=True)
-                dropin.write_text("[Service]\nRestart=on-failure\n")
+                dropin.write_text("# unrelated owner configuration\n[Service]\nRestart=on-failure\n")
             (fixture.usb / "payload/bin/mdnsd.rooted").write_bytes(rooted)
             (fixture.usb / "MDNSD_ROOT_ARM").touch()
             script = fixture.path / "run_stuff.sh"
@@ -228,12 +247,32 @@ if KIND == "stock":
                               .replace("f847373d7c5a6906453ba921bb790d22", hashlib.md5(rooted).hexdigest()))
             fixture.manifest()
             fixture.run(failure="daemon", success=False)
+            assert "mdnsd patch: applied" in (fixture.rw / "install.log").read_text()
             assert target.read_bytes() == stock and target.stat().st_ino == inode
+            assert owner.read_text() == "[Service]\nRestart=on-failure\n"
             if owner_dropin:
-                assert dropin.read_text() == "[Service]\nRestart=on-failure\n"
+                assert "unrelated owner" in dropin.read_text()
             else:
                 assert not dropin.exists()
-            print("PASS: armed mdns experiment rolls back binary and drop-in on later failure")
+            print("PASS: armed mdns rollback preserves binary inode and independent drop-ins")
+    for failure in ("icons", "copy-race"):
+        with tempfile.TemporaryDirectory(prefix="wifi-resilience-", dir="/tmp/opencode") as directory:
+            fixture = Fixture(directory)
+            fixture.run(failure=failure)
+            report = (fixture.usb / "run_stuff_result.txt").read_text()
+            if failure == "icons":
+                assert re.search(r"asset_warnings=[1-9]", report), report
+            assert (fixture.qml / "HomeScreen/WifiPage.qml").exists()
+            print(f"PASS: install tolerates {failure}; core files verified")
+    with tempfile.TemporaryDirectory(prefix="wifi-rollback-ro-", dir="/tmp/opencode") as directory:
+        fixture = Fixture(directory, existing=True)
+        original_passwd = (fixture.root / "tmp/passwd").read_bytes()
+        fixture.run(failure="rollback-race", success=False)
+        fixture.assert_qml_original()
+        assert (fixture.root / "etc/passwd").is_symlink()
+        assert (fixture.root / "tmp/passwd").read_bytes() == original_passwd
+        assert "ROLLBACK FAILED" not in (fixture.rw / "install.log").read_text()
+        print("PASS: rollback recovers read-only root without deleting account symlinks")
     for failure in ("qml", "daemon", "label", "manifest"):
         with tempfile.TemporaryDirectory(prefix="wifi-rollback-", dir="/tmp/opencode") as directory:
             fixture = Fixture(directory)

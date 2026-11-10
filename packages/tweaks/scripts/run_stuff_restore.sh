@@ -44,11 +44,12 @@ fi
 LATEST="$RW_DIR/backup/latest"
 [ -d "$LATEST" ] || fail "no backup/latest; cannot restore"
 
-was_ro=0
-grep -q ' / .* ro[, ]' /proc/mounts && was_ro=1
-if [ "$was_ro" = 1 ]; then
-    mount -o remount,rw / 2>/dev/null || fail "cannot remount / rw"
-fi
+. "$PAYLOAD/lib/install_io.sh"
+io_init || fail "cannot identify root mount"
+trap 'io_restore_root || true' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+io_settle_root || fail "root filesystem is not stably writable"
 
 # Stop daemon.
 if command -v systemctl >/dev/null 2>&1; then
@@ -65,14 +66,14 @@ WRANDR="${TWEAKS_WRANDR:-/usr/bin/wrandr}"
 WRANDR_REAL="${TWEAKS_WRANDR_REAL:-/usr/bin/wrandr.real}"
 if [ -f "$WRANDR_REAL" ]; then
     WRANDR_LABEL=$(getfattr -n security.SMACK64 --only-values "$WRANDR" 2>/dev/null || true)
-    cp -f "$WRANDR_REAL" "$WRANDR" 2>/dev/null || fail "cannot restore wrandr"
+    io_copy "$WRANDR_REAL" "$WRANDR" || fail "cannot restore wrandr"
     chmod 755 "$WRANDR" 2>/dev/null || true
     chown 0:0 "$WRANDR" 2>/dev/null || true
     [ -n "$WRANDR_LABEL" ] && setfattr -n security.SMACK64 -v "$WRANDR_LABEL" "$WRANDR" 2>/dev/null || true
     rm -f "$WRANDR_REAL" 2>/dev/null || true
     log "restored wrandr from wrandr.real"
 elif [ -f "$RW_DIR/backup/wrandr.orig" ]; then
-    cp -f "$RW_DIR/backup/wrandr.orig" "$WRANDR" 2>/dev/null || fail "cannot restore wrandr backup"
+    io_copy "$RW_DIR/backup/wrandr.orig" "$WRANDR" || fail "cannot restore wrandr backup"
     chmod 755 "$WRANDR" 2>/dev/null || true
     log "restored wrandr from backup"
 fi
@@ -81,8 +82,8 @@ fi
 for f in "$ADV" "$WIDE" "$ALL" "$SETUP" "$CUSTOM" "$THEME"; do
     if [ -f "$LATEST/$f" ]; then
         label=$(getfattr -n security.SMACK64 --only-values "$QML_DIR/$f" 2>/dev/null || true)
-        mkdir -p "$QML_DIR/$(dirname "$f")" 2>/dev/null
-        cp -f "$LATEST/$f" "$QML_DIR/$f" || fail "restore failed: $f"
+        io_mkdir "$QML_DIR/$(dirname "$f")" || fail "cannot create restore directory"
+        io_copy "$LATEST/$f" "$QML_DIR/$f" || fail "restore failed: $f"
         chmod 644 "$QML_DIR/$f" 2>/dev/null || true
         chown 0:0 "$QML_DIR/$f" 2>/dev/null || true
         [ -n "$label" ] && setfattr -n security.SMACK64 -v "$label" "$QML_DIR/$f" 2>/dev/null || true
@@ -97,8 +98,8 @@ for base in qml_eco3.0 new_qml qml_genesis; do
         [ -f "$src" ] || continue
         dst="$STANDBY_ROOT/$base/$f"
         label=$(getfattr -n security.SMACK64 --only-values "$dst" 2>/dev/null || true)
-        mkdir -p "$STANDBY_ROOT/$base" 2>/dev/null
-        cp -f "$src" "$dst" || fail "restore failed: AppStandbyClock/$base/$f"
+        io_mkdir "$STANDBY_ROOT/$base" || fail "cannot create restore directory"
+        io_copy "$src" "$dst" || fail "restore failed: AppStandbyClock/$base/$f"
         chmod 644 "$dst" 2>/dev/null || true
         chown 0:0 "$dst" 2>/dev/null || true
         [ -n "$label" ] && setfattr -n security.SMACK64 -v "$label" "$dst" 2>/dev/null || true
@@ -227,9 +228,7 @@ if command -v dbus-send >/dev/null 2>&1; then
     fi
 fi
 
-if [ "$was_ro" = 1 ]; then
-    mount -o remount,ro / 2>/dev/null || true
-fi
+io_restore_root || fail "cannot restore root mount state"
 
 result "status=OK" "restored_from=$LATEST" "restart=$restart" "log=$LOG"
 log "=== tweaks restore done ==="

@@ -468,7 +468,7 @@ wpa_supplicant.log   supplicant output (why scan/connect/tether failed)
 ssh.log              dropbear output
 install.log          the installer's log
 status.json          last status snapshot
-config.conf          config with psk/carplay_psk redacted
+config.conf          config with primary, secondary and CarPlay PSKs redacted
 state.txt            build ID and monotonic timestamp; ps, connmanctl,
                       wpa_cli status/get ap_scan/scan_results, iw/iwconfig,
                       ifconfig, iptables, dmesg tail,

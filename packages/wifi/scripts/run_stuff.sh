@@ -80,22 +80,19 @@ cleanup_ro() {
     if [ "${transaction_started:-0}" = 1 ] && [ "${install_complete:-0}" != 1 ]; then
         log "rolling back incomplete install"
         systemctl stop wifi-daemon.service >> "$LOG" 2>&1 || true
+        if [ "${mdnsd_changed:-0}" = 1 ]; then
+            systemctl stop carplay_mdnsd.service >> "$LOG" 2>&1 || true
+        fi
         while IFS='|' read -r item existed destination; do
             [ -n "$destination" ] || continue
             if [ "$existed" = 1 ]; then
-                if [ "$destination" = /app/bin/mdnsd ]; then
-                    systemctl stop carplay_mdnsd.service >> "$LOG" 2>&1 || true
-                    cp -f "$BACKUP_HU/transaction/$item" "$destination" 2>>"$LOG" || log "ROLLBACK FAILED: $destination"
-                else
-                    rm -f "$destination" 2>/dev/null || true
-                    cp -pP "$BACKUP_HU/transaction/$item" "$destination" 2>/dev/null || log "ROLLBACK FAILED: $destination"
-                fi
+                io_restore_entry "$BACKUP_HU/transaction/$item" "$destination" || log "ROLLBACK FAILED: $destination (backup retained)"
                 for attr in SMACK64 SMACK64EXEC; do
                     value=$(cat "$BACKUP_HU/transaction/$item.$attr" 2>/dev/null || true)
                     [ -z "$value" ] || setfattr -n "security.$attr" -v "$value" "$destination" 2>/dev/null || true
                 done
             else
-                rm -f "$destination" 2>/dev/null || true
+                io_remove "$destination" || log "ROLLBACK FAILED: remove $destination"
             fi
         done < "$BACKUP_HU/transaction/files"
         systemctl daemon-reload >> "$LOG" 2>&1 || true
@@ -110,9 +107,7 @@ cleanup_ro() {
         [ "${daemon_was_enabled:-0}" = 1 ] || systemctl disable wifi-daemon.service >> "$LOG" 2>&1 || true
         [ "${daemon_was_active:-0}" != 1 ] || systemctl start wifi-daemon.service >> "$LOG" 2>&1 || true
     fi
-    if [ "${was_ro:-0}" = 1 ]; then
-        mount -o remount,ro / 2>/dev/null || true
-    fi
+    if [ "${IO_ACTIVE:-0}" = 1 ]; then io_restore_root || true; fi
 }
 trap cleanup_ro EXIT
 trap 'exit 130' INT
@@ -123,7 +118,13 @@ remember() {
     transaction_index=$((transaction_index + 1))
     existed=0
     if [ -e "$destination" ] || [ -L "$destination" ]; then
-        cp -pP "$destination" "$BACKUP_HU/transaction/$transaction_index" || fail "transaction backup failed: $destination"
+        if ! cp -pP "$destination" "$BACKUP_HU/transaction/$transaction_index" 2>>"$LOG"; then
+            if [ "${2:-required}" = optional ]; then
+                log "WARNING: optional icon backup failed; keeping existing icon: $destination"
+                return 1
+            fi
+            fail "transaction backup failed: $destination"
+        fi
         existed=1
         for attr in SMACK64 SMACK64EXEC; do
             getfattr -n "security.$attr" --only-values "$destination" > "$BACKUP_HU/transaction/$transaction_index.$attr" 2>/dev/null || true
@@ -317,11 +318,8 @@ grep -q 'WIFI_PAYLOAD_260128' "$cur_adv" 2>/dev/null || new_restore_point=1
 log "HU backup: $BACKUP_HU"
 
 # ---- rootfs rw ---------------------------------------------------------
-was_ro=0
-grep -q ' / .* ro[, ]' /proc/mounts && was_ro=1
-if [ "$was_ro" = 1 ]; then
-    mount -o remount,rw / 2>/dev/null || fail "cannot remount / rw"
-fi
+. "$PAYLOAD/lib/install_io.sh"
+io_init && io_settle_root || fail "root filesystem is not stably writable"
 
 mkdir -p "$BACKUP_HU/transaction" "$RW_DIR/backup/accounts" || fail "cannot create transaction backup"
 transaction_index=0
@@ -329,7 +327,7 @@ transaction_index=0
 for destination in "$RW_DIR/wifi_daemon" "$RW_DIR/bin/dropbearmulti" "$SERVICE" "$RW_DIR/status.json" \
     "$RW_DIR/config.conf" "$RW_DIR/wifi.txt" "$RW_DIR/ssh/authorized_keys" \
     "$RW_DIR/home/.ssh/authorized_keys" /etc/passwd /etc/passwd.legacy /etc/passwd.secure /etc/shadow /etc/shadow.Global \
-    /etc/systemd/system/carplay_mdnsd.service.d/override.conf; do
+    /etc/systemd/system/carplay_mdnsd.service.d/50-scourge-restart.conf; do
     remember "$destination"
     if [ -L "$destination" ]; then
         target=$(readlink -f "$destination" 2>/dev/null || true)
@@ -357,9 +355,8 @@ add_car_passwd() {
     f="$1"
     [ -f "$f" ] || return 0
     grep -q '^car:' "$f" 2>/dev/null && return 0
-    [ -n "$(tail -c1 "$f" 2>/dev/null)" ] && echo >> "$f"
     entry='car:x:0:0:Car User:/rw_data/wifi/home:/bin/sh'
-    echo "$entry" >> "$f" || fail "cannot add account: $f"
+    io_append_line "$f" "$entry" || fail "cannot add account: $f"
     printf '%s\n' "$entry" > "$RW_DIR/backup/accounts/$(basename "$f")" || fail "cannot record account ownership"
     chmod 600 "$RW_DIR/backup/accounts/$(basename "$f")" 2>/dev/null || true
     log "added user car to $f"
@@ -368,9 +365,8 @@ add_car_shadow() {
     f="$1"
     [ -f "$f" ] || return 0
     grep -q '^car:' "$f" 2>/dev/null && return 0
-    [ -n "$(tail -c1 "$f" 2>/dev/null)" ] && echo >> "$f"
     entry="car:$CAR_HASH:19000:0:99999:7:::"
-    echo "$entry" >> "$f" || fail "cannot add shadow: $f"
+    io_append_line "$f" "$entry" || fail "cannot add shadow: $f"
     printf '%s\n' "$entry" > "$RW_DIR/backup/accounts/$(basename "$f")" || fail "cannot record shadow ownership"
     chmod 600 "$RW_DIR/backup/accounts/$(basename "$f")" 2>/dev/null || true
     log "added car shadow to $f"
@@ -409,17 +405,19 @@ for app in wifi hello battery; do
     src="$PAYLOAD/assets/$app"
     [ -d "$src" ] || continue
     dst="$QML_ROOT/$app"
-    mkdir -p "$dst" 2>/dev/null || fail "cannot create $dst"
     for f in "$src/"*; do
         [ -f "$f" ] || continue
-        remember "$dst/$(basename "$f")"
-        cp -f "$f" "$dst/" || fail "asset copy failed: $f"
+        if remember "$dst/$(basename "$f")" optional; then
+            io_asset "$f" "$dst/$(basename "$f")"
+        else
+            ASSET_WARNINGS=$((ASSET_WARNINGS + 1))
+        fi
     done
     chmod 644 "$dst/"* 2>/dev/null || true
 done
 
 # ---- daemon / dropbear / service --------------------------------------
-cp -f "$PAYLOAD/bin/wifi_daemon" "$RW_DIR/wifi_daemon" || fail "daemon copy failed"
+io_copy "$PAYLOAD/bin/wifi_daemon" "$RW_DIR/wifi_daemon" || fail "daemon copy failed"
 chmod 755 "$RW_DIR/wifi_daemon" 2>/dev/null || true
 chown 0:0 "$RW_DIR/wifi_daemon" 2>/dev/null || true
 # Verify the requested label; do not claim it establishes effective runtime
@@ -449,7 +447,7 @@ if [ -f "$PAYLOAD/bin/dropbearmulti" ]; then
     ln -sf dropbearmulti "$RW_DIR/bin/dropbearkey" 2>/dev/null || true
 fi
 
-cp -f "$PAYLOAD/systemd/wifi-daemon.service" "$SERVICE" || fail "service copy failed"
+io_copy "$PAYLOAD/systemd/wifi-daemon.service" "$SERVICE" || fail "service copy failed"
 chmod 644 "$SERVICE" 2>/dev/null || true
 chown 0:0 "$SERVICE" 2>/dev/null || true
 
@@ -460,16 +458,17 @@ chown 0:0 "$SERVICE" 2>/dev/null || true
 # unit restart mdnsd when the process exits.  run_stuff_restore.sh removes it.
 MDNSD_UNIT_DIR="/etc/systemd/system/carplay_mdnsd.service.d"
 if [ -d /etc/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
-    if [ ! -f "$MDNSD_UNIT_DIR/override.conf" ] || \
-       ! grep -q 'Restart=always' "$MDNSD_UNIT_DIR/override.conf" 2>/dev/null; then
-        if mkdir -p "$MDNSD_UNIT_DIR" 2>/dev/null; then
-            cat > "$MDNSD_UNIT_DIR/override.conf" <<'EOF'
+    if [ ! -f "$MDNSD_UNIT_DIR/50-scourge-restart.conf" ]; then
+        if io_mkdir "$MDNSD_UNIT_DIR"; then
+            cat > "$RW_DIR/mdnsd-dropin.conf" <<'EOF'
+# SCOURGE_MDNSD_RESTART=1
 [Service]
 RemainAfterExit=no
 Restart=always
 RestartSec=2
 EOF
-            chmod 644 "$MDNSD_UNIT_DIR/override.conf" 2>/dev/null || true
+            io_copy "$RW_DIR/mdnsd-dropin.conf" "$MDNSD_UNIT_DIR/50-scourge-restart.conf" || fail "mdnsd drop-in copy failed"
+            chmod 644 "$MDNSD_UNIT_DIR/50-scourge-restart.conf" 2>/dev/null || true
             log "installed carplay_mdnsd restart drop-in"
         else
             log "WARNING: cannot create $MDNSD_UNIT_DIR (mdnsd will not auto-restart)"
@@ -478,12 +477,9 @@ EOF
 fi
 
 # ---- optional mdnsd "continue as root" patch ----------------------------
-# mdnsd drops to user "nobody" (setuid in its main) and then fails to send
-# mDNS multicast with EPERM on the car ("mDNSPlatformSendUDP got error 1"),
-# which would keep the phone from ever discovering the CarPlay service.
-# The binary already contains the fallback path ("continuing as root
-# because user nobody does not exist"); NOPing the 5-byte setuid call at
-# file offset 0x43c2 takes it.  The patch is applied by copying a
+# Experimental, disarmed by default: multicast EPERM was observed but its
+# cause is not established. NOPing setuid retains root; it does not take
+# the getpwnam-failure logging branch. The patch is applied by copying a
 # pre-patched binary from the payload (md5-verified), NOT by byte-patching
 # on the car: cp -f over the existing file keeps its inode and therefore
 # the vendor SMACK64EXEC label (App::projection).
@@ -516,22 +512,23 @@ if [ -f "$USB_DIR/MDNSD_ROOT_ARM" ]; then
         elif [ "$(md5_of "$PAYLOAD/bin/mdnsd.rooted")" != "$MDNSD_PATCHED_MD5" ]; then
             mdnsd_patch=payload-corrupt
             log "mdnsd patch: payload mdnsd.rooted md5 mismatch; refusing"
-        elif [ -w / ] || touch / 2>/dev/null; then
+        else
             _bak="$RW_DIR/backup/mdnsd.stock"
-            if cp -p "$MDNSD_BIN" "$_bak" 2>/dev/null; then
-                remember "$MDNSD_BIN"
-                mdnsd_changed=1
+            remember "$MDNSD_BIN"
+            if { [ -f "$_bak" ] && [ "$(md5_of "$_bak")" = "$MDNSD_STOCK_MD5" ]; } ||
+               { [ ! -e "$_bak" ] && cp -p "$MDNSD_BIN" "$_bak" && [ "$(md5_of "$_bak")" = "$MDNSD_STOCK_MD5" ]; }; then
                 mdnsd_was_active=0
                 systemctl is-active --quiet carplay_mdnsd.service && mdnsd_was_active=1
-                systemctl stop carplay_mdnsd.service >> "$LOG" 2>&1 || fail "cannot stop mdnsd for patch"
-                if cp -f "$PAYLOAD/bin/mdnsd.rooted" "$MDNSD_BIN" 2>/dev/null; then
+                mdnsd_changed=1
+                systemctl stop carplay_mdnsd.service >> "$LOG" 2>&1 || fail "cannot stop mdnsd for experimental patch"
+                if io_copy "$PAYLOAD/bin/mdnsd.rooted" "$MDNSD_BIN"; then
                     if [ "$(md5_of "$MDNSD_BIN")" = "$MDNSD_PATCHED_MD5" ]; then
                         mdnsd_patch=ok
                         log "mdnsd patch: applied (backup: $_bak)"
                         systemctl restart carplay_mdnsd.service >> "$LOG" 2>&1 || true
                     else
                         mdnsd_patch=verify-failed
-                        cp -f "$_bak" "$MDNSD_BIN" 2>/dev/null || true
+                        io_copy "$_bak" "$MDNSD_BIN" || fail "cannot restore stock mdnsd"
                         log "mdnsd patch: verification failed; stock restored"
                     fi
                 else
@@ -542,12 +539,10 @@ if [ -f "$USB_DIR/MDNSD_ROOT_ARM" ]; then
                 mdnsd_patch=backup-failed
                 log "mdnsd patch: cannot back up $MDNSD_BIN"
             fi
-        else
-            mdnsd_patch=not-writable
-            log "mdnsd patch: / is not writable"
         fi
     fi
 fi
+case "$mdnsd_patch" in not-attempted|ok|already-patched) : ;; *) fail "mdnsd experiment refused: $mdnsd_patch" ;; esac
 
 # ---- default config / import ------------------------------------------
 if [ ! -f "$RW_DIR/config.conf" ]; then
@@ -605,8 +600,8 @@ install_qml() {
     ref="$3"
     [ -f "$src" ] || fail "payload QML missing: $src"
     label=$(getfattr -n security.SMACK64 --only-values "$ref" 2>/dev/null || true)
-    mkdir -p "$(dirname "$dst")" 2>/dev/null || fail "cannot create dir for $dst"
-    cp -f "$src" "$dst" || fail "copy failed: $dst"
+    io_mkdir "$(dirname "$dst")" || fail "cannot create dir for $dst"
+    io_copy "$src" "$dst" || fail "copy failed: $dst"
     chmod 644 "$dst" 2>/dev/null || true
     chown 0:0 "$dst" 2>/dev/null || true
     if [ -n "$label" ]; then
@@ -699,9 +694,7 @@ fi
 log "daemon=$daemon_status"
 [ "$daemon_status" = systemd-ok ] || fail "daemon did not start through systemd: $daemon_status"
 
-if [ "$was_ro" = 1 ]; then
-    mount -o remount,ro / 2>/dev/null || true
-fi
+io_restore_root || fail "cannot restore root mount state"
 
 # ---- restart AppHomeScreen --------------------------------------------
 restart="not-attempted"
@@ -778,6 +771,6 @@ case "$restart" in *verified=0*) final_status=REBOOT_REQUIRED;; esac
 result "status=$final_status" "variant=$adv_variant/$wide_variant/$all_variant/$setup_variant/$custom_variant" \
        "backup=$BACKUP_HU" "daemon=$daemon_status" "oem_mask=$oem_mask" \
        "wifi_import=$wifi_import" "restart=$restart" "build_id=$BUILD_ID" \
-       "mdnsd_patch=$mdnsd_patch" "log=$LOG"
+       "mdnsd_patch=$mdnsd_patch" "asset_warnings=$ASSET_WARNINGS" "log=$LOG"
 log "=== wifi payload done ==="
 exit 0

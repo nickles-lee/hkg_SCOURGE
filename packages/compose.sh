@@ -18,6 +18,10 @@ HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 TARGET="${1:?usage: compose.sh /path/to/stick [pkg,pkg,...]}"
 SELECTION="${2:-}"
 
+# Battery builds into a private tree; clean it up no matter where a later
+# step aborts.  Re-installed below once the staging tree exists.
+trap '[ -z "${BATTERY_BUILD:-}" ] || rm -rf "$BATTERY_BUILD"' EXIT
+
 [ -d "$TARGET" ] || { echo "not a directory: $TARGET" >&2; exit 1; }
 [ "$TARGET" != "/" ] || { echo "refusing to deploy to /" >&2; exit 1; }
 
@@ -47,6 +51,12 @@ for pkg in $(echo "$SELECTION" | tr ',' ' '); do
     [ -n "$SELECTED" ] && SELECTED="$SELECTED "
     SELECTED="$SELECTED$pkg"
 done
+# Always preserve dependency order, regardless of the user's selection order.
+REQUESTED="$SELECTED"
+SELECTED=""
+for pkg in $AVAILABLE; do
+    case " $REQUESTED " in *" $pkg "*) SELECTED="${SELECTED:+$SELECTED }$pkg" ;; esac
+done
 
 # --- build each selected package -------------------------------------------------
 if [ "${SCOURGE_SKIP_BUILD:-0}" != "1" ]; then
@@ -54,7 +64,13 @@ if [ "${SCOURGE_SKIP_BUILD:-0}" != "1" ]; then
         case "$pkg" in
         battery|wifi|tweaks)
             echo "== building package: $pkg"
-            sh "$HERE/$pkg/scripts/build_payload.sh" || {
+            if [ "$pkg" = battery ]; then
+                mkdir -p "$HERE/battery/out"
+                BATTERY_BUILD=$(mktemp -d "$HERE/battery/out/compose.XXXXXX")
+                sh "$HERE/battery/scripts/build_payload.sh" "$BATTERY_BUILD"
+            else
+                sh "$HERE/$pkg/scripts/build_payload.sh"
+            fi || {
                 echo "package build failed: $pkg" >&2; exit 1; } ;;
         *)  : ;;   # WIP gate stages stage from tools/update-debug below
         esac
@@ -64,14 +80,16 @@ else
 fi
 
 # --- stage ----------------------------------------------------------------------
-STAGE=$(mktemp -d /tmp/scourge_compose.XXXXXX)
-trap 'rm -rf "$STAGE"' EXIT
+# Product path: never depend on a harness-specific temp directory.
+STAGE=$(mktemp -d "${TMPDIR:-/tmp}/scourge_compose.XXXXXX")
+trap 'rm -rf "$STAGE"; [ -z "${BATTERY_BUILD:-}" ] || rm -rf "$BATTERY_BUILD"' EXIT
 mkdir -p "$STAGE/combo"
 
 stage_pkg() {
     name="$1"
     src="$HERE/$name/out/usb"
     [ -d "$src" ] || src="$HERE/$name/out/battery_usb"
+    if [ "$name" = battery ] && [ -n "${BATTERY_BUILD:-}" ]; then src=$BATTERY_BUILD; fi
     dst="$STAGE/combo/$name"
     mkdir -p "$dst"
     cp -R "$src/payload" "$dst/"
@@ -80,6 +98,11 @@ stage_pkg() {
     cp -f "$src/manifest.md5" "$dst/"
     cp -f "$src/run_stuff.sh" "$dst/stage.sh"
     cp -f "$src/run_stuff_restore.sh" "$dst/restore.sh" 2>/dev/null || true
+    (cd "$dst" && md5sum -c manifest.md5 >/dev/null) || exit 1
+    if [ "$name" = tweaks ]; then
+        python3 "$HERE/common/check_layout.py" \
+            "$dst/payload/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.battery_tile_wifi.qml"
+    fi
 }
 
 stage_wip() {
@@ -120,7 +143,7 @@ ORDER_SPACES="$SELECTED"
 # Digest of every staged installer/manifest. The loader re-runs the master
 # script when its bytes change, so a same-selection rebuild with different
 # package payloads still triggers an install on the next plug-in.
-PAYLOAD_ID=$(find "$STAGE/combo" -type f \( -name manifest.md5 -o -name stage.sh -o -name restore.sh \) -print0 \
+PAYLOAD_ID=$(cd "$STAGE" && find combo -type f \( -name manifest.md5 -o -name stage.sh -o -name restore.sh \) -print0 \
     | sort -z | xargs -0 md5sum | md5sum | cut -c1-16)
 
 cat > "$STAGE/run_stuff.sh" <<EOF
@@ -143,7 +166,7 @@ PAYLOAD_ID="$PAYLOAD_ID"
 MODE="\${SCOURGE_MODE:-all}"
 
 set -u
-PATH=/bin:/sbin:/usr/bin:/usr/sbin
+PATH="\${COMBO_PATH:-/bin:/sbin:/usr/bin:/usr/sbin}"
 USB_DIR="\${USB_DIR:-\$(CDPATH= cd -- "\$(dirname "\$0")" && pwd)}"
 COMBO="\$USB_DIR/combo"
 RW_DIR="\${COMBO_RW_DIR:-/rw_data/combo}"
@@ -171,24 +194,97 @@ STAGES_LOG="\$RW_DIR/stages.log"
 : > "\$STAGES_LOG" 2>/dev/null
 FAILED=""
 
+# Audible installer status through the factory micom audio service.  The
+# installer copies its own dbus-send so the call runs in the same SMACK
+# context as the working micom client (the floor rule allows
+# "_ App::micommanager rwx---").  Beeps are strictly non-fatal.
+BEEP_DBUS="\$RW_DIR/bin/dbus-send"
+beep_init(){
+    [ -x "\$BEEP_DBUS" ] && return 0
+    _src=/usr/bin/dbus-send
+    [ -x "\$_src" ] || _src=/bin/dbus-send
+    [ -x "\$_src" ] || return 1
+    mkdir -p "\$RW_DIR/bin" 2>/dev/null || return 1
+    rm -f "\$BEEP_DBUS" 2>/dev/null || true
+    cp -f "\$_src" "\$BEEP_DBUS" 2>/dev/null || return 1
+    chmod 755 "\$BEEP_DBUS" 2>/dev/null || true
+    chown root:root "\$BEEP_DBUS" 2>/dev/null || true
+    _label=\$(cat /proc/self/attr/current 2>/dev/null | tr -d '\r\n')
+    [ -n "\$_label" ] && chsmack -e "\$_label" "\$BEEP_DBUS" 2>/dev/null || true
+    [ -x "\$BEEP_DBUS" ]
+}
+beep_once(){
+    _b=\$BEEP_DBUS
+    [ -x "\$_b" ] || _b=/usr/bin/dbus-send
+    [ -x "\$_b" ] || return 0
+    "\$_b" --system --print-reply --reply-timeout=1000 --dest=com.lge.car.micom \
+        /com/lge/car/micom com.lge.car.micom.audio.SetBeepPlay \
+        array:byte:0x00 >>"\$LOG" 2>&1 && return 0
+    # The system bus may still be coming up when the loader starts us.
+    sleep 0.3 2>/dev/null || sleep 1
+    "\$_b" --system --print-reply --reply-timeout=1000 --dest=com.lge.car.micom \
+        /com/lge/car/micom com.lge.car.micom.audio.SetBeepPlay \
+        array:byte:0x00 >>"\$LOG" 2>&1 || true
+}
+beep_n(){
+    _n=\$1
+    beep_init 2>/dev/null || true
+    _i=0
+    while [ "\$_i" -lt "\$_n" ]; do
+        beep_once
+        _i=\$((_i + 1))
+        if [ "\$_i" -lt "\$_n" ]; then
+            sleep 0.5 2>/dev/null || sleep 1
+        fi
+    done
+    return 0
+}
+
 run_stage(){
     name="\$1"; script="\$2"
+    stage_dir=\$(dirname "\$script")
+    stage_result="\$stage_dir/run_stuff_result.txt"
+    # Clear both copies: a stage that dies before writing its result must
+    # not leave the previous run's result looking current on the stick.
+    rm -f "\$stage_result" "\$USB_DIR/\${name}_result.txt"
     log "=== stage \$name ==="
     if [ ! -f "\$script" ]; then
         echo "stage_\$name=status=missing" >> "\$STAGES_LOG"
         FAILED="\$FAILED \$name"
+        beep_n 2
         return 1
     fi
     # Per-package installers honor USB_DIR; point them at their own subtree.
-    if USB_DIR="\$(dirname "\$script")" /bin/sh "\$script" >> "\$LOG" 2>&1; then
-        echo "stage_\$name=status=OK rc=0" >> "\$STAGES_LOG"
-        return 0
-    else
-        echo "stage_\$name=status=FAIL" >> "\$STAGES_LOG"
-        FAILED="\$FAILED \$name"
-        return 1
-    fi
+    # Forward explicit owner inputs into the WiFi subtree. Do not package
+    # credentials in source or leave stale copies after the stage finishes.
+    case "\$name" in wifi)
+        for input in wifi.txt authorized_keys MDNSD_ROOT_ARM; do
+            [ ! -f "\$USB_DIR/\$input" ] || cp -f "\$USB_DIR/\$input" "\$stage_dir/\$input"
+        done ;;
+    esac
+    USB_DIR="\$stage_dir" /bin/sh "\$script" >> "\$LOG" 2>&1
+    stage_rc=\$?
+    status=\$(sed -n 's/^status=\([^ ]*\).*/\1/p' "\$stage_result" 2>/dev/null | tail -n 1)
+    [ ! -f "\$stage_result" ] || cp -f "\$stage_result" "\$USB_DIR/\${name}_result.txt"
+    case "\$name" in wifi) rm -f "\$stage_dir/wifi.txt" "\$stage_dir/authorized_keys" "\$stage_dir/MDNSD_ROOT_ARM" ;; esac
+    # A stage that exits 0 with status=REBOOT_REQUIRED succeeded: the WiFi
+    # installer reports it when the UI restart could not be verified on the
+    # spot.  Only rc=0 plus an accepted status counts; rc=0 with a failure
+    # status is still a failure.
+    case "\$stage_rc:\$status" in
+        0:OK|0:REBOOT_REQUIRED)
+            echo "stage_\$name=status=\$status rc=0" >> "\$STAGES_LOG"
+            return 0
+            ;;
+    esac
+    echo "stage_\$name=status=\${status:-missing} rc=\$stage_rc" >> "\$STAGES_LOG"
+    FAILED="\$FAILED \$name"
+    beep_n 2
+    return 1
 }
+
+# One beep: installer started.
+beep_n 1
 
 case "\$MODE" in
   all)     for s in $ORDER_SPACES; do run_stage "\$s" "\$COMBO/\$s/stage.sh" || true; done ;;
@@ -207,14 +303,19 @@ EOF
 done
 
 cat >> "$STAGE/run_stuff.sh" <<'EOF'
-  *) echo "unknown MODE: $MODE" >> "$STAGES_LOG" ;;
+  *) echo "unknown MODE: $MODE" >> "$STAGES_LOG"; FAILED="invalid-mode" ;;
 esac
 
 if [ -n "$FAILED" ]; then
     result "FAIL"
+    beep_n 3
     exit 1
 fi
 result "OK"
+# Five beeps: all requested stages completed successfully.  A short pause
+# separates this from the last stage's two-beep signal.
+sleep 0.8 2>/dev/null || sleep 1
+beep_n 5
 exit 0
 EOF
 
@@ -247,6 +348,7 @@ EOF
 
 echo "== deploying to $TARGET"
 cp -R "$STAGE"/. "$TARGET"/
+[ -z "${BATTERY_BUILD:-}" ] || rm -rf "$BATTERY_BUILD"
 sync
 echo "DONE. Stick contents:"
 ls -la "$TARGET"

@@ -3,13 +3,14 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Content identity for first-party inputs; no timestamps, credentials or OEM data."""
 import hashlib
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def build_id():
-    paths = [ROOT / "src/Makefile"]
+    paths = [ROOT / "src/Makefile", ROOT.parent / "common/install_io.sh"]
     for directory, suffixes in [("src", {".c", ".h"}), ("scripts", {".py", ".sh"}),
                                 ("artifacts/systemd", {".service"})]:
         paths.extend(p for p in (ROOT / directory).rglob("*") if p.suffix in suffixes)
@@ -18,7 +19,7 @@ def build_id():
     paths.extend((qml / "component").glob("Wifi*.qml"))
     digest = hashlib.sha256()
     for path in sorted(set(paths)):
-        digest.update(str(path.relative_to(ROOT)).encode() + b"\0" + path.read_bytes() + b"\0")
+        digest.update(os.path.relpath(path, ROOT).encode() + b"\0" + path.read_bytes() + b"\0")
     return digest.hexdigest()
 
 

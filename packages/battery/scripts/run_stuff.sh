@@ -97,29 +97,12 @@ set_exec_label() {
     log "exec label readback: $_bin = ${_actual:-unverified}"
 }
 
-# Copy a QML file, retrying after unlinking the destination. A reinstall can
-# meet an old file that was created by a previous payload with a different
-# label/inode; the unlink makes the new copy inherit the directory label and
-# also avoids text-file-busy style failures if the UI has the old file open.
+# Copy a QML file with verified, retried bytes (see install_io.sh io_copy).
+# A reinstall can meet an old file created by a previous payload with a
+# different label; io_copy keeps the destination inode (and its SMACK
+# attributes) and never unlinks to force a retry.
 copy_qml_file() {
-    _src=$1
-    _dst=$2
-    _what=$3
-    if cp -f "$_src" "$_dst" 2>>"$LOG"; then
-        return 0
-    fi
-    log "WARNING: copy failed: $_what; retrying after removing destination"
-    if grep -q ' / .* ro[, ]' /proc/mounts; then
-        log "root is ro again; remounting rw before retry"
-        mount -o remount,rw / 2>>"$LOG" || true
-    fi
-    rm -f "$_dst" 2>>"$LOG" || true
-    if cp -f "$_src" "$_dst" 2>>"$LOG"; then
-        log "copy retry OK: $_what"
-        return 0
-    fi
-    log "ERROR: copy retry failed: $_what"
-    return 1
+    io_copy "$1" "$2"
 }
 
 mount -o remount,rw "$USB_DIR" 2>/dev/null || true
@@ -200,17 +183,17 @@ fi
 log "HU backup: $BACKUP_HU"
 
 # Remount the rootfs rw while installing.
-was_ro=0
-grep -q ' / .* ro[, ]' /proc/mounts && was_ro=1
-if [ "$was_ro" = 1 ]; then
-    mount -o remount,rw / 2>/dev/null || fail "cannot remount / rw"
-fi
+. "$PAYLOAD/lib/install_io.sh"
+io_init || fail "cannot identify root mount"
+trap 'io_restore_root || true' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+io_settle_root || fail "root filesystem is not stably writable"
 
 # Assets.
-mkdir -p "$ASSET_DIR" 2>/dev/null || fail "cannot create $ASSET_DIR"
 for f in "$PAYLOAD/assets/battery/"*; do
     [ -f "$f" ] || continue
-    cp -f "$f" "$ASSET_DIR/" || fail "asset copy failed: $f"
+    io_asset "$f" "$ASSET_DIR/$(basename "$f")"
 done
 chmod 644 "$ASSET_DIR/"* 2>/dev/null || true
 
@@ -245,7 +228,7 @@ chown root:root "$RW_DIR/smack_expected" 2>/dev/null || true
 rm -f "$RW_DIR/status.json" "$RW_DIR/daemon.log" 2>/dev/null || true
 
 # systemd unit.
-cp -f "$PAYLOAD/systemd/battery-daemon.service" "$SERVICE" || fail "service copy failed"
+io_copy "$PAYLOAD/systemd/battery-daemon.service" "$SERVICE" || fail "service copy failed"
 chmod 644 "$SERVICE" 2>/dev/null || true
 chown root:root "$SERVICE" 2>/dev/null || true
 
@@ -398,9 +381,7 @@ if [ -n "$daemon_smack" ]; then
 fi
 log "smack self=$SMACK_SELF daemon=${daemon_smack:-none} check=$smack_check"
 
-if [ "$was_ro" = 1 ]; then
-    mount -o remount,ro / 2>/dev/null || true
-fi
+io_restore_root || fail "cannot restore root mount state"
 
 # Restart AppHomeScreen through AppLauncher (app id 11).
 restart="not-attempted"
@@ -461,7 +442,7 @@ result "status=$final_status" "already_patched=$already" "variant=$variant" \
        "daemon_fresh=$daemon_fresh" \
        "daemon_smack=${daemon_smack:-none}" \
        "smack_check=$smack_check" \
-       "restart=$restart" "log=$LOG"
+       "restart=$restart" "asset_warnings=$ASSET_WARNINGS" "log=$LOG"
 log "=== battery payload done ==="
 [ "$final_status" = "OK" ] || exit 1
 exit 0

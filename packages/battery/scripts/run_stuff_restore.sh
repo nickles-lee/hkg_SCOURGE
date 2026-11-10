@@ -45,11 +45,13 @@ mount -o remount,rw "$USB_DIR" 2>/dev/null || true
 log "=== battery restore start ==="
 
 # Remount rw first: disabling the unit removes a symlink under /etc.
-was_ro=0
-grep -q ' / .* ro[, ]' /proc/mounts && was_ro=1
-if [ "$was_ro" = 1 ]; then
-    mount -o remount,rw / 2>/dev/null || fail "cannot remount / rw"
-fi
+(cd "$USB_DIR" && md5sum -c manifest.md5) > "$RW_DIR/restore-manifest.log" 2>&1 || fail "restore manifest check failed"
+. "$PAYLOAD/lib/install_io.sh"
+io_init || fail "cannot identify root mount"
+trap 'io_restore_root || true' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+io_settle_root || fail "root filesystem is not stably writable"
 
 # Stop and disable the daemon.
 if command -v systemctl >/dev/null 2>&1; then
@@ -67,13 +69,13 @@ command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >> "$LOG" 2>&1 |
 # Restore the Advanced QML from the pre-install backup, else the 260128 ref.
 restored=""
 if [ -f "$RW_DIR/backup/latest/$ADV" ]; then
-    cp -f "$RW_DIR/backup/latest/$ADV" "$QML_DIR/$ADV" || fail "restore failed"
+    io_copy "$RW_DIR/backup/latest/$ADV" "$QML_DIR/$ADV" || fail "restore failed"
     restored="backup-latest"
 elif [ -f "$USB_DIR/backup_current/AppHomeScreen/qml_eco3.0/$ADV" ]; then
-    cp -f "$USB_DIR/backup_current/AppHomeScreen/qml_eco3.0/$ADV" "$QML_DIR/$ADV" || fail "restore failed"
+    io_copy "$USB_DIR/backup_current/AppHomeScreen/qml_eco3.0/$ADV" "$QML_DIR/$ADV" || fail "restore failed"
     restored="usb-backup-current"
 elif [ -f "$USB_DIR/backup/AppHomeScreen/qml_eco3.0/$ADV" ]; then
-    cp -f "$USB_DIR/backup/AppHomeScreen/qml_eco3.0/$ADV" "$QML_DIR/$ADV" || fail "restore failed"
+    io_copy "$USB_DIR/backup/AppHomeScreen/qml_eco3.0/$ADV" "$QML_DIR/$ADV" || fail "restore failed"
     restored="usb-original"
 else
     fail "no QML backup found"
@@ -96,9 +98,7 @@ rm -rf /tmp/qmlcache 2>/dev/null || true
 rm -rf /tmp/qt-qml-cache 2>/dev/null || true
 
 sync
-if [ "$was_ro" = 1 ]; then
-    mount -o remount,ro / 2>/dev/null || true
-fi
+io_restore_root || fail "cannot restore root mount state"
 
 # Restart AppHomeScreen.
 restart="not-attempted"

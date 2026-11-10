@@ -35,9 +35,7 @@ fail() { log "FAIL: $*"; result "status=FAIL" "error=$*"; exit 1; }
 
 was_ro=0
 cleanup_ro() {
-    if [ "${was_ro:-0}" = 1 ]; then
-        mount -o remount,ro / 2>/dev/null || true
-    fi
+    if [ "${IO_ACTIVE:-0}" = 1 ]; then io_restore_root || true; fi
 }
 trap cleanup_ro EXIT
 trap 'exit 130' INT
@@ -54,10 +52,8 @@ fi
 LATEST="$RW_DIR/backup/latest"
 [ -d "$LATEST" ] || fail "no backup/latest; cannot restore"
 
-grep -q ' / .* ro[, ]' /proc/mounts && was_ro=1
-if [ "$was_ro" = 1 ]; then
-    mount -o remount,rw / 2>/dev/null || fail "cannot remount / rw"
-fi
+. "$PAYLOAD/lib/install_io.sh"
+io_init && io_settle_root || fail "root filesystem is not stably writable"
 
 # Stop the service before synchronous cleanup: two independent controllers
 # must never race to re-enable the radio while restore is removing files.
@@ -86,6 +82,12 @@ for family in iptables ip6tables; do
         for attempt in 1 2 3 4; do
             "$IPT" -D INPUT -i wlan0 -j "$chain" 2>/dev/null || break
         done
+        for attempt in 1 2 3 4; do
+            "$IPT" -D OUTPUT -o wlan0 -j "$chain" 2>/dev/null || break
+        done
+        for attempt in 1 2 3 4; do
+            "$IPT" -D OUTPUT -o wlan0 -j "$chain" 2>/dev/null || break
+        done
         "$IPT" -F "$chain" 2>/dev/null || true
         "$IPT" -X "$chain" 2>/dev/null || true
     done
@@ -96,7 +98,7 @@ for f in "$ADV" "$WIDE" "$ALL" "$SETUP" "$CUSTOM" "$THEME"; do
     if [ -f "$LATEST/$f" ]; then
         label=$(getfattr -n security.SMACK64 --only-values "$QML_DIR/$f" 2>/dev/null || true)
         mkdir -p "$QML_DIR/$(dirname "$f")" 2>/dev/null
-        cp -f "$LATEST/$f" "$QML_DIR/$f" || fail "restore failed: $f"
+        io_copy "$LATEST/$f" "$QML_DIR/$f" || fail "restore failed: $f"
         chmod 644 "$QML_DIR/$f" 2>/dev/null || true
         chown 0:0 "$QML_DIR/$f" 2>/dev/null || true
         if [ -n "$label" ]; then
@@ -171,10 +173,14 @@ restore_vbt rw /rw_data/app_data/vbt/VBTConfig.json
 # so the vendor unit behaves like stock again.
 MDNSD_BIN=/app/bin/mdnsd
 MDNSD_STOCK_MD5=f63a65c4c2b0c011ae8ed17557b45c1b
+MDNSD_PATCHED_MD5=f847373d7c5a6906453ba921bb790d22
 MDNSD_BAK="$RW_DIR/backup/mdnsd.stock"
 if [ -f "$MDNSD_BAK" ] && [ -f "$MDNSD_BIN" ]; then
     if [ "$("$MD5SUM_BIN" "$MDNSD_BIN" 2>/dev/null | cut -d' ' -f1)" != "$MDNSD_STOCK_MD5" ]; then
-        if cp -f "$MDNSD_BAK" "$MDNSD_BIN" 2>/dev/null; then
+        [ "$("$MD5SUM_BIN" "$MDNSD_BAK" | cut -d' ' -f1)" = "$MDNSD_STOCK_MD5" ] || fail "mdnsd stock backup hash mismatch"
+        [ "$("$MD5SUM_BIN" "$MDNSD_BIN" | cut -d' ' -f1)" = "$MDNSD_PATCHED_MD5" ] || fail "mdnsd changed independently; refusing restore"
+        systemctl stop carplay_mdnsd.service >> "$LOG" 2>&1 || fail "cannot stop mdnsd for restore"
+        if io_copy "$MDNSD_BAK" "$MDNSD_BIN"; then
             if [ "$("$MD5SUM_BIN" "$MDNSD_BIN" 2>/dev/null | cut -d' ' -f1)" = "$MDNSD_STOCK_MD5" ]; then
                 log "restored stock mdnsd from backup"
                 systemctl restart carplay_mdnsd.service >> "$LOG" 2>&1 || true
@@ -186,8 +192,8 @@ if [ -f "$MDNSD_BAK" ] && [ -f "$MDNSD_BIN" ]; then
         fi
     fi
 fi
-if [ -f /etc/systemd/system/carplay_mdnsd.service.d/override.conf ]; then
-    if rm -f /etc/systemd/system/carplay_mdnsd.service.d/override.conf 2>/dev/null; then
+if grep -q '^# SCOURGE_MDNSD_RESTART=1$' /etc/systemd/system/carplay_mdnsd.service.d/50-scourge-restart.conf 2>/dev/null; then
+    if io_remove /etc/systemd/system/carplay_mdnsd.service.d/50-scourge-restart.conf; then
         rmdir /etc/systemd/system/carplay_mdnsd.service.d 2>/dev/null || true
         systemctl daemon-reload >> "$LOG" 2>&1 || true
         log "removed carplay_mdnsd restart drop-in"
@@ -246,8 +252,8 @@ if [ -f "$LATEST/transaction/files" ]; then
         [ "$existed" = 1 ] || continue
         case "$destination" in
             "$RW_DIR/ssh/authorized_keys"|"$RW_DIR/home/.ssh/authorized_keys"|"$QML_ROOT/wifi/"*|"$QML_ROOT/hello/"*|"$QML_ROOT/battery/"*)
-                mkdir -p "$(dirname "$destination")" || fail "cannot restore original file directory"
-                cp -pP "$LATEST/transaction/$item" "$destination" || fail "cannot restore original owner file: $destination"
+                io_mkdir "$(dirname "$destination")" || fail "cannot restore original file directory"
+                io_restore_entry "$LATEST/transaction/$item" "$destination" || fail "cannot restore original owner file: $destination"
                 ;;
         esac
     done < "$LATEST/transaction/files"
@@ -300,9 +306,7 @@ if command -v dbus-send >/dev/null 2>&1; then
     fi
 fi
 
-if [ "$was_ro" = 1 ]; then
-    mount -o remount,ro / 2>/dev/null || true
-fi
+io_restore_root || fail "cannot restore root mount state"
 
 sleep 3
 new_home_pid=$(pidof AppHomeScreen 2>/dev/null || true)

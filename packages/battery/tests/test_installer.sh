@@ -13,6 +13,8 @@ QML="$FAKE/app/share/AppHomeScreen/qml_eco3.0"
 RW="$FAKE/rw_data/battery"
 SVC="$FAKE/etc/systemd/system/battery-daemon.service"
 mkdir -p "$QML/HomeScreen" "$QML/component" "$FAKE/etc/systemd/system"
+printf 'device %s ext4 rw 0 0\n' "$FAKE" > "$FAKE/mounts"
+export INSTALL_IO_ROOT="$FAKE" INSTALL_IO_MOUNTS="$FAKE/mounts"
 cp "$HERE/backup/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.qml" \
    "$QML/HomeScreen/"
 
@@ -101,7 +103,7 @@ fi
 echo "hello restore OK"
 
 echo "== wifi coexistence =="
-WIFI_QML="$HERE/../wifi_app/artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.hello_wifi.qml"
+WIFI_QML="$HERE/../wifi/artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.hello_wifi.qml"
 if [ ! -f "$WIFI_QML" ]; then
     echo "wifi fixture not present (wifi package QML artifacts not shipped); skipping"
 else

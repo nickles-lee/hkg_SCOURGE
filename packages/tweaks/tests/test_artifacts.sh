@@ -8,6 +8,10 @@ ROOT=$(dirname "$HERE")
 Q="$ROOT/artifacts/qml/AppHomeScreen/qml_eco3.0"
 ADV="$Q/HomeScreen"
 COMP="$Q/component"
+python3 "$ROOT/../common/check_layout.py" \
+    "$ROOT/out/usb/payload/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.battery_tile_wifi.qml"
+python3 "$ROOT/../common/test_layout.py" \
+    "$ROOT/out/usb/payload/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.battery_tile_wifi.qml"
 
 check_adv() {
     file="$1"

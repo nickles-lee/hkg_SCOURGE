@@ -31,6 +31,8 @@ mkdir -p "$OUT/payload/bin" "$OUT/payload/assets/wifi" "$OUT/payload/assets/hell
          "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/component/common" \
          "$OUT/backup/AppHomeScreen/qml_eco3.0/HomeScreen" \
          "$OUT/backup/AppHomeScreen/qml_eco3.0/component/common"
+mkdir -p "$OUT/payload/lib"
+cp "$ROOT/../common/install_io.sh" "$OUT/payload/lib/"
 
 cp src/wifi_daemon "$OUT/payload/bin/wifi_daemon"
 cp artifacts/assets/wifi/*.png "$OUT/payload/assets/wifi/"

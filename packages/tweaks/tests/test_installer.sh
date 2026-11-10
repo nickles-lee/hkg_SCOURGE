@@ -141,7 +141,9 @@ EOF
 cat > "$TMP/root/usr/bin/getfattr" <<'EOF'
 #!/bin/sh
 case "$*" in
-  *security.SMACK64EXEC*) [ "${BAD_LABEL:-0}" = 1 ] && exit 1; printf '_' ;;
+  *security.SMACK64EXEC*) if [ "${BAD_LABEL:-0}" = 1 ]; then printf 'Privileged';
+                          elif [ "${UNREADABLE_LABEL:-0}" = 1 ]; then exit 1;
+                          else printf '_'; fi ;;
   *security.SMACK64*)     [ "${BAD_QML_LABEL:-0}" = 1 ] && exit 1; printf '_' ;;
   *) exit 1 ;;
 esac
@@ -154,6 +156,8 @@ EOF
 chmod 755 "$TMP/root/usr/bin/chsmack" "$TMP/root/usr/bin/getfattr" \
           "$TMP/root/usr/bin/setfattr"
 TWEAKS_PATH="$TMP/root/usr/bin:/usr/bin:/bin"
+printf 'device %s ext4 rw 0 0\n' "$TMP/root" > "$TMP/mounts"
+export INSTALL_IO_ROOT="$TMP/root" INSTALL_IO_MOUNTS="$TMP/mounts"
 TWEAKS_SMACK_SELF=_
 TWEAKS_DAEMON_SMACK=_
 export TWEAKS_PATH TWEAKS_SMACK_SELF TWEAKS_DAEMON_SMACK
@@ -389,6 +393,27 @@ fi
 grep -q 'status=FAIL' "$TMP/usb/run_stuff_result.txt"
 grep -q 'exec label readback failed' "$TMP/usb/run_stuff_result.txt"
 echo "smack file gate OK"
+
+echo "== exec-label readback unavailable (onlycap on-car behavior) =="
+if UNREADABLE_LABEL=1 TWEAKS_QML_ROOT="$TMP/root/app/share/AppHomeScreen" \
+    TWEAKS_RW_DIR="$TMP/rw" \
+    TWEAKS_SERVICE="$TMP/etc/systemd/system/tweaks-daemon.service" \
+    TWEAKS_STANDBY_ROOT="$TMP/root/app/share/AppStandbyClock" \
+    TWEAKS_OFFLINE_STATUS="$TMP/root/update/offline_status" \
+    TWEAKS_WRANDR="$TMP/root/usr/bin/wrandr" \
+    TWEAKS_WRANDR_REAL="$TMP/root/usr/bin/wrandr.real" \
+    USB_DIR="$TMP/usb" \
+    sh "$TMP/install.sh"; then
+    grep -q 'status=OK' "$TMP/usb/run_stuff_result.txt"
+    grep -q 'smack=unverified' "$TMP/usb/run_stuff_result.txt"
+    grep -q 'persist_smack=unverified' "$TMP/usb/run_stuff_result.txt"
+    grep -q 'cannot read back SMACK64EXEC' "$TMP/rw/install.log"
+else
+    echo "installer failed with unreadable SMACK64EXEC readback" >&2
+    cat "$TMP/usb/run_stuff_result.txt" >&2
+    exit 1
+fi
+echo "unreadable readback gate OK"
 
 echo "== smack runtime gate (negative) =="
 if TWEAKS_DAEMON_SMACK=Privileged \

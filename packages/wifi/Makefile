@@ -17,7 +17,10 @@ payload: daemon
 	sh scripts/build_payload.sh
 
 test: payload
+	python3 ../common/test_install_io.py
+	python3 ../common/test_combo.py
 	python3 tests/test_release.py
+	python3 tests/test_mdnsd.py
 	python3 tests/test_tiles.py
 	sh tests/test_daemon.sh
 	sh tests/test_ports.sh

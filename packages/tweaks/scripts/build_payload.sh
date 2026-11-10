@@ -41,6 +41,8 @@ mkdir -p "$OUT/payload/bin" "$OUT/payload/assets/tweaks" "$OUT/payload/systemd" 
          "$OUT/payload/qml/AppStandbyClock" \
          "$OUT/backup/AppHomeScreen/qml_eco3.0/HomeScreen" \
          "$OUT/backup/AppHomeScreen/qml_eco3.0/component/common"
+mkdir -p "$OUT/payload/lib"
+cp "$ROOT/../common/install_io.sh" "$OUT/payload/lib/"
 
 cp src/tweaks_daemon "$OUT/payload/bin/tweaks_daemon"
 cp src/wrandr_wrapper "$OUT/payload/bin/wrandr"

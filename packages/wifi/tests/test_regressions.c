@@ -298,6 +298,18 @@ int main(int argc, char **argv)
                  "*AR Backup wifi_a_4261636b7570_managed_psk\n");
         net = find_service_any(out, service, sizeof(service), NULL, 0);
         assert(net == 1); /* only Backup visible */
+        station_status = "wpa_state=COMPLETED\nmode=station\nssid=Backup\n";
+        assert(client_associated() && client_station_net() == 1);
+        assert(find_connected_service("*AR Primary wifi_a_5072696d617279_managed_psk\n*AR Backup wifi_a_4261636b7570_managed_psk\n",
+                                      service, sizeof(service)));
+        assert(strstr(service, "4261636b7570"));
+        g_client_net = 1;
+        agent_state_t backup_agent = {.registered = true};
+        char reply[256];
+        assert(agent_reply(&backup_agent, "Passphrase?", service, reply, sizeof(reply)));
+        assert(!strcmp(reply, "backup-password\n"));
+        g_client_net = 0;
+        station_status = NULL;
         snprintf(out, sizeof(out),
                  "*AR Elsewhere wifi_a_456c73657768657265_managed_psk\n");
         net = find_service_any(out, service, sizeof(service), NULL, 0);

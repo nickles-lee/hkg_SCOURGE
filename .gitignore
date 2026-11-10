@@ -24,6 +24,7 @@ packages/tweaks/artifacts/qml/**/QHMI_HomeScreenMain_*.qml
 packages/tweaks/artifacts/qml/**/Screen_HomeScreen_*.qml
 packages/tweaks/artifacts/qml/**/QCustomizedMenuListAllowEmpty.*.qml
 packages/tweaks/artifacts/qml/**/common/
+packages/tweaks/artifacts/qml/AppStandbyClock/
 packages/wifi/bin/
 
 # --- VM-lab run outputs (serial logs, screenshots, result.json; -------------

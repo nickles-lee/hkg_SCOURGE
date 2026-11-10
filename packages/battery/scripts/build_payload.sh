@@ -29,6 +29,8 @@ fi
 
 mkdir -p "$OUT/payload/qml" "$OUT/payload/assets" "$OUT/payload/bin" \
          "$OUT/payload/systemd" "$OUT/backup" "$OUT/backup_current" "$OUT/docs"
+mkdir -p "$OUT/payload/lib"
+cp "$HERE/../common/install_io.sh" "$OUT/payload/lib/"
 
 cp -a "$HERE/artifacts/qml/AppHomeScreen" "$OUT/payload/qml/"
 cp -a "$HERE/artifacts/assets/battery" "$OUT/payload/assets/"
