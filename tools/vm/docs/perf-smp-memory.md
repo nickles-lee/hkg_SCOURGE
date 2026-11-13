@@ -72,11 +72,16 @@ comparable; compare rows within a table, not across tables.
 ```sh
 python3 -B bench.py --scenario boot --repeats 3 --cache writeback
 python3 -B bench.py --scenario boot --repeats 3 --pin-cpu 0
+python3 -B bench.py --scenario boot --repeats 3 --matrix --matrix-cpu 0
 ```
 
 It serializes on the global boot lock, writes
 `runs/bench-<id>/bench.json` (`mean`, `median`, `min`, `max`), retains each
-child log, and exits nonzero if any run fails.
+child log, and exits nonzero if any run fails. `--matrix` compares cache
+modes and optional pinned CPUs; its `summary` keys are grouped by scenario,
+cache and pin. A four-cell matrix smoke (one run each) passed at
+5.223/5.404/5.465/5.376 s; that is a smoke result, not a performance
+conclusion — use `--repeats` for decisions.
 
 ## Decision
 

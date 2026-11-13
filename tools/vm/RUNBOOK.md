@@ -187,11 +187,15 @@ For repeatable numbers, use the benchmark driver:
 ```sh
 python3 -B bench.py --scenario boot --repeats 3 [--cache writeback] \
   [--pin-cpu N] [--smp N] [--memory MiB]
+python3 -B bench.py --scenario boot --repeats 3 --matrix --matrix-cpu 0
 ```
 
 It holds the global boot lock, runs children with `--no-lock`, writes
 `runs/bench-<id>/bench.json` with mean/median/min/max and keeps each child
-log, and exits nonzero if any run does not PASS.
+log, and exits nonzero if any run does not PASS. `--matrix` compares
+`writeback`/`writethrough` by default; `--matrix-cache` and `--matrix-cpu`
+select other combinations, and the unpinned baseline is always included.
+Matrix rows and summary keys are grouped by scenario, cache and pin.
 
 ## CAN/micom smoke
 

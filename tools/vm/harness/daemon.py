@@ -164,7 +164,11 @@ def start(config: dict, launch_path: Path, timeout: float = 180.0) -> dict:
                 status["daemon_pid"] = process.pid
                 return status
             if status.get("state") == "error":
-                raise RuntimeError(status.get("error") or "daemon failed to start")
+                message = status.get("error") or "daemon failed to start"
+                tail = status.get("serial_tail")
+                if tail:
+                    message += "\nserial tail:\n" + tail[-2000:]
+                raise RuntimeError(message)
             if process.poll() is not None:
                 raise RuntimeError(
                     f"daemon exited rc={process.returncode}: "
@@ -406,6 +410,8 @@ def _serve(config: dict) -> int:
                 proc.wait(10)
             except Exception:  # noqa: BLE001
                 pass
+            if status.get("qemu_returncode") is None:
+                status["qemu_returncode"] = proc.returncode
         if ser is not None:
             try:
                 ser.close()

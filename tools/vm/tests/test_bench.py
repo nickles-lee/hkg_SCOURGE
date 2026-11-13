@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from bench import build_argv, result_path, summarize
+from bench import build_argv, result_path, summarize, variants
 from harness.config import load_scenario
 
 VM = Path(__file__).resolve().parents[1]
@@ -21,7 +21,8 @@ def args(**overrides):
         'profile': 'conformance', 'timeout': 120, 'storage': 'flat',
         'storage_size': [], 'cache': None, 'smp': None, 'memory': None,
         'pin_cpu': None, 'apic': False, 'usb': None, 'tools': None,
-        'payload': None, 'share': None,
+        'payload': None, 'share': None, 'matrix': False,
+        'matrix_cache': [], 'matrix_cpu': [],
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -49,6 +50,24 @@ class BenchTests(unittest.TestCase):
         self.assertIn('--storage-size update=32', joined)
         self.assertIn('--payload', argv)
 
+    def test_variants_single_and_matrix(self) -> None:
+        self.assertEqual(variants(args()), [(None, None)])
+        self.assertEqual(variants(args(matrix=True)),
+                         [('writeback', None), ('writethrough', None)])
+        self.assertEqual(
+            variants(args(matrix=True, matrix_cache=['directsync'],
+                          matrix_cpu=[0, 1])),
+            [('directsync', None), ('directsync', 0), ('directsync', 1)])
+        self.assertEqual(variants(args(cache='unsafe', pin_cpu=2)),
+                         [('unsafe', 2)])
+
+    def test_build_argv_cache_pin_override(self) -> None:
+        scenario = load_scenario('boot')
+        argv = build_argv(args(), scenario, cache='writethrough', pin_cpu=3)
+        joined = ' '.join(argv)
+        self.assertIn('--cache writethrough', joined)
+        self.assertIn('--pin-cpu 3', joined)
+
     def test_missing_required_input_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, 'requires --payload'):
             build_argv(args(), load_scenario('can-smoke'))
@@ -66,6 +85,7 @@ class BenchTests(unittest.TestCase):
             [sys.executable, '-B', str(VM / 'bench.py'), '--help'],
             capture_output=True, text=True, check=True)
         self.assertIn('--repeats', completed.stdout)
+        self.assertIn('--matrix', completed.stdout)
 
 
 if __name__ == '__main__':

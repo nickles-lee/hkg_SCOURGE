@@ -595,5 +595,9 @@ items beyond that.
   under the global lock, keeps per-run logs and writes
   `runs/bench-<id>/bench.json` with mean/median/min/max; nonzero exit if any
   run fails. Two-run `boot` smoke PASS (6.748/6.775 s). 253 tests.
+- **2026-11-14 — daemon failure e2e + bench matrix**: a fake-QEMU
+  `daemon start` records `serial_tail`/`qemu_returncode` and surfaces the
+  tail; `bench.py --matrix` compares cache modes and optional pinned CPUs
+  with an unpinned baseline. Four-cell smoke PASS. 256 tests.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

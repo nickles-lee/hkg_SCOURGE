@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -14,6 +16,8 @@ from io import StringIO
 from pathlib import Path
 
 from harness import daemon
+
+VM = Path(__file__).resolve().parents[1]
 
 
 class DaemonTests(unittest.TestCase):
@@ -37,6 +41,40 @@ class DaemonTests(unittest.TestCase):
             log = bytearray(b"0123456789")
         self.assertEqual(daemon._serial_tail(FakeSerial(), limit=4), "6789")
         self.assertEqual(daemon._serial_tail(None), "")
+
+    @unittest.skipUnless(
+        (VM / "rootfs.img").is_file()
+        and (VM / "compat" / "initramfs-linux.img").is_file(),
+        "VM/compat inputs unavailable (public mirror)")
+    def test_boot_failure_records_serial_tail_and_qemu_rc(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="vm-daemon-fail-") as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            fake = bin_dir / "qemu-system-x86_64"
+            fake.write_text(
+                "#!/bin/sh\n"
+                "printf 'FAKE_QEMU_BOOT\\n'\n"
+                "sleep 0.2\n"
+                "exit 1\n")
+            fake.chmod(0o755)
+            daemon_dir = root / "daemon"
+            env = {**os.environ,
+                   "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", "")}
+            completed = subprocess.run(
+                [sys.executable, "-B", str(VM / "launch.py"), "daemon", "start",
+                 "--kernel", "compat", "--daemon-dir", str(daemon_dir),
+                 "--ready-timeout", "3", "--lock-timeout", "10"],
+                cwd=VM, env=env, capture_output=True, text=True, timeout=60)
+            combined = completed.stdout + completed.stderr
+            if "another VM boot holds" in combined or "lock timeout" in combined:
+                self.skipTest("VM lab is busy with another run")
+            self.assertNotEqual(completed.returncode, 0)
+            status = json.loads((daemon_dir / "status.json").read_text())
+            self.assertEqual(status["state"], "error")
+            self.assertIn("FAKE_QEMU_BOOT", status["serial_tail"])
+            self.assertEqual(status["qemu_returncode"], 1)
+            self.assertIn("FAKE_QEMU_BOOT", combined)
 
     def test_status_round_trip_and_pid(self) -> None:
         daemon.write_status(self.root, {"state": "ready", "daemon_pid": os.getpid()})
