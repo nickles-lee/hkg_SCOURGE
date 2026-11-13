@@ -587,5 +587,9 @@ items beyond that.
   panic. Fake-stub tests cover the handshake and failure modes. Real boot,
   vendor-systemd-dbus and daemon start/stop PASS. Known-issue probes now
   resolve in both the VM and public layouts. 247 tests.
+- **2026-11-14 — daemon boot diagnostics**: a failed `daemon start` now keeps
+  `serial_tail` and `qemu_returncode` in status, and the CLI error includes
+  the serial tail. `daemon._serial_tail` is bounded and unit-tested. 248
+  tests.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

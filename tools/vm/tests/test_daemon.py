@@ -32,6 +32,12 @@ class DaemonTests(unittest.TestCase):
         with daemon._start_lock(self.root, timeout=1):
             pass  # released and reacquirable
 
+    def test_serial_tail_is_bounded_and_decoded(self) -> None:
+        class FakeSerial:
+            log = bytearray(b"0123456789")
+        self.assertEqual(daemon._serial_tail(FakeSerial(), limit=4), "6789")
+        self.assertEqual(daemon._serial_tail(None), "")
+
     def test_status_round_trip_and_pid(self) -> None:
         daemon.write_status(self.root, {"state": "ready", "daemon_pid": os.getpid()})
         self.assertEqual(daemon.read_status(self.root)["state"], "ready")

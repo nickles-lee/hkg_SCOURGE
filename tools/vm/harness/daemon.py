@@ -131,6 +131,12 @@ def _tail(path: Path, lines: int = 40) -> str:
     return "\n".join(text.splitlines()[-lines:]) + "\n"
 
 
+def _serial_tail(ser, limit: int = 4000) -> str:
+    if ser is None:
+        return ""
+    return bytes(ser.log[-limit:]).decode(errors="replace")
+
+
 def start(config: dict, launch_path: Path, timeout: float = 180.0) -> dict:
     daemon_dir = Path(config["daemon_dir"])
     with _start_lock(daemon_dir, timeout=timeout):
@@ -380,7 +386,9 @@ def _serve(config: dict) -> int:
     except LockTimeout as exc:
         status.update({"state": "error", "error": f"lock timeout: {exc}"})
     except Exception as exc:  # noqa: BLE001
-        status.update({"state": "error", "error": f"{type(exc).__name__}: {exc}"})
+        status.update({"state": "error", "error": f"{type(exc).__name__}: {exc}",
+                       "serial_tail": _serial_tail(ser),
+                       "qemu_returncode": proc.poll() if proc is not None else None})
         if proc is not None and proc.poll() is None:
             proc.kill()
     finally:
