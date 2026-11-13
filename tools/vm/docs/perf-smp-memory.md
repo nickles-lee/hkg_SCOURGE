@@ -65,6 +65,19 @@ against the process affinity mask.
 The cold-cache tables above and this warm-cache table are not directly
 comparable; compare rows within a table, not across tables.
 
+## Automated benchmark
+
+`bench.py` regenerates these timings without hand-parsing result files:
+
+```sh
+python3 -B bench.py --scenario boot --repeats 3 --cache writeback
+python3 -B bench.py --scenario boot --repeats 3 --pin-cpu 0
+```
+
+It serializes on the global boot lock, writes
+`runs/bench-<id>/bench.json` (`mean`, `median`, `min`, `max`), retains each
+child log, and exits nonzero if any run fails.
+
 ## Decision
 
 Keep `-smp 1`, `-m 4096`, `noapic` and `cache=writeback` as safe defaults.

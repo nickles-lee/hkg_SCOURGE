@@ -182,6 +182,17 @@ it is not a default because the measured ~1.5% gain at n=3 is too small to
 justify one. Avoid CPU 0 for isolation experiments and expect `--smp >1` to
 slow down when all vCPUs share one host CPU.
 
+For repeatable numbers, use the benchmark driver:
+
+```sh
+python3 -B bench.py --scenario boot --repeats 3 [--cache writeback] \
+  [--pin-cpu N] [--smp N] [--memory MiB]
+```
+
+It holds the global boot lock, runs children with `--no-lock`, writes
+`runs/bench-<id>/bench.json` with mean/median/min/max and keeps each child
+log, and exits nonzero if any run does not PASS.
+
 ## CAN/micom smoke
 
 ```sh
