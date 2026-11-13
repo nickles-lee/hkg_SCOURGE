@@ -82,8 +82,13 @@ VM-validated (compat kernel):
   prune/gc)
 - persistent VM daemon (`daemon start/exec/screenshot/console/status/stop`)
   with state surviving restarts
-- a whole-suite lock for parallel regression runs and explicit qcow2 cache
-  modes (writeback default; persistent state forces writethrough)
+- a shared boot lock for direct runs, the daemon, regression suites and
+  benchmarks, plus explicit qcow2 cache modes (writeback default; persistent
+  state forces writethrough)
+- repeatable boot benchmarks (`bench.py`) with mean/median/min/max and
+  per-run logs under `runs/bench-*`
+- gdbstub handshake validation with connect retries and fast-fail on a boot
+  kernel panic
 - opt-in USB passthrough plumbing (`--usb-host VENDOR:PRODUCT`); the host
   USB node must grant QEMU access, so hardware verification is host-gated
 
