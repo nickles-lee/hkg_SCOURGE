@@ -158,7 +158,11 @@ class RSP:
         self.buf = self.buf[i + 3:]
         if int(csum, 16) != sum(payload) & 0xFF:
             raise RuntimeError("RSP checksum mismatch")
-        self.sock.sendall(b"+")
+        try:
+            self.sock.sendall(b"+")
+        except OSError:
+            # A stub may close immediately after its final packet (D/detach).
+            pass
         return payload
 
     def cmd(self, payload: str, stop: bool = False) -> bytes:
@@ -167,6 +171,37 @@ class RSP:
         if stop and not (data.startswith(b"T") or data.startswith(b"S")):
             raise RuntimeError(f"expected stop packet, got {data!r}")
         return data
+
+
+def _rsp_expect_ok(response: bytes, operation: str) -> None:
+    if response != b"OK":
+        raise RuntimeError(f"gdbstub {operation} failed: {response!r}")
+
+
+def _rsp_connect(sock_path: Path, proc: subprocess.Popen,
+                 deadline: float) -> tuple[socket.socket, int]:
+    """Connect once the stub is actually servicing the socket.
+
+    QEMU creates the socket before the stub is ready, so a single connect can
+    race with startup. Retry transient connect errors until the deadline.
+    """
+    attempts = 0
+    while True:
+        attempts += 1
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(max(0.05, deadline - time.monotonic()))
+        try:
+            sock.connect(str(sock_path))
+            return sock, attempts
+        except OSError as exc:
+            sock.close()
+            if proc.poll() is not None:
+                raise RuntimeError(
+                    f"QEMU exited before gdb connect (rc={proc.returncode})") from exc
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"QEMU gdbstub connect failed after {attempts} attempts: {exc}") from exc
+            time.sleep(0.1)
 
 
 def patch_sdhci(run_dir: Path, proc: subprocess.Popen, timeout: float = 30) -> dict:
@@ -178,35 +213,38 @@ def patch_sdhci(run_dir: Path, proc: subprocess.Popen, timeout: float = 30) -> d
         if time.monotonic() > deadline:
             raise TimeoutError("QEMU gdb socket did not appear")
         time.sleep(0.05)
-    # The socket is created before QEMU's gdbstub is necessarily servicing it.
     print(f"[vm] gdb socket present: {sock_path}", flush=True)
-    time.sleep(min(0.75, max(0, deadline - time.monotonic())))
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(max(0.001, deadline - time.monotonic()))
-    print("[vm] connecting to gdbstub", flush=True)
-    sock.connect(str(sock_path))
-    print("[vm] gdb connected; querying status", flush=True)
+    sock, attempts = _rsp_connect(sock_path, proc, deadline)
+    print(f"[vm] gdb connected after {attempts} attempt(s); querying status", flush=True)
     rsp = RSP(sock, deadline)
     try:
-        rsp.cmd("?")
+        status = rsp.cmd("?")
+        if not (status.startswith(b"T") or status.startswith(b"S")):
+            raise RuntimeError(f"unexpected gdbstub status packet: {status!r}")
         print("[vm] status ok; setting driver-init breakpoint", flush=True)
-        rsp.cmd(f"Z1,{DRIVER_INIT:x},1")
+        _rsp_expect_ok(rsp.cmd(f"Z1,{DRIVER_INIT:x},1"), "breakpoint insert")
         print("[vm] breakpoint set; continuing", flush=True)
         stop = rsp.cmd("c", stop=True)
+        signal = stop[:3]
+        if signal not in (b"T05", b"S05"):
+            raise RuntimeError(
+                "expected a breakpoint trap (T05/S05), "
+                f"got {stop.decode(errors='replace')!r}")
         print(f"[vm] stopped at driver init ({stop.decode(errors='replace')})", flush=True)
         actual = bytes.fromhex(rsp.cmd(f"m{TABLE_ENTRY:x},20").decode())
         if actual != EXPECTED:
             raise RuntimeError(
                 "SDHCI table bytes differ; refusing guest-memory write\n"
                 f"expected {EXPECTED.hex()}\nactual   {actual.hex()}")
-        rsp.cmd(f"M{TABLE_ENTRY:x},20:{COMPAT.hex()}")
+        _rsp_expect_ok(rsp.cmd(f"M{TABLE_ENTRY:x},20:{COMPAT.hex()}"), "memory write")
         check = bytes.fromhex(rsp.cmd(f"m{TABLE_ENTRY:x},20").decode())
         if check != COMPAT:
             raise RuntimeError("guest-memory readback mismatch")
-        rsp.cmd(f"z1,{DRIVER_INIT:x},1")
-        rsp.cmd("D")
+        _rsp_expect_ok(rsp.cmd(f"z1,{DRIVER_INIT:x},1"), "breakpoint remove")
+        _rsp_expect_ok(rsp.cmd("D"), "detach")
         return {"driver_init": hex(DRIVER_INIT), "table_entry": hex(TABLE_ENTRY),
-                "stop": stop.decode(errors="replace"),
+                "stop": stop.decode(errors="replace"), "stop_signal": signal.decode(),
+                "connect_attempts": attempts,
                 "original": EXPECTED.hex(), "replacement": COMPAT.hex()}
     finally:
         sock.close()
@@ -309,7 +347,9 @@ def build_payload_image(src: Path, out: Path) -> Path:
     if not src.is_dir():
         raise SystemExit(f"payload is not a directory: {src}")
     total = sum(p.stat().st_size for p in src.rglob("*") if p.is_file())
-    size_mb = max(8, (total + 4 * 1024 * 1024 + 1024 * 1024 - 1) // (1024 * 1024))
+    # ext4 journal + 4 KiB block granularity + directory overhead need real
+    # headroom on top of the raw byte total.
+    size_mb = max(8, (total + 12 * 1024 * 1024 + 1024 * 1024 - 1) // (1024 * 1024))
     validate_output(out, (ROOTFS, KERNEL, TOOLS, UPDATE))
     subprocess.run(["truncate", "-s", f"{size_mb}M", str(out)], check=True)
     subprocess.run([
@@ -520,10 +560,16 @@ class Serial:
             self.fh.close()
             self.fh = None
 
-    def read_until(self, needle: bytes, timeout: float) -> bytes:
+    def read_until(self, needle: bytes, timeout: float,
+                   fatal: bool = False) -> bytes:
         deadline = time.monotonic() + timeout
         with self.cond:
             while needle not in self.log:
+                if fatal and b"Kernel panic" in self.log:
+                    raise RuntimeError(
+                        "guest kernel panic while waiting for "
+                        f"{needle.decode(errors='replace')!r}; tail:\n"
+                        + self.log[-2000:].decode(errors="replace"))
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError(
@@ -870,7 +916,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
             marker = str(scenario.get('boot_marker', 'Reached target Multi-User System'))
             text = ''
             try:
-                ser.read_until(marker.encode(), remaining())
+                ser.read_until(marker.encode(), remaining(), fatal=True)
                 # Brief settle so unit failures around the target are captured.
                 time.sleep(float(scenario.get('settle_seconds', 2)))
                 text = bytes(ser.log).decode(errors='replace')
@@ -917,7 +963,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
                         proc.stdin.flush()
             result.update(rc=proc.returncode, verdict='PASS' if proc.returncode == 0 else 'FAIL')
             return result['rc']
-        ser.read_until(b'IONIQ_VM_READY', remaining())
+        ser.read_until(b'IONIQ_VM_READY', remaining(), fatal=True)
         result['boot_seconds'] = round(time.monotonic() - boot_start, 3)
         wait_shell(ser, remaining())
         result['readiness_seconds'] = round(time.monotonic() - boot_start, 3)
@@ -970,7 +1016,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
                 ser.send(f'echo P28_SHELL pid=$$ ppid=$PPID; exec {raw_exec}\n')
                 try:
                     if final_marker:
-                        ser.read_until(final_marker.encode(), remaining())
+                        ser.read_until(final_marker.encode(), remaining(), fatal=True)
                     # Settle so post-target unit failures are recorded too.
                     time.sleep(settle_seconds)
                 except (TimeoutError, EOFError):

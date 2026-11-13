@@ -581,5 +581,10 @@ items beyond that.
   - **P2-6 hardware validation**: no WiFi/BT/CAN dongle is attached and the
     host `/dev/bus/usb` nodes are root-only; plumbing is complete but the
     hardware validation is blocked.
+- **2026-11-14 — P3-2 opportunistic (gdbstub/panic)**: `patch_sdhci` retries
+  transient connects, validates all replies and the breakpoint trap, and
+  records connect/stop evidence; boot readiness fails fast on a guest kernel
+  panic. Fake-stub tests cover the handshake and failure modes. Real boot,
+  vendor-systemd-dbus and daemon start/stop PASS. 246 tests.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
-  P3 is deferred per the plan (P3-1/P3-2 retry-later).
+  P3-1 is still deferred; P3-2's practical hardening is now landed.

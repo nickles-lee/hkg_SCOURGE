@@ -287,7 +287,8 @@ def _serve(config: dict) -> int:
         if kernel_target == "vendor":
             launch.patch_sdhci(daemon_dir, proc, 30)
         started = time.monotonic()
-        ser.read_until(b"IONIQ_VM_READY", float(config.get("ready_timeout", 180)))
+        ser.read_until(b"IONIQ_VM_READY", float(config.get("ready_timeout", 180)),
+                       fatal=True)
         launch.wait_shell(ser, float(config.get("ready_timeout", 180)))
         status.update({"state": "ready", "boot_seconds": round(time.monotonic() - started, 2),
                        "qemu_pid": proc.pid, "qmp": str(qmp_socket),
