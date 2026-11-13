@@ -585,6 +585,7 @@ items beyond that.
   transient connects, validates all replies and the breakpoint trap, and
   records connect/stop evidence; boot readiness fails fast on a guest kernel
   panic. Fake-stub tests cover the handshake and failure modes. Real boot,
-  vendor-systemd-dbus and daemon start/stop PASS. 246 tests.
+  vendor-systemd-dbus and daemon start/stop PASS. Known-issue probes now
+  resolve in both the VM and public layouts. 247 tests.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

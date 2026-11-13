@@ -329,11 +329,13 @@ class LauncherTests(TemporaryTest):
             if not probe:
                 continue
             if probe == 'RUNBOOK.md':
-                target = VM / 'docs' / 'RUNBOOK.md'
-            elif probe.startswith('probes/') and probe.endswith('.md'):
+                candidates = [VM / 'docs' / 'RUNBOOK.md', VM / 'RUNBOOK.md']
+                self.assertTrue(any(path.is_file() for path in candidates),
+                                f'{name}: RUNBOOK.md missing in both layouts')
+                continue
+            if probe.startswith('probes/') and probe.endswith('.md'):
                 self.fail(f'{name}: probe note {probe} is excluded by the public sync')
-            else:
-                target = VM / probe
+            target = VM / probe
             self.assertTrue(target.is_file(), f'{name}: missing probe {probe}')
 
     def test_boot_panic_fails_fast(self):
