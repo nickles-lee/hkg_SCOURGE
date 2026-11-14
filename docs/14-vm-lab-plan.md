@@ -693,5 +693,8 @@ items beyond that.
 - **2026-11-14 — daemon screenshot path boundary**: outside-directory
   screenshot request rejected, no file, daemon remains healthy. Real run
   PASS (6.7 s). 302 tests (33 skipped); 103 VM commits.
+- **2026-11-14 — compat benchmark integration**: real `--kernel compat` run,
+  schema/PASS/metrics assertions. Real run PASS (4.1 s). 303 tests (34
+  skipped); 104 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
