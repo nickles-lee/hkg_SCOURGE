@@ -715,5 +715,8 @@ items beyond that.
 - **2026-11-14 — daemon corrupt-status recovery**: bad status.json does not
   crash; exec/stop/restart recover. Real run PASS (13.4 s). 309 tests
   (40 skipped); 110 VM commits.
+- **2026-11-14 — one-shot state persistence/reset**: marker survives two
+  runs and disappears after `--reset`. Real run PASS (18.8 s). 310 tests
+  (41 skipped); 111 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

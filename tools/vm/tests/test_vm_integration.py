@@ -40,6 +40,40 @@ class VMIntegrationTests(unittest.TestCase):
         if result.get('qemu_pid'):
             self.assertFalse(Path(f"/proc/{result['qemu_pid']}").exists())
 
+    def test_run_state_persistence_and_reset(self):
+        with tempfile.TemporaryDirectory(prefix='vm-run-state-') as tmp:
+            state = Path(tmp) / 'state'
+
+            def run(*args):
+                completed = subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'run',
+                     '--state', str(state), '--lock-timeout', '100', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=180)
+                combined = completed.stdout + completed.stderr
+                if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                    self.skipTest('VM lab is busy with another run')
+                self.assertEqual(completed.returncode, 0, combined)
+                directory = next(Path(line[5:].strip())
+                                 for line in completed.stdout.splitlines()
+                                 if line.startswith('run: '))
+                return json.loads((directory / 'result.json').read_text())
+
+            written = run('--cmd',
+                          "mkdir -p /rw_data && printf 'run-state-marker\\n' "
+                          "> /rw_data/run-state-marker && sync", '--timeout', '60')
+            self.assertEqual(written['verdict'], 'PASS')
+            read_back = run('--cmd', 'cat /rw_data/run-state-marker',
+                            '--timeout', '60')
+            self.assertEqual(read_back['verdict'], 'PASS')
+            self.assertIn('run-state-marker',
+                          (Path(read_back['run_dir']) / 'guest-output.log').read_text())
+            reset = run('--reset', '--cmd',
+                        'if [ -e /rw_data/run-state-marker ]; then echo STILL_THERE; '
+                        'else echo RESET_CLEAN; fi', '--timeout', '60')
+            self.assertEqual(reset['verdict'], 'PASS')
+            self.assertIn('RESET_CLEAN',
+                          (Path(reset['run_dir']) / 'guest-output.log').read_text())
+
     def test_failure_bundle_real_fail(self):
         process, result = self.run_guest(
             '--cmd', 'echo BUNDLE_MARKER; exit 7', '--timeout', '60')
