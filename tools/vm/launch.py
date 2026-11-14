@@ -1791,9 +1791,12 @@ def main() -> int:
                                  'timeout': args.timeout},
                     timeout=args.timeout + 30)
             except (OSError, RuntimeError, TimeoutError) as exc:
-                ap.error(str(exc))
+                print(f'ERROR: {exc}', file=sys.stderr)
+                return 1
             if not response.get('ok'):
-                ap.error(response.get('error', 'daemon exec failed'))
+                print(f"ERROR: {response.get('error', 'daemon exec failed')}",
+                      file=sys.stderr)
+                return 1
             print(response.get('output', ''))
             return int(response.get('rc', 1))
         if args.daemon_action == 'screenshot':
@@ -1804,9 +1807,12 @@ def main() -> int:
                     daemon_dir, {'action': 'screenshot', 'output': str(capture)},
                     timeout=30)
             except (OSError, RuntimeError, TimeoutError) as exc:
-                ap.error(str(exc))
+                print(f'ERROR: {exc}', file=sys.stderr)
+                return 1
             if not response.get('ok'):
-                ap.error(response.get('error', 'daemon screenshot failed'))
+                print(f"ERROR: {response.get('error', 'daemon screenshot failed')}",
+                      file=sys.stderr)
+                return 1
             if requested is not None:
                 try:
                     shutil.copy2(capture, requested)

@@ -1273,6 +1273,7 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertNotEqual(timed_out.returncode, 0,
                                     timed_out.stdout + timed_out.stderr)
                 self.assertIn('timed out', (timed_out.stderr + timed_out.stdout).lower())
+                self.assertNotIn('usage:', timed_out.stderr)
 
                 recovered = cli('exec', '--daemon-dir', str(daemon_dir),
                                 '--cmd', 'echo TIMEOUT_RECOVERED', '--timeout', '15')

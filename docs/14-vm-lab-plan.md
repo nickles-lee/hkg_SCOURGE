@@ -787,5 +787,8 @@ items beyond that.
   133 VM commits.
 - **2026-11-14 — can-smoke fail-closed**: unknown CAN method must return
   `UnknownMethod`; real run PASS on five checks; 332 tests; 134 VM commits.
+- **2026-11-14 — clean daemon CLI errors**: exec/screenshot failures print
+  `ERROR:` and exit 1 (no usage dump); gated failure paths re-verified. 332
+  tests; 135 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
