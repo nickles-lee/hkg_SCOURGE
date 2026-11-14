@@ -664,6 +664,21 @@ class VMIntegrationTests(unittest.TestCase):
             self.assertIn('backing mismatch', result.get('error') or '')
             self.assertNotIn('qemu_pid', result)
 
+    def test_dry_run_ignores_boot_lock(self):
+        from harness.governor import LockTimeout, run_lock
+        try:
+            with run_lock(VM, timeout=5):
+                completed = subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'run',
+                     '--dry-run', '--scenario', 'boot', '--timeout', '30'],
+                    cwd=VM, capture_output=True, text=True, timeout=60)
+        except LockTimeout:
+            self.skipTest('VM lab is busy with another run')
+        self.assertEqual(completed.returncode, 0,
+                         completed.stdout + completed.stderr)
+        self.assertIn('DRY-RUN', completed.stdout)
+        self.assertIn('dry-run', completed.stdout)
+
     def test_dry_run_state_lock_release(self):
         with tempfile.TemporaryDirectory(prefix='vm-dry-state-') as tmp:
             state = Path(tmp) / 'state'

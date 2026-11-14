@@ -351,7 +351,8 @@ python3 -B launch.py run --dry-run --scenario boot
 Builds the run metadata, overlays and `command.json`, prints the full QEMU
 argv, and exits with verdict `DRY-RUN` without taking the boot lock or
 starting QEMU. With `--state`, it builds the persistent overlays, releases
-the state lock and permits a subsequent real run.
+the state lock and permits a subsequent real run. Dry runs bypass the global
+boot lock, so they never queue behind a live VM.
 
 ## Parallel runs and suites
 
