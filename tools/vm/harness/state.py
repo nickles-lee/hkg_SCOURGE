@@ -24,8 +24,13 @@ def _qemu_img_info(path: Path) -> dict:
 
 
 def create_state_overlays(state_dir: Path, inputs: dict[str, Path],
-                          reset: bool = False) -> tuple[dict[str, dict], object]:
-    """Create/reuse persistent overlays. The returned handle holds the lock."""
+                          reset: bool = False,
+                          mode: str | None = None) -> tuple[dict[str, dict], object]:
+    """Create/reuse persistent overlays. The returned handle holds the lock.
+
+    When `mode` is given (vendor/compat), a reused state must have been created
+    in the same mode; switching modes requires `--reset`.
+    """
     state_dir = Path(state_dir).resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
     lock_path = state_dir / "state.lock"
@@ -36,6 +41,19 @@ def create_state_overlays(state_dir: Path, inputs: dict[str, Path],
         lock.close()
         raise StateBusy(f"state is already in use: {state_dir}") from exc
 
+    metadata_path = state_dir / "state.json"
+    previous_mode = None
+    if metadata_path.is_file():
+        try:
+            previous = json.loads(metadata_path.read_text())
+            if isinstance(previous, dict):
+                previous_mode = previous.get("mode")
+        except (OSError, json.JSONDecodeError):
+            previous_mode = None
+    if mode is not None and not reset and previous_mode not in (None, mode):
+        lock.close()
+        raise ValueError(
+            f"state mode mismatch: {previous_mode!r} != {mode!r}; use --reset")
     overlays: dict[str, dict] = {}
     try:
         for name, source in inputs.items():
@@ -59,6 +77,9 @@ def create_state_overlays(state_dir: Path, inputs: dict[str, Path],
                 "persistent": True,
                 "state_dir": str(state_dir),
             }
+        if mode is not None:
+            metadata_path.write_text(json.dumps(
+                {"mode": mode, "overlays": sorted(inputs)}, indent=2) + "\n")
         return overlays, lock
     except BaseException:
         lock.close()

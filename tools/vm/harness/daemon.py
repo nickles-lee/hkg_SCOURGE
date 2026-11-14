@@ -363,7 +363,8 @@ def _serve(config: dict) -> int:
         state = Path(config["state"]).resolve() if config.get("state") else None
         if state is not None:
             overlays, state_lock = launch.create_state_overlays(
-                state, inputs, reset=bool(config.get("reset")))
+                state, inputs, reset=bool(config.get("reset")),
+                mode=kernel_target)
         else:
             overlays = {}
             for name, path in inputs.items():

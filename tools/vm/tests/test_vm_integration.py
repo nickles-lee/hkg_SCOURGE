@@ -823,6 +823,34 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertEqual(stopped.returncode, 0,
                                  stopped.stdout + stopped.stderr)
 
+    def test_state_mode_mismatch_requires_reset(self):
+        with tempfile.TemporaryDirectory(prefix='vm-state-mode-') as tmp:
+            state = Path(tmp) / 'state'
+            process, result = self.run_guest(
+                '--state', str(state), '--cmd', 'echo VENDOR_MODE',
+                '--timeout', '90')
+            self.assertEqual(process.returncode, 0,
+                             process.stdout + process.stderr)
+            self.assertEqual(result['verdict'], 'PASS')
+            self.assertTrue((state / 'state.json').is_file())
+
+            completed = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'run',
+                 '--state', str(state), '--kernel', 'compat',
+                 '--cmd', 'true', '--timeout', '60', '--lock-timeout', '100'],
+                cwd=VM, capture_output=True, text=True, timeout=120)
+            combined = completed.stdout + completed.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertNotEqual(completed.returncode, 0, combined)
+            self.assertIn('state mode mismatch', combined)
+            directory = next(Path(line[5:].strip())
+                             for line in completed.stdout.splitlines()
+                             if line.startswith('run: '))
+            detail = json.loads((directory / 'result.json').read_text())
+            self.assertEqual(detail['verdict'], 'FAIL')
+            self.assertNotIn('qemu_pid', detail)
+
     def test_recovery_power_loss_helper(self):
         with tempfile.TemporaryDirectory(prefix='vm-powerloss-') as tmp:
             state = Path(tmp) / 'state'

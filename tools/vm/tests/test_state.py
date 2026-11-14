@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 import tempfile
 import unittest
@@ -43,6 +44,23 @@ class StateTests(unittest.TestCase):
         self.assertEqual(reset["rootfs"]["path"], str(path))
         self.assertNotEqual(path.stat().st_mtime_ns, first_mtime)
         self.assertEqual(hashlib.sha256(self.source.read_bytes()).hexdigest(), before)
+
+    def test_state_mode_mismatch_requires_reset(self) -> None:
+        _, lock = create_state_overlays(
+            self.state_dir, {"rootfs": self.source}, mode="vendor")
+        lock.close()
+        with self.assertRaisesRegex(ValueError, "mode mismatch"):
+            create_state_overlays(
+                self.state_dir, {"rootfs": self.source}, mode="compat")
+        reused, lock = create_state_overlays(
+            self.state_dir, {"rootfs": self.source}, mode="vendor")
+        lock.close()
+        self.assertEqual(reused["rootfs"]["backing"], str(self.source))
+        reset, lock = create_state_overlays(
+            self.state_dir, {"rootfs": self.source}, reset=True, mode="compat")
+        lock.close()
+        metadata = json.loads((self.state_dir / "state.json").read_text())
+        self.assertEqual(metadata["mode"], "compat")
 
     def test_lock_prevents_concurrent_state(self) -> None:
         _, lock = create_state_overlays(self.state_dir, {"rootfs": self.source})

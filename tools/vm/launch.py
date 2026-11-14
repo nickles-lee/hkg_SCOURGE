@@ -935,7 +935,8 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
         # ownership information for cleanup and post-mortem inspection.
         if state is not None:
             try:
-                overlays, state_lock = create_state_overlays(state, inputs, reset=reset)
+                overlays, state_lock = create_state_overlays(
+                    state, inputs, reset=reset, mode=kernel_target)
             except StateBusy as exc:
                 raise RuntimeError(str(exc)) from exc
             result['state'].update({

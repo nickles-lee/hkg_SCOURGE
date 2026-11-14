@@ -879,5 +879,7 @@ items beyond that.
   371 tests; 172 VM commits.
 - **2026-11-14 — bench-only result accounting**: benchmark dirs are separate
   from missing runs. 371 tests; 173 VM commits.
+- **2026-11-14 — state mode guard**: vendor/compat state reuse requires
+  `--reset`; unit + gated coverage. 373 tests; 174 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
