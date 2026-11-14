@@ -635,5 +635,8 @@ items beyond that.
   self/permissive comparisons at rc=0 and a mean-doubled candidate at
   rc=1/REGRESSED; mutates summary+metrics and cleans bench dirs. Real run
   PASS (12.4 s). 284 tests (16 skipped).
+- **2026-11-14 — daemon diagnostics test**: opt-in test verifies command-log
+  capture, console serial tail, status reachability/QEMU/serial bytes/lock,
+  and guest rc=3 propagation. Real run PASS (7.6 s). 285 tests (17 skipped).
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

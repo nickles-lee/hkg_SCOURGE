@@ -186,7 +186,10 @@ default daemon directory is `runs/daemon` (`--daemon-dir` overrides it).
 Stop flushes the guest with `sync` before killing QEMU. A stale/dead daemon
 is reported by `status` instead of silently reusing it. An opt-in integration
 test (`IONIQ_RUN_VM_TESTS=1`) writes a marker through one daemon, stops it,
-restarts with the same `--state`, and verifies the marker survives.
+restarts with the same `--state`, and verifies the marker survives. Another
+opt-in test checks `daemon-commands.log`, `daemon console` serial output,
+`daemon status` (`reachable`, `qemu_alive`, `serial_bytes`, held lock) and
+guest exit-code propagation through `exec`.
 
 `--cache` selects the non-persistent qcow2 mode (`writeback` default;
 `directsync` is pathological on this host). Persistent state always forces

@@ -162,6 +162,49 @@ class VMIntegrationTests(unittest.TestCase):
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
 
+    def test_daemon_console_and_status_diagnostics(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-diag-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                executed = cli('exec', '--daemon-dir', str(daemon_dir),
+                               '--cmd', 'echo DIAG_MARKER; exit 3')
+                self.assertEqual(executed.returncode, 3,
+                                 executed.stdout + executed.stderr)
+                self.assertIn('DIAG_MARKER', executed.stdout)
+                command_log = (daemon_dir / 'daemon-commands.log').read_text()
+                self.assertIn('rc=3', command_log)
+                self.assertIn('DIAG_MARKER', command_log)
+
+                console = cli('console', '--daemon-dir', str(daemon_dir),
+                              '--lines', '200')
+                self.assertEqual(console.returncode, 0, console.stderr)
+                self.assertIn('DIAG_MARKER', console.stdout)
+
+                status = cli('status', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(status.returncode, 0, status.stderr)
+                values = json.loads(status.stdout)
+                self.assertEqual(values['state'], 'ready')
+                self.assertTrue(values['reachable'])
+                self.assertTrue(values['qemu_alive'])
+                self.assertGreater(values['serial_bytes'], 0)
+                self.assertTrue(values['lock']['held'])
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_benchmark_comparison_end_to_end(self):
         def bench():
             completed = subprocess.run(
