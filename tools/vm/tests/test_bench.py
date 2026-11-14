@@ -403,6 +403,21 @@ class BenchTests(unittest.TestCase):
             self.assertFalse(report['ok'])
             self.assertTrue(report['baseline_problems'])
 
+    def test_compare_shape_mismatch(self) -> None:
+        summary = {'k': {'count': 1, 'mean': 10.0, 'median': 10.0,
+                         'min': 10.0, 'max': 10.0}}
+        base = bench_doc(summary=summary, repeats=3)
+        current = bench_doc(summary=summary, repeats=1)
+        report = compare_bench(base, current)
+        self.assertFalse(report['shape_match'])
+        self.assertIn('repeats', report['shape_warning'])
+        self.assertTrue(report['ok'])
+        strict = compare_bench(base, current, require_same_shape=True)
+        self.assertFalse(strict['ok'])
+        same = compare_bench(base, base, require_same_shape=True)
+        self.assertTrue(same['shape_match'])
+        self.assertTrue(same['ok'])
+
     def test_compare_source_mismatch(self) -> None:
         base = bench_doc(summary={'k': {'count': 1, 'mean': 10.0,
                                         'median': 10.0, 'min': 10.0, 'max': 10.0}},
@@ -477,6 +492,7 @@ class BenchTests(unittest.TestCase):
         self.assertIn('--compare', completed.stdout)
         self.assertIn('--metric', completed.stdout)
         self.assertIn('--require-source-match', completed.stdout)
+        self.assertIn('--require-same-shape', completed.stdout)
         self.assertIn('--warmup', completed.stdout)
 
 

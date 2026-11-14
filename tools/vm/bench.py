@@ -154,7 +154,8 @@ def metric_summary(document: dict, metric: str) -> dict:
 def compare_bench(baseline: dict, current: dict,
                   threshold: float = 0.05,
                   metric: str = 'boot_seconds',
-                  require_source_match: bool = False) -> dict:
+                  require_source_match: bool = False,
+                  require_same_shape: bool = False) -> dict:
     """Compare two bench.json documents; regression is relative mean growth."""
     left = metric_summary(baseline, metric)
     right = metric_summary(current, metric)
@@ -189,15 +190,28 @@ def compare_bench(baseline: dict, current: dict,
     source_warning = None
     if not source_match:
         source_warning = (f'source git_head differs: {baseline_head} != {current_head}')
+    shape_fields = ('repeats', 'warmup', 'scenarios', 'variants')
+    shape = {field: baseline.get(field) == current.get(field)
+             for field in shape_fields}
+    shape_match = all(shape.values())
+    shape_warning = None
+    if not shape_match:
+        differing = ', '.join(field for field, same in shape.items() if not same)
+        shape_warning = f'benchmark shape differs: {differing}'
     report = {
         'ok': (bool(rows) and all(
             row['status'] not in ('REGRESSED', 'MISSING') for row in rows)
-            and (source_match or not require_source_match)),
+            and (source_match or not require_source_match)
+            and (shape_match or not require_same_shape)),
         'threshold': threshold,
         'metric': metric,
         'source_match': source_match,
         'source_warning': source_warning,
         'require_source_match': require_source_match,
+        'shape': shape,
+        'shape_match': shape_match,
+        'shape_warning': shape_warning,
+        'require_same_shape': require_same_shape,
         'baseline': baseline.get('run') or baseline.get('bench_id'),
         'current': current.get('run') or current.get('bench_id'),
         'baseline_source': baseline.get('source'),
@@ -233,6 +247,9 @@ def main() -> int:
                         help='metric for --compare (default boot)')
     parser.add_argument('--require-source-match', action='store_true',
                         help='fail --compare when git_head provenance differs')
+    parser.add_argument('--require-same-shape', action='store_true',
+                        help='fail --compare when repeats/warmup/scenarios/'
+                             'variants differ')
     parser.add_argument('--scenario', action='append', default=[],
                         help='scenario to benchmark (repeatable; default boot)')
     parser.add_argument('--profile', choices=('research', 'conformance'),
@@ -288,7 +305,8 @@ def main() -> int:
         metric = {'boot': 'boot_seconds', 'readiness': 'readiness_seconds',
                   'scenario': 'scenario_seconds'}[args.metric]
         report = compare_bench(baseline, current, args.threshold, metric,
-                               args.require_source_match)
+                               args.require_source_match,
+                               args.require_same_shape)
         report['baseline'] = report['baseline'] or str(baseline_path)
         report['current'] = report['current'] or str(current_path)
         print(json.dumps(report, indent=2))

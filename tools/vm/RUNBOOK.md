@@ -303,6 +303,8 @@ and a mean-doubled candidate is `REGRESSED`/rc=1.
 
 `compare` also reports `source_match`/`source_warning` from the recorded
 `git_head`; add `--require-source-match` to fail a cross-revision comparison.
+`shape_match`/`shape_warning` compare `repeats`, `warmup`, `scenarios` and
+`variants`; `--require-same-shape` fails a cross-shape comparison.
 It prints per-key `SAME`/`IMPROVED`/`REGRESSED`/`MISSING` rows and exits 1 for
 a regression or a missing key; malformed benchmark documents are
 rejected with exit 2 and per-document problems. New `bench.json` files carry
