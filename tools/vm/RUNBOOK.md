@@ -349,7 +349,8 @@ python3 -B launch.py run --dry-run --scenario boot
 
 Builds the run metadata, overlays and `command.json`, prints the full QEMU
 argv, and exits with verdict `DRY-RUN` without taking the boot lock or
-starting QEMU. Useful for inspecting device/cache/scenario arguments.
+starting QEMU. With `--state`, it builds the persistent overlays, releases
+the state lock and permits a subsequent real run.
 
 ## Parallel runs and suites
 

@@ -637,6 +637,37 @@ class VMIntegrationTests(unittest.TestCase):
             finally:
                 cli('stop', '--daemon-dir', str(daemon_dir))
 
+    def test_dry_run_state_lock_release(self):
+        with tempfile.TemporaryDirectory(prefix='vm-dry-state-') as tmp:
+            state = Path(tmp) / 'state'
+
+            def launch(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'run',
+                     '--state', str(state), '--timeout', '60', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=180)
+
+            dry = launch('--dry-run', '--no-lock', '--scenario', 'boot')
+            self.assertEqual(dry.returncode, 0, dry.stdout + dry.stderr)
+            directory = next(Path(line[5:].strip())
+                             for line in dry.stdout.splitlines()
+                             if line.startswith('run: '))
+            result = json.loads((directory / 'result.json').read_text())
+            self.assertEqual(result['verdict'], 'DRY-RUN')
+            self.assertIsNone(result.get('qemu_pid'))
+            self.assertTrue((state / 'rootfs.qcow2').is_file())
+
+            real = launch('--cmd', 'echo DRY_STATE_OK')
+            combined = real.stdout + real.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(real.returncode, 0, combined)
+            directory = next(Path(line[5:].strip())
+                             for line in real.stdout.splitlines()
+                             if line.startswith('run: '))
+            self.assertIn('DRY_STATE_OK',
+                          (directory / 'guest-output.log').read_text())
+
     def test_daemon_console_missing_serial(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-noserial-') as tmp:
             daemon_dir = Path(tmp) / 'daemon'
