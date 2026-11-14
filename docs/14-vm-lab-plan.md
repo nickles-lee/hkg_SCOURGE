@@ -805,5 +805,8 @@ items beyond that.
 - **2026-11-14 — daemon restart --reset**: discards state on restart and is
   rejected without `--state`; marker and error gated tests PASS. 338 tests;
   141 VM commits.
+- **2026-11-14 — restart argv extraction**: stored-config mapping is a pure
+  function with full unit coverage; gated restart re-verified. 339 tests;
+  142 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

@@ -114,6 +114,41 @@ def validate_pin_cpu(cpu: int | None) -> int | None:
     return cpu
 
 
+def daemon_restart_argv(config: dict, daemon_dir: Path,
+                        reset: bool = False) -> list[str]:
+    """Build `daemon start` arguments from a stored daemon config."""
+    argv = [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', 'start',
+            '--daemon-dir', str(daemon_dir),
+            '--kernel', config.get('kernel_target', 'vendor')]
+    if reset:
+        argv.append('--reset')
+    mapping = (
+        ('state', '--state'), ('tools', '--tools'), ('usb', '--usb'),
+        ('payload', '--payload'), ('share', '--share'),
+        ('display', '--display'), ('vnc_display', '--vnc-display'),
+        ('display_device', '--display-device'),
+        ('smp', '--smp'), ('memory_mb', '--memory'),
+        ('label', '--label'), ('cache', '--cache'),
+        ('ready_timeout', '--ready-timeout'),
+        ('lock_timeout', '--lock-timeout'),
+        ('command_log_max', '--command-log-max'),
+        ('pin_cpu', '--pin-cpu'),
+    )
+    for key, flag in mapping:
+        value = config.get(key)
+        if value is not None:
+            argv.extend([flag, str(value)])
+    if config.get('network'):
+        argv.append('--network')
+    if config.get('audio'):
+        argv.append('--audio')
+    if config.get('apic'):
+        argv.append('--apic')
+    for device in config.get('usb_host') or []:
+        argv.extend(['--usb-host', str(device)])
+    return argv
+
+
 def qemu_preexec(pin_cpu: int | None = None):
     """Child-side setup: parent-death signal plus optional host CPU pinning."""
     def _preexec() -> None:
@@ -1791,35 +1826,7 @@ def main() -> int:
                       file=sys.stderr)
                 return 1
             daemon_mod.stop(daemon_dir)
-            argv = [sys.executable, '-B', str(VM / 'launch.py'), 'daemon',
-                    'start', '--daemon-dir', str(daemon_dir),
-                    '--kernel', config.get('kernel_target', 'vendor')]
-            if args.reset:
-                argv.append('--reset')
-            mapping = (
-                ('state', '--state'), ('tools', '--tools'), ('usb', '--usb'),
-                ('payload', '--payload'), ('share', '--share'),
-                ('display', '--display'), ('vnc_display', '--vnc-display'),
-                ('display_device', '--display-device'),
-                ('smp', '--smp'), ('memory_mb', '--memory'),
-                ('label', '--label'), ('cache', '--cache'),
-                ('ready_timeout', '--ready-timeout'),
-                ('lock_timeout', '--lock-timeout'),
-                ('command_log_max', '--command-log-max'),
-                ('pin_cpu', '--pin-cpu'),
-            )
-            for key, flag in mapping:
-                value = config.get(key)
-                if value is not None:
-                    argv.extend([flag, str(value)])
-            if config.get('network'):
-                argv.append('--network')
-            if config.get('audio'):
-                argv.append('--audio')
-            if config.get('apic'):
-                argv.append('--apic')
-            for device in config.get('usb_host') or []:
-                argv.extend(['--usb-host', str(device)])
+            argv = daemon_restart_argv(config, daemon_dir, reset=args.reset)
             return subprocess.run(argv, cwd=str(VM)).returncode
         if args.daemon_action == 'status':
             status = daemon_mod.read_status(daemon_dir)

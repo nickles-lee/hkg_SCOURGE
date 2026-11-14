@@ -16,6 +16,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
+import launch
 from harness import daemon
 
 VM = Path(__file__).resolve().parents[1]
@@ -28,6 +29,39 @@ class DaemonTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
+
+    def test_restart_argv_preserves_config(self) -> None:
+        config = {
+            'kernel_target': 'compat', 'state': '/tmp/state',
+            'tools': '/tmp/tools.img', 'usb': '/tmp/usb.img',
+            'payload': '/tmp/payload.img', 'share': '/tmp/share',
+            'display': 'gtk', 'vnc_display': ':7',
+            'display_device': 'virtio-vga', 'network': True, 'audio': True,
+            'usb_host': ['058f:6366'], 'smp': 2, 'memory_mb': 3072,
+            'apic': True, 'label': 'demo', 'cache': 'writethrough',
+            'ready_timeout': 42, 'lock_timeout': 43,
+            'command_log_max': 1234, 'pin_cpu': 3,
+        }
+        argv = launch.daemon_restart_argv(config, self.root)
+        joined = ' '.join(argv)
+        for expected in ('daemon start', '--daemon-dir', '--kernel compat',
+                         '--state /tmp/state', '--tools /tmp/tools.img',
+                         '--usb /tmp/usb.img', '--payload /tmp/payload.img',
+                         '--share /tmp/share', '--display gtk',
+                         '--vnc-display :7', '--display-device virtio-vga',
+                         '--network', '--audio', '--usb-host 058f:6366',
+                         '--smp 2', '--memory 3072', '--apic',
+                         '--label demo', '--cache writethrough',
+                         '--ready-timeout 42', '--lock-timeout 43',
+                         '--command-log-max 1234', '--pin-cpu 3'):
+            self.assertIn(expected, joined)
+        self.assertNotIn('--reset', argv)
+        self.assertIn('--reset', launch.daemon_restart_argv(
+            config, self.root, reset=True))
+        minimal = launch.daemon_restart_argv({}, self.root)
+        self.assertEqual(minimal[-2:], ['--kernel', 'vendor'])
+        self.assertNotIn('--network', minimal)
+        self.assertNotIn('--audio', minimal)
 
     def test_start_lock_serializes_and_times_out(self) -> None:
         with daemon._start_lock(self.root, timeout=1):
