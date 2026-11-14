@@ -228,7 +228,8 @@ It holds the global boot lock, runs children with `--no-lock`, writes
 log, and exits nonzero if any run does not PASS. `--warmup N` runs N
 unrecorded boots per scenario/variant first; warmups are retained in
 `bench.json` and must PASS. `bench.json` also records `source` (`git_head`
-and `dirty`) for provenance. `--matrix` compares
+and `dirty`) for provenance. The opt-in VM suite runs a real warmup+measured
+pair and asserts warmup/row PASS, source revision and metrics. `--matrix` compares
 `writeback`/`writethrough` by default; `--matrix-cache` and `--matrix-cpu`
 select other combinations, and the unpinned baseline is always included.
 Matrix rows and summary keys are grouped by scenario, cache and pin. The

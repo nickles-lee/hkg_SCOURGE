@@ -590,6 +590,37 @@ class VMIntegrationTests(unittest.TestCase):
                 process.kill()
                 process.communicate(timeout=30)
 
+    def test_benchmark_warmup_and_provenance(self):
+        completed = subprocess.run(
+            [sys.executable, '-B', str(VM / 'bench.py'),
+             '--scenario', 'boot', '--repeats', '1', '--warmup', '1',
+             '--timeout', '120', '--lock-timeout', '100'],
+            cwd=VM, capture_output=True, text=True, timeout=240)
+        combined = completed.stdout + completed.stderr
+        if 'another VM boot holds' in combined or 'lock timeout' in combined:
+            self.skipTest('VM lab is busy with another run')
+        self.assertEqual(completed.returncode, 0, combined)
+        path = next(Path(line[7:]) for line in completed.stdout.splitlines()
+                    if line.startswith('bench: '))
+        try:
+            from harness.result_schema import validate_bench
+            data = json.loads(path.read_text())
+            self.assertEqual(validate_bench(data), [])
+            self.assertEqual(data['warmup'], 1)
+            self.assertEqual(len(data['warmups']), 1)
+            self.assertEqual(data['warmups'][0]['verdict'], 'PASS')
+            self.assertEqual(len(data['rows']), 1)
+            self.assertEqual(data['rows'][0]['verdict'], 'PASS')
+            self.assertTrue(data['source']['git_head'])
+            self.assertIsInstance(data['source']['dirty'], bool)
+            key = 'boot cache=default pin=none'
+            self.assertIn(key, data['metrics'])
+            self.assertEqual(
+                set(data['metrics'][key]),
+                {'boot_seconds', 'readiness_seconds', 'scenario_seconds'})
+        finally:
+            shutil.rmtree(path.parent, ignore_errors=True)
+
     def test_benchmark_matrix_end_to_end(self):
         cpu = sorted(os.sched_getaffinity(0))[0]
         completed = subprocess.run(
