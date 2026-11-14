@@ -1216,7 +1216,8 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertIn('RESTART_WHILE_STOPPED_OK', alive.stdout)
 
                 config_file = daemon_dir / 'config.json'
-                bad = json.loads(config_file.read_text())
+                good_config = json.loads(config_file.read_text())
+                bad = dict(good_config)
                 bad['kernel_target'] = 'bogus'
                 config_file.write_text(json.dumps(bad))
                 rejected = cli('restart', '--daemon-dir', str(daemon_dir))
@@ -1224,6 +1225,21 @@ class VMIntegrationTests(unittest.TestCase):
                                     rejected.stdout + rejected.stderr)
                 self.assertIn('unsupported kernel_target',
                               rejected.stdout + rejected.stderr)
+                still = cli('status', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(json.loads(still.stdout)['state'], 'ready')
+
+                allowed = sorted(os.sched_getaffinity(0))
+                missing = max(allowed) + 1
+                while missing in allowed:
+                    missing += 1
+                pinned = dict(good_config)
+                pinned['pin_cpu'] = missing
+                config_file.write_text(json.dumps(pinned))
+                pin_rejected = cli('restart', '--daemon-dir', str(daemon_dir))
+                self.assertNotEqual(pin_rejected.returncode, 0,
+                                    pin_rejected.stdout + pin_rejected.stderr)
+                self.assertIn('not available',
+                              pin_rejected.stdout + pin_rejected.stderr)
                 still = cli('status', '--daemon-dir', str(daemon_dir))
                 self.assertEqual(json.loads(still.stdout)['state'], 'ready')
 

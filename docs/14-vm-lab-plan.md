@@ -915,5 +915,7 @@ items beyond that.
   status. 389 tests; 190 VM commits.
 - **2026-11-14 — restart config guard**: invalid stored config fails before
   stopping a healthy daemon. 390 tests; 191 VM commits.
+- **2026-11-14 — restart pin guard**: unavailable stored pin fails before
+  stop. 390 tests; 192 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
