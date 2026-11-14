@@ -638,5 +638,8 @@ items beyond that.
 - **2026-11-14 — daemon diagnostics test**: opt-in test verifies command-log
   capture, console serial tail, status reachability/QEMU/serial bytes/lock,
   and guest rc=3 propagation. Real run PASS (7.6 s). 285 tests (17 skipped).
+- **2026-11-14 — real benchmark matrix test**: opt-in four-cell
+  writeback/writethrough × unpinned/pinned run asserts variants, rows,
+  summary keys and metrics; real run PASS (27.7 s). 286 tests (18 skipped).
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

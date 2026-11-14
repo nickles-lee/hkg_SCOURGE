@@ -215,7 +215,10 @@ unrecorded boots per scenario/variant first; warmups are retained in
 and `dirty`) for provenance. `--matrix` compares
 `writeback`/`writethrough` by default; `--matrix-cache` and `--matrix-cpu`
 select other combinations, and the unpinned baseline is always included.
-Matrix rows and summary keys are grouped by scenario, cache and pin.
+Matrix rows and summary keys are grouped by scenario, cache and pin. The
+opt-in VM suite runs a real four-cell `writeback`/`writethrough` ×
+unpinned/pinned matrix and asserts variants, row count, summary keys and
+per-cell boot/readiness/scenario metrics.
 
 Compare two runs with a relative mean threshold (default 5%):
 

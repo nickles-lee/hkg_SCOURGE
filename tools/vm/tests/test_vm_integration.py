@@ -162,6 +162,47 @@ class VMIntegrationTests(unittest.TestCase):
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
 
+    def test_benchmark_matrix_end_to_end(self):
+        cpu = sorted(os.sched_getaffinity(0))[0]
+        completed = subprocess.run(
+            [sys.executable, '-B', str(VM / 'bench.py'),
+             '--scenario', 'boot', '--repeats', '1',
+             '--matrix', '--matrix-cache', 'writeback',
+             '--matrix-cache', 'writethrough', '--matrix-cpu', str(cpu),
+             '--timeout', '120', '--lock-timeout', '100'],
+            cwd=VM, capture_output=True, text=True, timeout=300)
+        combined = completed.stdout + completed.stderr
+        if 'another VM boot holds' in combined or 'lock timeout' in combined:
+            self.skipTest('VM lab is busy with another run')
+        self.assertEqual(completed.returncode, 0, combined)
+        path = next(Path(line[7:]) for line in completed.stdout.splitlines()
+                    if line.startswith('bench: '))
+        try:
+            from harness.result_schema import validate_bench
+            data = json.loads(path.read_text())
+            self.assertEqual(validate_bench(data), [])
+            expected = {(cache, pin) for cache in ('writeback', 'writethrough')
+                        for pin in (None, cpu)}
+            variants = {(item['cache'], item['pin_cpu'])
+                        for item in data['variants']}
+            self.assertEqual(variants, expected)
+            self.assertEqual(len(data['rows']), 4)
+            self.assertEqual(len(data['summary']), 4)
+            self.assertEqual(len(data['metrics']), 4)
+            for row in data['rows']:
+                self.assertEqual(row['verdict'], 'PASS')
+                self.assertIn((row['cache'], row['pin_cpu']), expected)
+            for cache, pin in expected:
+                key = (f"boot cache={cache} "
+                       f"pin={pin if pin is not None else 'none'}")
+                self.assertIn(key, data['summary'])
+                self.assertIn(key, data['metrics'])
+                self.assertEqual(
+                    set(data['metrics'][key]),
+                    {'boot_seconds', 'readiness_seconds', 'scenario_seconds'})
+        finally:
+            shutil.rmtree(path.parent, ignore_errors=True)
+
     def test_daemon_console_and_status_diagnostics(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-diag-') as tmp:
             daemon_dir = Path(tmp) / 'daemon'
