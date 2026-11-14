@@ -113,6 +113,41 @@ def daemon_pid_matches(pid: int | None, daemon_dir: Path | None = None) -> bool:
     return True
 
 
+def list_daemons(root: Path) -> list[dict]:
+    """Describe daemon directories under `root` without contacting them."""
+    rows = []
+    root = Path(root)
+    try:
+        entries = sorted(path for path in root.iterdir()
+                         if path.is_dir()
+                         and ((path / "status.json").is_file()
+                              or (path / "config.json").is_file()))
+    except OSError:
+        return rows
+    for path in entries:
+        status = read_status(path)
+        config = {}
+        try:
+            raw = json.loads((path / "config.json").read_text())
+            if isinstance(raw, dict):
+                config = raw
+        except (OSError, json.JSONDecodeError):
+            config = {}
+        daemon_pid = status.get("daemon_pid")
+        qemu_pid = status.get("qemu_pid")
+        rows.append({
+            "dir": str(path),
+            "state": status.get("state"),
+            "daemon_pid": daemon_pid,
+            "daemon_alive": bool(daemon_pid and daemon_pid_matches(daemon_pid, path)),
+            "qemu_pid": qemu_pid,
+            "qemu_alive": bool(qemu_pid and pid_alive(qemu_pid)),
+            "kernel": config.get("kernel_target"),
+            "state_dir": config.get("state"),
+        })
+    return rows
+
+
 def request(daemon_dir: Path, payload: dict, timeout: float = 15.0) -> dict:
     path = Path(daemon_dir) / "control.sock"
     deadline = time.monotonic() + timeout

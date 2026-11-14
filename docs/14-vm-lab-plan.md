@@ -812,5 +812,8 @@ items beyond that.
   corrupt config fails clearly without QEMU. 340 tests; 143 VM commits.
 - **2026-11-14 — console line clamping**: zero/negative tails clamp to one
   line; unit coverage. 341 tests; 144 VM commits.
+- **2026-11-14 — daemon list**: lists daemon dirs with recorded state,
+  daemon/QEMU liveness and kernel/state config; unit + gated coverage.
+  343 tests; 145 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

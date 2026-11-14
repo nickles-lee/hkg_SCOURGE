@@ -30,6 +30,26 @@ class DaemonTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
+    def test_list_daemons_describes_directories(self) -> None:
+        ready = self.root / 'd1'
+        ready.mkdir()
+        daemon.write_status(ready, {'state': 'ready', 'daemon_pid': os.getpid(),
+                                    'qemu_pid': 99999999})
+        (ready / 'config.json').write_text(json.dumps(
+            {'kernel_target': 'compat', 'state': '/tmp/state'}))
+        stopped = self.root / 'd2'
+        stopped.mkdir()
+        daemon.write_status(stopped, {'state': 'stopped'})
+        rows = {Path(row['dir']).name: row
+                for row in daemon.list_daemons(self.root)}
+        self.assertEqual(set(rows), {'d1', 'd2'})
+        self.assertEqual(rows['d1']['kernel'], 'compat')
+        self.assertEqual(rows['d1']['state_dir'], '/tmp/state')
+        self.assertFalse(rows['d1']['daemon_alive'])
+        self.assertFalse(rows['d1']['qemu_alive'])
+        self.assertEqual(rows['d2']['state'], 'stopped')
+        self.assertEqual(daemon.list_daemons(self.root / 'missing'), [])
+
     def test_console_clamps_line_count(self) -> None:
         (self.root / 'serial.log').write_text('one\ntwo\nthree\n')
         for lines, expected in ((0, 'three'), (-5, 'three'),

@@ -1638,6 +1638,9 @@ def main() -> int:
     drestart.add_argument('--daemon-dir', type=Path, default=VM / 'runs' / 'daemon')
     drestart.add_argument('--reset', action='store_true',
                           help='discard persistent state overlays on restart')
+    dlist = dsub.add_parser('list', help='list daemon directories and liveness')
+    dlist.add_argument('--root', type=Path, default=VM / 'runs')
+    dlist.add_argument('--json', action='store_true')
     for name in ('status', 'stop', 'screenshot', 'console', 'exec'):
         p = dsub.add_parser(name)
         p.add_argument('--daemon-dir', type=Path, default=VM / 'runs' / 'daemon')
@@ -1751,6 +1754,17 @@ def main() -> int:
         if args.daemon_action == '_serve':
             config = json.loads(args.config.read_text())
             return daemon_mod._serve(config)
+        if args.daemon_action == 'list':
+            rows = daemon_mod.list_daemons(args.root)
+            if args.json:
+                print(json.dumps(rows, indent=2))
+            else:
+                for row in rows:
+                    print(f"{row['dir']} {row['state'] or 'unknown':8} "
+                          f"daemon={'alive' if row['daemon_alive'] else 'dead':5} "
+                          f"qemu={'alive' if row['qemu_alive'] else 'dead':5} "
+                          f"kernel={row['kernel'] or '?'}")
+            return 0
         daemon_dir = args.daemon_dir.resolve()
         if args.daemon_action == 'start':
             if args.reset and args.state is None:

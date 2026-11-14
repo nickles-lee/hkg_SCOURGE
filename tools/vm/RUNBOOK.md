@@ -175,6 +175,7 @@ Boot once and iterate without cold boots:
 python3 -B launch.py daemon start --kernel compat --state states/daemon \
   --label daily
 python3 -B launch.py daemon status
+python3 -B launch.py daemon list          # all daemon dirs + liveness
 python3 -B launch.py daemon restart
 python3 -B launch.py daemon exec --cmd 'uname -r; ls /media/host'
 python3 -B launch.py daemon screenshot --output /tmp/daemon.png
@@ -185,8 +186,10 @@ python3 -B launch.py daemon stop
 
 The daemon keeps the QEMU process, serial reader, QMP socket and state lock
 alive; `exec`/`screenshot` use a control socket in `runs/daemon/`.
-`daemon restart` stops and starts again from the stored `config.json`
-(kernel, state, devices, cache, lock and pin settings). Add `--reset` to
+`daemon list --root runs [--json]` reports every daemon directory with its
+recorded state, daemon/QEMU PID liveness and kernel/state config without
+contacting the sockets. `daemon restart` stops and starts again from the
+stored `config.json` (kernel, state, devices, cache, lock and pin settings). Add `--reset` to
 discard persistent state overlays; it requires a daemon started with
 `--state`. A failed
 `daemon start` includes the last serial lines and QEMU return code in the

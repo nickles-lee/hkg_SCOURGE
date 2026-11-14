@@ -941,6 +941,40 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertEqual(stopped.returncode, 0,
                                  stopped.stdout + stopped.stderr)
 
+    def test_daemon_list_reports_live_and_stopped(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-list-') as tmp:
+            root = Path(tmp)
+            daemon_dir = root / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                listing = cli('list', '--root', str(root), '--json')
+                self.assertEqual(listing.returncode, 0, listing.stderr)
+                rows = json.loads(listing.stdout)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]['state'], 'ready')
+                self.assertTrue(rows[0]['daemon_alive'])
+                self.assertTrue(rows[0]['qemu_alive'])
+                self.assertEqual(rows[0]['kernel'], 'vendor')
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+            listing = cli('list', '--root', str(root), '--json')
+            rows = json.loads(listing.stdout)
+            self.assertEqual(rows[0]['state'], 'stopped')
+            self.assertFalse(rows[0]['qemu_alive'])
+
     def test_daemon_restart_edge_cases(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-restart-edge-') as tmp:
             root = Path(tmp)
