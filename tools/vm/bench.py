@@ -209,6 +209,12 @@ def compare_bench(baseline: dict, current: dict,
     return report
 
 
+def resolve_bench_arg(value: Path) -> Path:
+    """Accept a bench directory or a bench.json path."""
+    value = Path(value)
+    return value / 'bench.json' if value.is_dir() else value
+
+
 def result_path(log_path: Path) -> Path | None:
     for line in log_path.read_text().splitlines():
         if line.startswith('run: '):
@@ -262,9 +268,11 @@ def main() -> int:
     if args.compare:
         if not math.isfinite(args.threshold) or args.threshold < 0:
             parser.error('--threshold must be finite and non-negative')
+        baseline_path = resolve_bench_arg(args.compare[0])
+        current_path = resolve_bench_arg(args.compare[1])
         try:
-            baseline = json.loads(args.compare[0].read_text())
-            current = json.loads(args.compare[1].read_text())
+            baseline = json.loads(baseline_path.read_text())
+            current = json.loads(current_path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
             parser.error(f'cannot read bench summary: {exc}')
         baseline_problems = validate_bench(baseline)
@@ -281,8 +289,8 @@ def main() -> int:
                   'scenario': 'scenario_seconds'}[args.metric]
         report = compare_bench(baseline, current, args.threshold, metric,
                                args.require_source_match)
-        report['baseline'] = report['baseline'] or str(args.compare[0])
-        report['current'] = report['current'] or str(args.compare[1])
+        report['baseline'] = report['baseline'] or str(baseline_path)
+        report['current'] = report['current'] or str(current_path)
         print(json.dumps(report, indent=2))
         return 0 if report['ok'] else 1
     if args.repeats <= 0 or not math.isfinite(args.timeout) or args.timeout <= 0:

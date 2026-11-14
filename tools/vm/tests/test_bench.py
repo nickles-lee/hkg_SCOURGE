@@ -14,8 +14,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from bench import (build_argv, compare_bench, result_path, source_state,
-                   row_verdict, summarize, validate_child, validate_matrix,
-                   variants)
+                   resolve_bench_arg, row_verdict, summarize, validate_child,
+                   validate_matrix, variants)
 from harness.result_schema import check_all_bench, validate_bench
 from harness.config import load_scenario
 
@@ -193,6 +193,31 @@ class BenchTests(unittest.TestCase):
     def test_missing_required_input_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, 'requires --payload'):
             build_argv(args(), load_scenario('can-smoke'))
+
+    def test_resolve_bench_arg_accepts_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='vm-bench-dir-') as tmp:
+            root = Path(tmp)
+            (root / 'bench.json').write_text('{}')
+            self.assertEqual(resolve_bench_arg(root), root / 'bench.json')
+            file_path = root / 'bench.json'
+            self.assertEqual(resolve_bench_arg(file_path), file_path)
+
+    def test_compare_cli_accepts_bench_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='vm-bench-dir-') as tmp:
+            root = Path(tmp)
+            document = bench_doc(summary={
+                'boot cache=default pin=none': {
+                    'count': 1, 'mean': 10.0, 'median': 10.0,
+                    'min': 10.0, 'max': 10.0}})
+            (root / 'bench.json').write_text(json.dumps(document))
+            completed = subprocess.run(
+                [sys.executable, '-B', str(VM / 'bench.py'), '--compare',
+                 str(root), str(root)], capture_output=True, text=True,
+                check=False)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            report = json.loads(completed.stdout)
+            self.assertTrue(report['ok'])
+            self.assertEqual(report['baseline'], 'test')
 
     def test_result_path_reads_run_line(self) -> None:
         with tempfile.TemporaryDirectory(prefix='vm-bench-') as tmp:

@@ -292,8 +292,7 @@ per-cell boot/readiness/scenario metrics.
 Compare two runs with a relative mean threshold (default 5%):
 
 ```sh
-python3 -B bench.py --compare runs/bench-<base>/bench.json \
-  runs/bench-<new>/bench.json --threshold 0.05
+python3 -B bench.py --compare runs/bench-<base> runs/bench-<new> --threshold 0.05
 ```
 
 The opt-in VM suite (`IONIQ_RUN_VM_TESTS=1`) runs two real boot benchmarks,
