@@ -808,5 +808,7 @@ items beyond that.
 - **2026-11-14 — restart argv extraction**: stored-config mapping is a pure
   function with full unit coverage; gated restart re-verified. 339 tests;
   142 VM commits.
+- **2026-11-14 — daemon restart edge cases**: restart-while-stopped works;
+  corrupt config fails clearly without QEMU. 340 tests; 143 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
