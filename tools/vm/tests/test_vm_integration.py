@@ -40,6 +40,43 @@ class VMIntegrationTests(unittest.TestCase):
         if result.get('qemu_pid'):
             self.assertFalse(Path(f"/proc/{result['qemu_pid']}").exists())
 
+    def test_daemon_screenshot_copy_failure(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-copyfail-') as tmp:
+            root = Path(tmp)
+            daemon_dir = root / 'daemon'
+            output = root / 'missing-parent' / 'shot.png'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=180)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                failed = cli('screenshot', '--daemon-dir', str(daemon_dir),
+                             '--output', str(output))
+                self.assertNotEqual(failed.returncode, 0,
+                                    failed.stdout + failed.stderr)
+                self.assertIn('cannot copy screenshot',
+                              failed.stdout + failed.stderr)
+                self.assertFalse(output.exists())
+                self.assertEqual(list(daemon_dir.glob('screenshot-*.png')), [])
+
+                alive = cli('exec', '--daemon-dir', str(daemon_dir),
+                            '--cmd', 'echo COPY_FAILURE_SAFE')
+                self.assertEqual(alive.returncode, 0,
+                                 alive.stdout + alive.stderr)
+                self.assertIn('COPY_FAILURE_SAFE', alive.stdout)
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_daemon_stop_idempotent_and_post_stop_diagnostics(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-poststop-') as tmp:
             root = Path(tmp)

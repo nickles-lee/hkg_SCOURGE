@@ -1803,7 +1803,11 @@ def main() -> int:
             if not response.get('ok'):
                 ap.error(response.get('error', 'daemon screenshot failed'))
             if requested is not None:
-                shutil.copy2(capture, requested)
+                try:
+                    shutil.copy2(capture, requested)
+                except OSError as exc:
+                    capture.unlink(missing_ok=True)
+                    ap.error(f'cannot copy screenshot to {requested}: {exc}')
                 response['copied_to'] = str(requested)
                 # The daemon dir is never pruned; keep only the copy.
                 capture.unlink(missing_ok=True)

@@ -724,5 +724,8 @@ items beyond that.
 - **2026-11-14 — daemon post-stop diagnostics**: idempotent stop; stopped/
   unreachable status; exec/screenshot fail fast; clean restart. Real run
   PASS (16.1 s). 312 tests (43 skipped); 113 VM commits.
+- **2026-11-14 — daemon screenshot copy failure**: failed copy cleans the
+  capture and reports a clear error; daemon remains healthy. Real run PASS
+  (6.7 s). 313 tests (44 skipped); 114 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
