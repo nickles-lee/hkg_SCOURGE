@@ -181,6 +181,9 @@ def list_daemons(root: Path) -> list[dict]:
             "command_log_bytes": (command_log.stat().st_size
                                   if command_log.is_file() else 0),
             "screenshot_count": len(list(path.glob("screenshot-*.png"))),
+            "command_log_max": config.get("command_log_max"),
+            "screenshot_keep": config.get("screenshot_keep"),
+            "exec_output_max": config.get("exec_output_max"),
         })
     return rows
 

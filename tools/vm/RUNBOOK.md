@@ -205,8 +205,9 @@ text and rotates at `--command-log-max`. `daemon screenshot` keeps at most
 pruned and reported in the response `pruned` list. `daemon list --root runs
 [--json] [--state ready|stale|...]` reports every daemon directory with its
 recorded state, daemon/QEMU PID liveness, kernel/state config and artifact
-counters (`command_log_bytes`, `screenshot_count`) without contacting the
-sockets; a ready/starting record whose daemon process is gone
+counters (`command_log_bytes`, `screenshot_count`) and stored caps
+(`command_log_max`, `screenshot_keep`, `exec_output_max`) without contacting
+the sockets; a ready/starting record whose daemon process is gone
 is marked `STALE` (JSON `stale: true`), and `--fail-stale` makes the
 command exit 1 when any entry is stale (useful in scripts/doctor-like checks).
 `daemon status` includes the active `command_log_max`, `screenshot_keep` and

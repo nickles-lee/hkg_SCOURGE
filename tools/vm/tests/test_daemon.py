@@ -36,7 +36,9 @@ class DaemonTests(unittest.TestCase):
         daemon.write_status(ready, {'state': 'ready', 'daemon_pid': os.getpid(),
                                     'qemu_pid': 99999999})
         (ready / 'config.json').write_text(json.dumps(
-            {'kernel_target': 'compat', 'state': '/tmp/state'}))
+            {'kernel_target': 'compat', 'state': '/tmp/state',
+             'command_log_max': 111, 'screenshot_keep': 2,
+             'exec_output_max': 333}))
         (ready / 'daemon-commands.log').write_bytes(b'abcde')
         (ready / 'screenshot-1.png').write_bytes(b'png')
         stopped = self.root / 'd2'
@@ -49,6 +51,9 @@ class DaemonTests(unittest.TestCase):
         self.assertEqual(rows['d1']['state_dir'], '/tmp/state')
         self.assertEqual(rows['d1']['command_log_bytes'], 5)
         self.assertEqual(rows['d1']['screenshot_count'], 1)
+        self.assertEqual(rows['d1']['command_log_max'], 111)
+        self.assertEqual(rows['d1']['screenshot_keep'], 2)
+        self.assertEqual(rows['d1']['exec_output_max'], 333)
         self.assertFalse(rows['d1']['daemon_alive'])
         self.assertFalse(rows['d1']['qemu_alive'])
         self.assertTrue(rows['d1']['stale'])

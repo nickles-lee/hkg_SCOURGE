@@ -1182,6 +1182,9 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertTrue(rows[0]['qemu_alive'])
                 self.assertFalse(rows[0]['stale'])
                 self.assertEqual(rows[0]['kernel'], 'vendor')
+                self.assertEqual(rows[0]['command_log_max'], 1024 * 1024)
+                self.assertEqual(rows[0]['screenshot_keep'], 10)
+                self.assertEqual(rows[0]['exec_output_max'], 1024 * 1024)
                 ready = cli('list', '--root', str(root), '--json',
                             '--state', 'ready')
                 self.assertEqual(len(json.loads(ready.stdout)), 1)
