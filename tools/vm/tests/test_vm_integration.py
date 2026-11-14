@@ -164,6 +164,33 @@ class VMIntegrationTests(unittest.TestCase):
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
 
+    def test_daemon_rejects_state_backing_mismatch(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-mismatch-') as tmp:
+            root = Path(tmp)
+            state = root / 'state'
+            state.mkdir()
+            daemon_dir = root / 'daemon'
+            wrong = root / 'wrong.raw'
+            wrong.write_bytes(b'\0' * 1024 * 1024)
+            subprocess.run(
+                ['qemu-img', 'create', '-f', 'qcow2', '-F', 'raw',
+                 '-b', str(wrong), str(state / 'rootfs.qcow2')],
+                check=True, capture_output=True)
+
+            completed = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', 'start',
+                 '--daemon-dir', str(daemon_dir), '--state', str(state),
+                 '--ready-timeout', '30', '--lock-timeout', '30'],
+                cwd=VM, capture_output=True, text=True, timeout=120)
+            combined = completed.stdout + completed.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertNotEqual(completed.returncode, 0, combined)
+            self.assertIn('backing mismatch', combined)
+            status = json.loads((daemon_dir / 'status.json').read_text())
+            self.assertEqual(status['state'], 'error')
+            self.assertNotIn('qemu_pid', status)
+
     def test_daemon_screenshot_outside_dir_rejected(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-outside-') as tmp:
             root = Path(tmp)

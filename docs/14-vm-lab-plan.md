@@ -696,5 +696,8 @@ items beyond that.
 - **2026-11-14 — compat benchmark integration**: real `--kernel compat` run,
   schema/PASS/metrics assertions. Real run PASS (4.1 s). 303 tests (34
   skipped); 104 VM commits.
+- **2026-11-14 — daemon state-backing integrity**: wrong backing rejected
+  before QEMU; error status has no QEMU. Real run PASS (0.3 s). 304 tests
+  (35 skipped); 105 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

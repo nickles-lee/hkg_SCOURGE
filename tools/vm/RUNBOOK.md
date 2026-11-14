@@ -212,7 +212,8 @@ both QMP key (`a`) and absolute tablet click input without disturbing the
 guest. A duplicate `daemon start` must fail with "daemon already running"
 without disturbing the active daemon. A direct screenshot request with an
 output path outside the daemon directory is rejected and leaves the VM
-healthy. A stale control socket is detected in about
+healthy. A persistent overlay whose backing does not match the expected
+image is rejected as a "backing mismatch" before QEMU starts. A stale control socket is detected in about
 0.5 s: status reports `reachable:false`, `exec` fails with a control-socket
 diagnostic, and a clean restart succeeds after the stale daemon exits.
 
