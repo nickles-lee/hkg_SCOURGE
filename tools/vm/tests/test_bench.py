@@ -215,6 +215,21 @@ class BenchTests(unittest.TestCase):
             self.assertFalse(report['ok'])
             self.assertTrue(report['baseline_problems'])
 
+    def test_compare_source_mismatch(self) -> None:
+        base = bench_doc(summary={'k': {'count': 1, 'mean': 10.0,
+                                        'median': 10.0, 'min': 10.0, 'max': 10.0}},
+                         source={'git_head': 'a' * 40, 'dirty': False})
+        current = bench_doc(summary={'k': {'count': 1, 'mean': 10.0,
+                                           'median': 10.0, 'min': 10.0, 'max': 10.0}},
+                            source={'git_head': 'b' * 40, 'dirty': False})
+        report = compare_bench(base, current)
+        self.assertFalse(report['source_match'])
+        self.assertIn('git_head differs', report['source_warning'])
+        self.assertTrue(report['ok'])
+        strict = compare_bench(base, current, require_source_match=True)
+        self.assertFalse(strict['source_match'])
+        self.assertFalse(strict['ok'])
+
     def test_compare_cli_exit_codes(self) -> None:
         baseline = bench_doc({'boot cache=default pin=none': {'count': 1, 'mean': 10.0,
                                                               'median': 10.0, 'min': 10.0,
@@ -273,6 +288,7 @@ class BenchTests(unittest.TestCase):
         self.assertIn('--kernel', completed.stdout)
         self.assertIn('--compare', completed.stdout)
         self.assertIn('--metric', completed.stdout)
+        self.assertIn('--require-source-match', completed.stdout)
         self.assertIn('--warmup', completed.stdout)
 
 

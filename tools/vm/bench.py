@@ -123,7 +123,8 @@ def metric_summary(document: dict, metric: str) -> dict:
 
 def compare_bench(baseline: dict, current: dict,
                   threshold: float = 0.05,
-                  metric: str = 'boot_seconds') -> dict:
+                  metric: str = 'boot_seconds',
+                  require_source_match: bool = False) -> dict:
     """Compare two bench.json documents; regression is relative mean growth."""
     left = metric_summary(baseline, metric)
     right = metric_summary(current, metric)
@@ -151,11 +152,22 @@ def compare_bench(baseline: dict, current: dict,
                 status = 'SAME'
             row['status'] = status
         rows.append(row)
+    baseline_head = (baseline.get('source') or {}).get('git_head')
+    current_head = (current.get('source') or {}).get('git_head')
+    source_match = (not baseline_head or not current_head
+                    or baseline_head == current_head)
+    source_warning = None
+    if not source_match:
+        source_warning = (f'source git_head differs: {baseline_head} != {current_head}')
     report = {
-        'ok': bool(rows) and all(
-            row['status'] not in ('REGRESSED', 'MISSING') for row in rows),
+        'ok': (bool(rows) and all(
+            row['status'] not in ('REGRESSED', 'MISSING') for row in rows)
+            and (source_match or not require_source_match)),
         'threshold': threshold,
         'metric': metric,
+        'source_match': source_match,
+        'source_warning': source_warning,
+        'require_source_match': require_source_match,
         'baseline': baseline.get('run') or baseline.get('bench_id'),
         'current': current.get('run') or current.get('bench_id'),
         'baseline_source': baseline.get('source'),
@@ -183,6 +195,8 @@ def main() -> int:
     parser.add_argument('--metric', choices=('boot', 'readiness', 'scenario'),
                         default='boot',
                         help='metric for --compare (default boot)')
+    parser.add_argument('--require-source-match', action='store_true',
+                        help='fail --compare when git_head provenance differs')
     parser.add_argument('--scenario', action='append', default=[],
                         help='scenario to benchmark (repeatable; default boot)')
     parser.add_argument('--profile', choices=('research', 'conformance'),
@@ -235,7 +249,8 @@ def main() -> int:
             return 2
         metric = {'boot': 'boot_seconds', 'readiness': 'readiness_seconds',
                   'scenario': 'scenario_seconds'}[args.metric]
-        report = compare_bench(baseline, current, args.threshold, metric)
+        report = compare_bench(baseline, current, args.threshold, metric,
+                               args.require_source_match)
         report['baseline'] = report['baseline'] or str(args.compare[0])
         report['current'] = report['current'] or str(args.compare[1])
         print(json.dumps(report, indent=2))

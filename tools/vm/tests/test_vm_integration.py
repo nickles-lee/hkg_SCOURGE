@@ -1373,10 +1373,10 @@ class VMIntegrationTests(unittest.TestCase):
             self.assertTrue(path.is_file())
             return path
 
-        def compare(left, right, threshold):
+        def compare(left, right, threshold, *extra):
             completed = subprocess.run(
                 [sys.executable, '-B', str(VM / 'bench.py'), '--compare',
-                 str(left), str(right), '--threshold', str(threshold)],
+                 str(left), str(right), '--threshold', str(threshold), *extra],
                 cwd=VM, capture_output=True, text=True, timeout=60)
             self.assertIn(completed.returncode, (0, 1), completed.stderr)
             return completed.returncode, json.loads(completed.stdout)
@@ -1384,6 +1384,7 @@ class VMIntegrationTests(unittest.TestCase):
         first = bench()
         second = bench()
         mutated = second.with_name('mutated-bench.json')
+        source_bad = second.with_name('source-mismatch-bench.json')
         try:
             rc, report = compare(first, first, 0.0)
             self.assertEqual(rc, 0)
@@ -1393,6 +1394,18 @@ class VMIntegrationTests(unittest.TestCase):
             rc, report = compare(first, second, 10.0)
             self.assertEqual(rc, 0)
             self.assertTrue(report['ok'])
+            self.assertTrue(report['source_match'])
+
+            source_data = json.loads(second.read_text())
+            source_data['source']['git_head'] = '0' * 40
+            source_bad.write_text(json.dumps(source_data, indent=2) + '\n')
+            rc, report = compare(first, source_bad, 10.0)
+            self.assertEqual(rc, 0)
+            self.assertFalse(report['source_match'])
+            rc, report = compare(first, source_bad, 10.0,
+                                 '--require-source-match')
+            self.assertEqual(rc, 1)
+            self.assertFalse(report['ok'])
 
             data = json.loads(second.read_text())
             for summary in data['summary'].values():
@@ -1408,6 +1421,7 @@ class VMIntegrationTests(unittest.TestCase):
                                 for row in report['rows']))
         finally:
             mutated.unlink(missing_ok=True)
+            source_bad.unlink(missing_ok=True)
             for path in (first, second):
                 shutil.rmtree(path.parent, ignore_errors=True)
 

@@ -269,8 +269,10 @@ The opt-in VM suite (`IONIQ_RUN_VM_TESTS=1`) runs two real boot benchmarks,
 checks a self-comparison is `SAME`/rc=0, a permissive real comparison is rc=0,
 and a mean-doubled candidate is `REGRESSED`/rc=1.
 
-`compare` prints per-key `SAME`/`IMPROVED`/`REGRESSED`/`MISSING` rows and
-exits 1 for a regression or a missing key; malformed benchmark documents are
+`compare` also reports `source_match`/`source_warning` from the recorded
+`git_head`; add `--require-source-match` to fail a cross-revision comparison.
+It prints per-key `SAME`/`IMPROVED`/`REGRESSED`/`MISSING` rows and exits 1 for
+a regression or a missing key; malformed benchmark documents are
 rejected with exit 2 and per-document problems. New `bench.json` files carry
 `schema_version: 1` and are validated before comparison and after writing.
 `bench.json` records `metrics` for

@@ -727,5 +727,8 @@ items beyond that.
 - **2026-11-14 — daemon screenshot copy failure**: failed copy cleans the
   capture and reports a clear error; daemon remains healthy. Real run PASS
   (6.7 s). 313 tests (44 skipped); 114 VM commits.
+- **2026-11-14 — benchmark source-mismatch diagnostics**: compare reports
+  git_head match/warning and optional strict failure. Real two-boot test
+  PASS (11.7 s). 314 tests (44 skipped); 115 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
