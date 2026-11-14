@@ -779,5 +779,8 @@ items beyond that.
 - **2026-11-14 — benchmark matrix validation**: matrix CPUs checked against
   affinity before the lock; duplicate variants collapsed; invalid CPU exits 2
   with no bench dir. 331 tests; 131 VM commits.
+- **2026-11-14 — verdict/rc consistency**: schema enforces PASS/DRY-RUN rc 0,
+  BLOCKED rc 77 + blockers, FAIL nonzero rc; corpus clean. 332 tests; 132 VM
+  commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

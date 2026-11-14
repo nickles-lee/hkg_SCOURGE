@@ -44,8 +44,23 @@ def validate_result(result) -> list[str]:
     verdict = result.get('verdict')
     if verdict not in VERDICTS:
         problems.append(f'verdict must be one of {sorted(VERDICTS)}')
-    if not _is_int(result.get('rc')):
+    rc = result.get('rc')
+    if not _is_int(rc):
         problems.append('rc must be an integer')
+    elif verdict in ('PASS', 'DRY-RUN') and rc != 0:
+        problems.append(f'{verdict} requires rc == 0')
+    elif verdict == 'BLOCKED' and rc != 77:
+        problems.append('BLOCKED requires rc == 77')
+    elif verdict == 'FAIL' and rc == 0:
+        problems.append('FAIL requires a nonzero rc')
+    blockers = result.get('blockers')
+    if verdict == 'BLOCKED':
+        if (not isinstance(blockers, list) or not blockers
+                or any(not isinstance(item, str) or not item
+                       for item in blockers)):
+            problems.append('BLOCKED requires a non-empty blockers list')
+    elif blockers is not None and not isinstance(blockers, list):
+        problems.append('blockers must be a list')
     timeout = result.get('timeout')
     if not _is_number(timeout) or timeout <= 0:
         problems.append('timeout must be a positive finite number')

@@ -60,6 +60,21 @@ class ResultSchemaTests(unittest.TestCase):
                          'dry_run', 'pin_cpu', 'lock', 'failure_bundle'):
             self.assertIn(expected, problems)
 
+    def test_verdict_rc_consistency(self) -> None:
+        cases = [
+            (valid_result(verdict='PASS', rc=1), 'PASS requires rc == 0'),
+            (valid_result(verdict='DRY-RUN', rc=1), 'DRY-RUN requires rc == 0'),
+            (valid_result(verdict='BLOCKED', rc=1), 'BLOCKED requires rc == 77'),
+            (valid_result(verdict='FAIL', rc=0), 'FAIL requires a nonzero rc'),
+            (valid_result(verdict='BLOCKED', rc=77, blockers=[]),
+             'BLOCKED requires a non-empty blockers list'),
+        ]
+        for data, expected in cases:
+            self.assertIn(expected, '\n'.join(validate_result(data)))
+        self.assertEqual(validate_result(
+            valid_result(verdict='BLOCKED', rc=77, blockers=['needs hardware'])), [])
+        self.assertEqual(validate_result(valid_result(verdict='FAIL', rc=3)), [])
+
     def test_legacy_state(self) -> None:
         data = valid_result(schema_version=2)
         self.assertEqual(schema_state(data, validate_result(data)), 'legacy')

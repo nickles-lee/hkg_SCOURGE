@@ -121,7 +121,9 @@ overlays there) and, by default, skip any directory without `result.json`
 (regression bundles, interrupted runs). `--allow-no-result` opts those in.
 
 `check-run` validates the result core schema (`schema_version`, verdict, rc,
-timings, images/overlays, checks, lock/pin and related fields).
+timings, images/overlays, checks, lock/pin and related fields), including
+verdict/rc consistency: PASS/DRY-RUN require rc 0, BLOCKED requires rc 77 and
+blockers, FAIL requires a nonzero rc.
 `check-run --all` scans every run result and reports `valid`, `legacy`,
 `invalid` and result-less dirs, exiting 1 only when a current-schema result is
 invalid/unreadable. `list --json` includes `schema_state`/`schema_ok`/
