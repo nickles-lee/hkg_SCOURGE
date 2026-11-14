@@ -1595,9 +1595,11 @@ def main() -> int:
     check_bench.add_argument('--root', type=Path, default=None,
                              help='bench root for --all (default: runs/)')
     check_scenario = sub.add_parser('check-scenario',
-                                    help='validate one scenario JSON contract')
-    check_scenario.add_argument('scenario',
+                                    help='validate scenario JSON contracts')
+    check_scenario.add_argument('scenario', nargs='?',
                                 help='registered scenario name or JSON path')
+    check_scenario.add_argument('--all', action='store_true',
+                                help='validate every registered scenario')
     check_profile = sub.add_parser('check-profile',
                                    help='validate one profile JSON contract')
     check_profile.add_argument('profile',
@@ -2005,6 +2007,14 @@ def main() -> int:
         }, indent=2))
         return 0 if not problems else 1
     if args.action == 'check-scenario':
+        if args.all and args.scenario:
+            ap.error('check-scenario accepts a scenario or --all, not both')
+        if args.all:
+            report = scenario_state(VM)
+            print(json.dumps(report, indent=2))
+            return 0 if report['ok'] else 1
+        if not args.scenario:
+            ap.error('check-scenario requires a scenario or --all')
         value = args.scenario
         path = Path(value)
         if path.is_file():

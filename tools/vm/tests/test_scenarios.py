@@ -107,6 +107,22 @@ class ScenarioContractTests(unittest.TestCase):
                           '\n'.join(state['problems']))
             self.assertEqual(state['unregistered'], ['extra'])
 
+    def test_check_scenario_all_cli(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, '-B', str(VM / 'launch.py'), 'check-scenario',
+             '--all'], cwd=VM, capture_output=True, text=True, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertTrue(report['ok'])
+        self.assertEqual(report['count'], len(SCENARIO_NAMES))
+        self.assertEqual(report['problems'], [])
+        conflict = subprocess.run(
+            [sys.executable, '-B', str(VM / 'launch.py'), 'check-scenario',
+             'boot', '--all'], cwd=VM, capture_output=True, text=True,
+            check=False)
+        self.assertEqual(conflict.returncode, 2)
+        self.assertIn('not both', conflict.stderr)
+
     def test_check_scenario_cli(self) -> None:
         good = subprocess.run(
             [sys.executable, '-B', str(VM / 'launch.py'), 'check-scenario',

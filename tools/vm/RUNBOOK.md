@@ -32,7 +32,7 @@ for the limits.
 including boot/exit markers, fail/removal metadata and numeric bounds, and
 both profiles (`profiles` check: workaround keys/booleans, conformance
 no-bypass, limitations). Validate one scenario or profile while editing with
-`launch.py check-scenario <name|path>` or
+`launch.py check-scenario <name|path>` (or `--all`) and
 `launch.py check-profile <name|path>` (JSON report, exit 0/1).
 
 ## Build basics
