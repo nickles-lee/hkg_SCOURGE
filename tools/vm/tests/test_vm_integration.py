@@ -163,6 +163,56 @@ class VMIntegrationTests(unittest.TestCase):
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
 
+    def test_daemon_screenshot_failure_diagnostics(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-shot-fail-') as tmp:
+            root = Path(tmp)
+            daemon_dir = root / 'daemon'
+            output = root / 'failed-shot.png'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=180)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            qemu_pid = None
+            try:
+                status = cli('status', '--daemon-dir', str(daemon_dir))
+                values = json.loads(status.stdout)
+                qemu_pid = values['qemu_pid']
+                qmp = daemon_dir / 'qmp.sock'
+                self.assertTrue(qmp.exists())
+                qmp.unlink()
+
+                captured = cli('screenshot', '--daemon-dir', str(daemon_dir),
+                               '--output', str(output))
+                self.assertNotEqual(captured.returncode, 0,
+                                    captured.stdout + captured.stderr)
+                self.assertIn('QMP', captured.stderr + captured.stdout)
+                self.assertFalse(output.exists())
+                self.assertEqual(list(daemon_dir.glob('screenshot-*.png')), [])
+
+                after = cli('status', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(after.returncode, 0, after.stderr)
+                current = json.loads(after.stdout)
+                self.assertEqual(current['state'], 'ready')
+                self.assertTrue(current['reachable'])
+                self.assertTrue(current['qemu_alive'])
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+            if qemu_pid:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and Path(f'/proc/{qemu_pid}').exists():
+                    time.sleep(0.1)
+                self.assertFalse(Path(f'/proc/{qemu_pid}').exists())
+
     def test_daemon_screenshot_artifact(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-shot-') as tmp:
             root = Path(tmp)

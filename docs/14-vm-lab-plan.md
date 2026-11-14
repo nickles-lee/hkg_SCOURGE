@@ -648,5 +648,9 @@ items beyond that.
 - **2026-11-14 — daemon screenshot artifact test**: capture through the
   daemon, validate PNG metadata/dimensions/size and copy cleanup; real run
   PASS (9.3 s). Cumulative 90 VM commits; 288 tests (20 skipped).
+- **2026-11-14 — daemon screenshot failure test**: unlink the daemon QMP
+  socket, require a QMP diagnostic/no artifact while the daemon remains
+  healthy, then stop and verify QEMU is gone. Real run PASS (23.0 s).
+  Cumulative 91 VM commits; 289 tests (21 skipped).
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

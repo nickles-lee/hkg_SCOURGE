@@ -191,7 +191,9 @@ opt-in test checks `daemon-commands.log`, `daemon console` serial output,
 `daemon status` (`reachable`, `qemu_alive`, `serial_bytes`, held lock) and
 guest exit-code propagation through `exec`. A third test captures a daemon
 screenshot, validates PNG dimensions/size/metadata, confirms the daemon-dir
-capture was unlinked after the CLI copy, and stops the daemon.
+capture was unlinked after the CLI copy, and stops the daemon. Another test
+unlinks the daemon QMP socket, requires the screenshot command to fail with a
+QMP diagnostic and no artifact, then stops the daemon and checks QEMU is gone.
 
 `--cache` selects the non-persistent qcow2 mode (`writeback` default;
 `directsync` is pathological on this host). Persistent state always forces
