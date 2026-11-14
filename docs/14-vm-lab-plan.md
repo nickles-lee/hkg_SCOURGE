@@ -748,5 +748,8 @@ items beyond that.
 - **2026-11-14 — matrix+warmup benchmark**: two variants with warmup and
   measured PASS rows, schema and metrics validated. Real run PASS (25.8 s).
   318 tests (48 skipped); 121 VM commits.
+- **2026-11-14 — one-shot state-backing mismatch**: wrong backing fails
+  before QEMU; result FAIL/no qemu_pid. Real run PASS (0.1 s). 319 tests
+  (49 skipped); 122 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

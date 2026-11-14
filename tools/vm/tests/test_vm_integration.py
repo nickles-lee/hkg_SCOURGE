@@ -637,6 +637,33 @@ class VMIntegrationTests(unittest.TestCase):
             finally:
                 cli('stop', '--daemon-dir', str(daemon_dir))
 
+    def test_run_state_backing_mismatch(self):
+        with tempfile.TemporaryDirectory(prefix='vm-run-mismatch-') as tmp:
+            root = Path(tmp)
+            state = root / 'state'
+            state.mkdir()
+            wrong = root / 'wrong.raw'
+            wrong.write_bytes(b'\0' * 1024 * 1024)
+            subprocess.run(
+                ['qemu-img', 'create', '-f', 'qcow2', '-F', 'raw',
+                 '-b', str(wrong), str(state / 'rootfs.qcow2')],
+                check=True, capture_output=True)
+
+            completed = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'run',
+                 '--state', str(state), '--cmd', 'true', '--timeout', '30'],
+                cwd=VM, capture_output=True, text=True, timeout=120)
+            combined = completed.stdout + completed.stderr
+            self.assertNotEqual(completed.returncode, 0, combined)
+            self.assertIn('backing mismatch', combined)
+            directory = next(Path(line[5:].strip())
+                             for line in completed.stdout.splitlines()
+                             if line.startswith('run: '))
+            result = json.loads((directory / 'result.json').read_text())
+            self.assertEqual(result['verdict'], 'FAIL')
+            self.assertIn('backing mismatch', result.get('error') or '')
+            self.assertNotIn('qemu_pid', result)
+
     def test_dry_run_state_lock_release(self):
         with tempfile.TemporaryDirectory(prefix='vm-dry-state-') as tmp:
             state = Path(tmp) / 'state'
