@@ -259,7 +259,22 @@ def start(config: dict, launch_path: Path, timeout: float = 180.0) -> dict:
                     f"daemon exited rc={process.returncode}: "
                     + _tail(daemon_dir / "daemon.log", 30))
             time.sleep(0.2)
-        raise TimeoutError("daemon did not become ready; see daemon.log")
+        # A daemon that never becomes ready must not keep QEMU or the boot
+        # lock alive. Reap it before reporting the timeout.
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(10)
+        status = read_status(daemon_dir)
+        message = ("daemon did not become ready "
+                   f"(state={status.get('state')}); see daemon.log")
+        tail = status.get("serial_tail")
+        if tail:
+            message += "\nserial tail:\n" + tail[-2000:]
+        raise TimeoutError(message)
 
 
 def stop(config_dir: Path, timeout: float = 20.0) -> dict:

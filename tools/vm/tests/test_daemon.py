@@ -190,6 +190,22 @@ class DaemonTests(unittest.TestCase):
         self.assertFalse(daemon.daemon_pid_matches(99999999))
         self.assertFalse(daemon.daemon_pid_matches(None))
 
+    def test_start_timeout_reaps_daemon(self) -> None:
+        script = self.root / 'fake-launch.py'
+        script.write_text(
+            'import os, sys, time\n'
+            'from pathlib import Path\n'
+            'config = Path(sys.argv[sys.argv.index("--config") + 1])\n'
+            'config.with_name("fake.pid").write_text(str(os.getpid()))\n'
+            'time.sleep(60)\n')
+        daemon_dir = self.root / 'daemon'
+        started = time.monotonic()
+        with self.assertRaisesRegex(TimeoutError, 'did not become ready'):
+            daemon.start({'daemon_dir': str(daemon_dir)}, script, timeout=0.6)
+        self.assertLess(time.monotonic() - started, 5)
+        pid = int((daemon_dir / 'fake.pid').read_text())
+        self.assertFalse(daemon.pid_alive(pid))
+
     def test_prune_screenshots_keeps_newest(self) -> None:
         for index in range(4):
             path = self.root / f'screenshot-{index}.png'

@@ -563,6 +563,7 @@ equivalence.
 | QMP screendump failure | result is FAIL with `screenshot.qmp_error`; QEMU/overlays are cleaned and the CLI exit code follows the final verdict |
 | `daemon exec`/`screenshot` failure | prints a single `ERROR:` line (no argparse usage dump) and exits 1 |
 | `daemon exec --timeout` invalid | rejected up front (`finite and positive`) before contacting the daemon |
+| `daemon did not become ready` | the spawned daemon is terminated and reaped before the error is raised, so QEMU/lock ownership are not orphaned |
 | failed run bundle seems slow | bundle collection is capped at 45 s total; guest-output and serial tails are written even if the shell is wedged; `--no-failure-bundle` skips collection entirely |
 | flat `entropy-ready` FAIL | known issue; run with `--storage split` or read `known_issue` |
 | `updater-launch` timeout | use `--timeout 540` or `600`; the scenario waits for a log line |

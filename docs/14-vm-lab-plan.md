@@ -853,5 +853,8 @@ items beyond that.
 - **2026-11-14 — regression summary diagnostics**: suite rows carry
   guest_rc/error/failures/checks; real two-scenario suite PASS. 361 tests;
   161 VM commits.
+- **2026-11-14 — daemon start timeout reaping**: failed readiness terminates
+  and reaps the child; PID test + normal start/exec/stop re-verified. 362
+  tests; 162 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
