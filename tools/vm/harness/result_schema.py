@@ -163,11 +163,19 @@ def validate_result(result) -> list[str]:
 
 
 def validate_file(path: Path) -> tuple[dict | None, list[str]]:
+    path = Path(path)
     try:
-        data = json.loads(Path(path).read_text())
+        data = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         return None, [f'cannot read result: {exc}']
-    return data, validate_result(data)
+    problems = validate_result(data)
+    if isinstance(data, dict) and data.get('schema_version') == CURRENT_SCHEMA:
+        expected = str(path.parent.resolve())
+        if data.get('run_dir') != expected:
+            problems.append(
+                'run_dir does not match result directory: '
+                f'{data.get("run_dir")!r} != {expected!r}')
+    return data, problems
 
 
 def schema_state(result: dict | None, problems: list[str]) -> str:

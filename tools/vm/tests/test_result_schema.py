@@ -12,7 +12,8 @@ import unittest
 from pathlib import Path
 
 from harness import runs
-from harness.result_schema import check_all_results, schema_state, validate_result
+from harness.result_schema import (check_all_results, schema_state,
+                                   validate_file, validate_result)
 
 VM = Path(__file__).resolve().parents[1]
 
@@ -107,6 +108,20 @@ class ResultSchemaTests(unittest.TestCase):
             valid_result(verdict='BLOCKED', rc=77, blockers=['needs hardware'])), [])
         self.assertEqual(validate_result(valid_result(verdict='FAIL', rc=3)), [])
 
+    def test_run_dir_mismatch_detected(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='vm-schema-dir-') as tmp:
+            run = Path(tmp) / 'run'
+            run.mkdir()
+            result_file = run / 'result.json'
+            result_file.write_text(json.dumps(
+                valid_result(run_dir='/tmp/elsewhere')))
+            _, problems = validate_file(result_file)
+            self.assertTrue(any('run_dir does not match' in problem
+                                for problem in problems))
+            result_file.write_text(json.dumps(
+                valid_result(run_dir=str(run.resolve()))))
+            self.assertEqual(validate_file(result_file)[1], [])
+
     def test_legacy_state(self) -> None:
         data = valid_result(schema_version=2)
         self.assertEqual(schema_state(data, validate_result(data)), 'legacy')
@@ -117,7 +132,7 @@ class ResultSchemaTests(unittest.TestCase):
             root = Path(tmp)
             run = root / 'runs' / 'valid'
             run.mkdir(parents=True)
-            (run / 'result.json').write_text(json.dumps(valid_result()))
+            (run / 'result.json').write_text(json.dumps(valid_result(run_dir=str(run))))
             missing = root / 'runs' / 'missing'
             missing.mkdir()
             rows = {item['run']: item for item in runs.collect_runs(root)}
@@ -131,12 +146,13 @@ class ResultSchemaTests(unittest.TestCase):
             root = Path(tmp)
             runs_root = root / 'runs'
             runs_root.mkdir()
-            for name, data in (
-                    ('valid', valid_result()),
-                    ('legacy', valid_result(schema_version=2)),
-                    ('invalid', valid_result(verdict='BAD'))):
+            for name, overrides in (
+                    ('valid', {}),
+                    ('legacy', {'schema_version': 2}),
+                    ('invalid', {'verdict': 'BAD'})):
                 path = runs_root / name
                 path.mkdir()
+                data = valid_result(run_dir=str(path), **overrides)
                 (path / 'result.json').write_text(json.dumps(data))
             (runs_root / 'missing').mkdir()
             report = check_all_results(root)
@@ -160,7 +176,7 @@ class ResultSchemaTests(unittest.TestCase):
             (legacy_dir / 'result.json').write_text(
                 json.dumps(valid_result(schema_version=2)))
             (invalid_dir / 'result.json').write_text(
-                json.dumps(valid_result(verdict='BAD')))
+                json.dumps(valid_result(run_dir=str(invalid_dir), verdict='BAD')))
             legacy = subprocess.run(
                 [sys.executable, '-B', str(VM / 'launch.py'), 'list',
                  '--schema', 'legacy', '--json', '--limit', '200'],
@@ -185,7 +201,8 @@ class ResultSchemaTests(unittest.TestCase):
         run_dir = VM / 'runs' / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         try:
-            (run_dir / 'result.json').write_text(json.dumps(valid_result()))
+            (run_dir / 'result.json').write_text(
+                json.dumps(valid_result(run_dir=str(run_dir))))
             good = subprocess.run(
                 [sys.executable, '-B', str(VM / 'launch.py'), 'check-run', run_id],
                 cwd=VM, capture_output=True, text=True, check=False)
@@ -196,7 +213,8 @@ class ResultSchemaTests(unittest.TestCase):
                  '--strict'], cwd=VM, capture_output=True, text=True, check=False)
             self.assertEqual(show.returncode, 0, show.stderr)
             self.assertIn('schema: ok', show.stderr)
-            (run_dir / 'result.json').write_text(json.dumps(valid_result(verdict='BAD')))
+            (run_dir / 'result.json').write_text(
+                json.dumps(valid_result(run_dir=str(run_dir), verdict='BAD')))
             bad = subprocess.run(
                 [sys.executable, '-B', str(VM / 'launch.py'), 'check-run', run_id],
                 cwd=VM, capture_output=True, text=True, check=False)
