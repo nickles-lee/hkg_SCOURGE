@@ -47,7 +47,9 @@ class DaemonTests(unittest.TestCase):
         self.assertEqual(rows['d1']['state_dir'], '/tmp/state')
         self.assertFalse(rows['d1']['daemon_alive'])
         self.assertFalse(rows['d1']['qemu_alive'])
+        self.assertTrue(rows['d1']['stale'])
         self.assertEqual(rows['d2']['state'], 'stopped')
+        self.assertFalse(rows['d2']['stale'])
         self.assertEqual(daemon.list_daemons(self.root / 'missing'), [])
 
     def test_console_clamps_line_count(self) -> None:

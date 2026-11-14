@@ -1760,10 +1760,11 @@ def main() -> int:
                 print(json.dumps(rows, indent=2))
             else:
                 for row in rows:
+                    marker = ' STALE' if row['stale'] else ''
                     print(f"{row['dir']} {row['state'] or 'unknown':8} "
                           f"daemon={'alive' if row['daemon_alive'] else 'dead':5} "
                           f"qemu={'alive' if row['qemu_alive'] else 'dead':5} "
-                          f"kernel={row['kernel'] or '?'}")
+                          f"kernel={row['kernel'] or '?'}{marker}")
             return 0
         daemon_dir = args.daemon_dir.resolve()
         if args.daemon_action == 'start':

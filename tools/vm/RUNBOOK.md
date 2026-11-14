@@ -188,7 +188,8 @@ The daemon keeps the QEMU process, serial reader, QMP socket and state lock
 alive; `exec`/`screenshot` use a control socket in `runs/daemon/`.
 `daemon list --root runs [--json]` reports every daemon directory with its
 recorded state, daemon/QEMU PID liveness and kernel/state config without
-contacting the sockets. `daemon restart` stops and starts again from the
+contacting the sockets; a ready/starting record whose daemon process is gone
+is marked `STALE` (JSON `stale: true`). `daemon restart` stops and starts again from the
 stored `config.json` (kernel, state, devices, cache, lock and pin settings). Add `--reset` to
 discard persistent state overlays; it requires a daemon started with
 `--state`. A failed

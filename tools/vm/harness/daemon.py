@@ -135,13 +135,16 @@ def list_daemons(root: Path) -> list[dict]:
             config = {}
         daemon_pid = status.get("daemon_pid")
         qemu_pid = status.get("qemu_pid")
+        daemon_alive = bool(daemon_pid and daemon_pid_matches(daemon_pid, path))
+        state = status.get("state")
         rows.append({
             "dir": str(path),
-            "state": status.get("state"),
+            "state": state,
             "daemon_pid": daemon_pid,
-            "daemon_alive": bool(daemon_pid and daemon_pid_matches(daemon_pid, path)),
+            "daemon_alive": daemon_alive,
             "qemu_pid": qemu_pid,
             "qemu_alive": bool(qemu_pid and pid_alive(qemu_pid)),
+            "stale": state in ("starting", "ready") and not daemon_alive,
             "kernel": config.get("kernel_target"),
             "state_dir": config.get("state"),
         })

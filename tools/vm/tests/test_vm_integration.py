@@ -965,6 +965,7 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertEqual(rows[0]['state'], 'ready')
                 self.assertTrue(rows[0]['daemon_alive'])
                 self.assertTrue(rows[0]['qemu_alive'])
+                self.assertFalse(rows[0]['stale'])
                 self.assertEqual(rows[0]['kernel'], 'vendor')
             finally:
                 stopped = cli('stop', '--daemon-dir', str(daemon_dir))
