@@ -795,5 +795,8 @@ items beyond that.
 - **2026-11-14 — daemon control protocol robustness**: unknown
   action/malformed JSON rejected without disturbing the daemon. 334 tests;
   137 VM commits.
+- **2026-11-14 — scenario metadata validation**: boot/exit markers,
+  expected_fail, power-loss/USB-removal metadata and numeric bounds checked;
+  25 scenarios valid. 334 tests; 138 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

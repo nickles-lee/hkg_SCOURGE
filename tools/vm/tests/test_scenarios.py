@@ -44,6 +44,10 @@ class ScenarioContractTests(unittest.TestCase):
                 requires_storage='raid', storage_size={'update': 0},
                 known_issue={'probe': 'probes/notes.md'},
                 init_override='/init', boot_marker=None,
+                expect_qemu_exit='yes', expected_fail=[],
+                power_loss={'marker': '', 'delay': -1},
+                usb_removal={}, settle_seconds=-1,
+                requires_visible_frame='yes',
                 systemd_transition={'required_markers': {}, 'ordering': {}})
             problems = validate_scenario('sample', data, Path(tmp))
             joined = '\n'.join(problems)
@@ -52,7 +56,12 @@ class ScenarioContractTests(unittest.TestCase):
                              'blockers keys', 'requires_storage',
                              'storage_size', 'excluded from the public sync',
                              'requires boot_marker', 'required_markers',
-                             'ordering requires'):
+                             'ordering requires', 'expect_qemu_exit must be boolean',
+                             'expect_qemu_exit requires',
+                             'expected_fail must be boolean',
+                             'power_loss.marker', 'power_loss.delay',
+                             'usb_removal.marker', 'usb_removal.device_id',
+                             'settle_seconds', 'requires_visible_frame'):
                 self.assertIn(expected, joined)
 
     def test_runbook_probe_accepts_both_layouts(self) -> None:

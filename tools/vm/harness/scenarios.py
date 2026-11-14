@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 from .config import SCENARIO_NAMES
@@ -63,6 +64,47 @@ def validate_scenario(name: str, data: dict, vm_dir: Path) -> list[str]:
     elif any(not isinstance(value, int) or not 16 <= value <= 8192
              for value in sizes.values()):
         problems.append('storage_size values must be integers in 16..8192 MiB')
+    boot_marker = data.get('boot_marker')
+    if boot_marker is not None and (not isinstance(boot_marker, str)
+                                    or not boot_marker.strip()):
+        problems.append('boot_marker must be a non-empty string')
+    for flag in ('expect_qemu_exit', 'requires_visible_frame', 'requires_share'):
+        if flag in data and not isinstance(data[flag], bool):
+            problems.append(f'{flag} must be boolean')
+    if data.get('expect_qemu_exit'):
+        for field in ('expect_qemu_exit_marker', 'expect_qemu_exit_check'):
+            value = data.get(field)
+            if not isinstance(value, str) or not value:
+                problems.append(f'expect_qemu_exit requires {field}')
+    expected_fail = data.get('expected_fail')
+    if expected_fail is not None and not (
+            isinstance(expected_fail, bool)
+            or (isinstance(expected_fail, dict) and expected_fail)):
+        problems.append('expected_fail must be boolean or a non-empty object')
+    for name in ('power_loss', 'usb_removal'):
+        value = data.get(name)
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            problems.append(f'{name} must be an object')
+            continue
+        marker = value.get('marker')
+        if not isinstance(marker, str) or not marker:
+            problems.append(f'{name}.marker must be a non-empty string')
+        delay = value.get('delay')
+        if delay is not None and (
+                not isinstance(delay, (int, float)) or isinstance(delay, bool)
+                or not math.isfinite(delay) or delay < 0):
+            problems.append(f'{name}.delay must be a non-negative finite number')
+        if name == 'usb_removal':
+            device = value.get('device_id')
+            if not isinstance(device, str) or not device:
+                problems.append('usb_removal.device_id must be a non-empty string')
+    settle = data.get('settle_seconds')
+    if settle is not None and (
+            not isinstance(settle, (int, float)) or isinstance(settle, bool)
+            or not math.isfinite(settle) or settle < 0):
+        problems.append('settle_seconds must be a non-negative finite number')
     known = data.get('known_issue') or {}
     if known:
         if not isinstance(known, dict):
