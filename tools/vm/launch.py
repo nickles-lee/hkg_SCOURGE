@@ -1872,6 +1872,8 @@ def main() -> int:
             print(json.dumps(status, indent=2))
             return 0 if status.get('state') == 'stopped' else 1
         if args.daemon_action == 'exec':
+            if not math.isfinite(args.timeout) or args.timeout <= 0:
+                ap.error('daemon exec timeout must be finite and positive')
             try:
                 response = daemon_mod.request(
                     daemon_dir, {'action': 'exec', 'cmd': args.cmd,

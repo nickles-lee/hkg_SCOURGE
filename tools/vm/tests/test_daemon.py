@@ -52,6 +52,17 @@ class DaemonTests(unittest.TestCase):
         self.assertFalse(rows['d2']['stale'])
         self.assertEqual(daemon.list_daemons(self.root / 'missing'), [])
 
+    def test_exec_rejects_invalid_timeout(self) -> None:
+        for value in ('0', '-1', 'nan', 'inf'):
+            completed = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', 'exec',
+                 '--daemon-dir', str(self.root), '--cmd', 'true',
+                 '--timeout', value],
+                cwd=VM, capture_output=True, text=True, check=False)
+            self.assertEqual(completed.returncode, 2, completed.stderr)
+            self.assertIn('timeout must be finite and positive',
+                          completed.stderr)
+
     def test_daemon_list_fail_stale_cli(self) -> None:
         stale_root = self.root / 'stale-root'
         stale = stale_root / 'daemon'
