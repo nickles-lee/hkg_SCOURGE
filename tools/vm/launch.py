@@ -63,7 +63,8 @@ from harness.visual import baseline as visual_baseline
 from harness.visual import compare as visual_compare
 from harness.visual import list_baselines
 from harness.result_schema import (check_all_bench, check_all_results,
-                                   schema_state, validate_file, validate_result)
+                                   schema_state, validate_bench, validate_file,
+                                   validate_result)
 from harness.results import evaluate, evaluate_systemd_transition, phase_summary
 from harness.scenarios import scenario_state
 from harness.storage import VOLUMES, cleanup_storage, create_storage, mount_script, parse_sizes
@@ -1576,6 +1577,9 @@ def main() -> int:
     check.add_argument('run', nargs='?')
     check.add_argument('--all', action='store_true',
                        help='validate every run result under runs/')
+    check_bench = sub.add_parser('check-bench',
+                                 help='validate a bench directory or bench.json')
+    check_bench.add_argument('path', type=Path)
     extract = sub.add_parser('extract', help='copy an artifact out of a run')
     extract.add_argument('run')
     extract.add_argument('member')
@@ -1965,6 +1969,20 @@ def main() -> int:
             'schema_version': (data or {}).get('schema_version'),
             'problems': problems,
         }, indent=2))
+        return 0 if not problems else 1
+    if args.action == 'check-bench':
+        path = args.path
+        if path.is_dir():
+            path = path / 'bench.json'
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            print(json.dumps({'path': str(path), 'ok': False,
+                              'problems': [f'cannot read: {exc}']}, indent=2))
+            return 1
+        problems = validate_bench(data)
+        print(json.dumps({'path': str(path), 'ok': not problems,
+                          'problems': problems}, indent=2))
         return 0 if not problems else 1
     if args.action in ('show', 'extract'):
         run_path = VM / 'runs' / args.run / 'result.json'

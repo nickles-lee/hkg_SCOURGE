@@ -836,5 +836,7 @@ items beyond that.
   0/-1/nan/inf rejected up front. 350 tests; 153 VM commits.
 - **2026-11-14 — bench compare accepts directories**: `--compare` takes
   bench dirs or JSON paths. 352 tests; 154 VM commits.
+- **2026-11-14 — check-bench**: per-document benchmark schema validation
+  CLI with JSON report and 0/1 exit. 353 tests; 155 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

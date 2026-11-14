@@ -202,6 +202,34 @@ class BenchTests(unittest.TestCase):
             file_path = root / 'bench.json'
             self.assertEqual(resolve_bench_arg(file_path), file_path)
 
+    def test_check_bench_cli(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='vm-check-bench-') as tmp:
+            root = Path(tmp)
+            good = root / 'good'
+            good.mkdir()
+            (good / 'bench.json').write_text(json.dumps(bench_doc()))
+            completed = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'check-bench',
+                 str(good)], capture_output=True, text=True, check=False)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(json.loads(completed.stdout)['ok'])
+
+            bad = root / 'bad'
+            bad.mkdir()
+            (bad / 'bench.json').write_text('{not json')
+            completed = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'check-bench',
+                 str(bad)], capture_output=True, text=True, check=False)
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn('cannot read', completed.stdout)
+
+            missing = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'check-bench',
+                 str(root / 'missing')], capture_output=True, text=True,
+                check=False)
+            self.assertEqual(missing.returncode, 1)
+            self.assertIn('cannot read', missing.stdout)
+
     def test_compare_cli_accepts_bench_directory(self) -> None:
         with tempfile.TemporaryDirectory(prefix='vm-bench-dir-') as tmp:
             root = Path(tmp)
