@@ -599,7 +599,8 @@ items beyond that.
   `daemon start` records `serial_tail`/`qemu_returncode` and surfaces the
   tail; `bench.py --matrix` compares cache modes and optional pinned CPUs
   with an unpinned baseline, accepts `--kernel vendor|compat`, and has a
-  failure-path test that still writes `bench.json`/exits 1. Four-cell smoke
-  PASS. 257 tests.
+  failure-path test that still writes `bench.json`/exits 1. `--compare`
+  flags relative mean regressions (demo +7.15% → REGRESSED, rc=1).
+  Four-cell smoke PASS. 260 tests.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

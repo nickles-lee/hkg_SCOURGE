@@ -197,6 +197,17 @@ log, and exits nonzero if any run does not PASS. `--matrix` compares
 select other combinations, and the unpinned baseline is always included.
 Matrix rows and summary keys are grouped by scenario, cache and pin.
 
+Compare two runs with a relative mean threshold (default 5%):
+
+```sh
+python3 -B bench.py --compare runs/bench-<base>/bench.json \
+  runs/bench-<new>/bench.json --threshold 0.05
+```
+
+`compare` prints per-key `SAME`/`IMPROVED`/`REGRESSED`/`MISSING` rows and
+exits 1 for a regression or a missing key. A single-run comparison is noise;
+use `--repeats` for decisions.
+
 ## CAN/micom smoke
 
 ```sh

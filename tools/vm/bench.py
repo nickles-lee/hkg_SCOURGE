@@ -80,6 +80,44 @@ def build_argv(args, scenario: dict, cache: str | None = None,
     return argv
 
 
+def compare_bench(baseline: dict, current: dict,
+                  threshold: float = 0.05) -> dict:
+    """Compare two bench.json summaries; regression is relative mean growth."""
+    left = baseline.get('summary') or {}
+    right = current.get('summary') or {}
+    rows = []
+    for key in sorted(set(left) | set(right)):
+        old = left.get(key) or {}
+        new = right.get(key) or {}
+        old_mean = old.get('mean')
+        new_mean = new.get('mean')
+        row = {'key': key, 'baseline_mean': old_mean, 'current_mean': new_mean}
+        if not isinstance(old_mean, (int, float)) or not isinstance(new_mean, (int, float)):
+            row.update({'status': 'MISSING', 'delta': None, 'pct': None})
+        else:
+            delta = round(new_mean - old_mean, 3)
+            pct = (delta / old_mean * 100) if old_mean else None
+            row.update({'delta': delta,
+                        'pct': round(pct, 2) if pct is not None else None})
+            if old_mean == 0:
+                status = 'REGRESSED' if new_mean > 0 else 'SAME'
+            elif pct > threshold * 100:
+                status = 'REGRESSED'
+            elif pct < -threshold * 100:
+                status = 'IMPROVED'
+            else:
+                status = 'SAME'
+            row['status'] = status
+        rows.append(row)
+    return {
+        'ok': all(row['status'] not in ('REGRESSED', 'MISSING') for row in rows),
+        'threshold': threshold,
+        'baseline': baseline.get('run') or baseline.get('bench_id'),
+        'current': current.get('run') or current.get('bench_id'),
+        'rows': rows,
+    }
+
+
 def result_path(log_path: Path) -> Path | None:
     for line in log_path.read_text().splitlines():
         if line.startswith('run: '):
@@ -89,6 +127,10 @@ def result_path(log_path: Path) -> Path | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--compare', nargs=2, type=Path, metavar=('BASELINE', 'CURRENT'),
+                        help='compare two bench.json summaries and exit')
+    parser.add_argument('--threshold', type=float, default=0.05,
+                        help='relative mean regression threshold for --compare (default 0.05)')
     parser.add_argument('--scenario', action='append', default=[],
                         help='scenario to benchmark (repeatable; default boot)')
     parser.add_argument('--profile', choices=('research', 'conformance'),
@@ -119,6 +161,19 @@ def main() -> int:
     parser.add_argument('--payload', type=Path, default=None)
     parser.add_argument('--share', type=Path, default=None)
     args = parser.parse_args()
+    if args.compare:
+        if not math.isfinite(args.threshold) or args.threshold < 0:
+            parser.error('--threshold must be finite and non-negative')
+        try:
+            baseline = json.loads(args.compare[0].read_text())
+            current = json.loads(args.compare[1].read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            parser.error(f'cannot read bench summary: {exc}')
+        report = compare_bench(baseline, current, args.threshold)
+        report['baseline'] = report['baseline'] or str(args.compare[0])
+        report['current'] = report['current'] or str(args.compare[1])
+        print(json.dumps(report, indent=2))
+        return 0 if report['ok'] else 1
     if args.repeats <= 0 or not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error('--repeats and --timeout must be finite and positive')
     if (args.matrix_cache or args.matrix_cpu) and not args.matrix:
@@ -181,6 +236,7 @@ def main() -> int:
                               and isinstance(row['boot_seconds'], (int, float))]
                     summary[key] = summarize(values)
             bench = {
+                'run': directory.name,
                 'ok': all(row['verdict'] == 'PASS' for row in rows),
                 'lock': lock_info,
                 'repeats': args.repeats,

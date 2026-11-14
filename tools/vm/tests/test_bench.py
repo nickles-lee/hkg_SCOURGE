@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from bench import build_argv, result_path, summarize, variants
+from bench import build_argv, compare_bench, result_path, summarize, variants
 from harness.config import load_scenario
 
 VM = Path(__file__).resolve().parents[1]
@@ -85,6 +85,47 @@ class BenchTests(unittest.TestCase):
             log.write_text('no result\n')
             self.assertIsNone(result_path(log))
 
+    def test_compare_bench_statuses(self) -> None:
+        base = {'summary': {'a': {'mean': 10.0}, 'b': {'mean': 20.0},
+                            'c': {'mean': 30.0}, 'd': {'mean': 0.0}}}
+        current = {'summary': {'a': {'mean': 10.2}, 'b': {'mean': 22.0},
+                               'c': {'mean': 28.0}, 'd': {'mean': 1.0}}}
+        report = compare_bench(base, current, threshold=0.05)
+        statuses = {row['key']: row['status'] for row in report['rows']}
+        self.assertEqual(statuses, {'a': 'SAME', 'b': 'REGRESSED',
+                                    'c': 'IMPROVED', 'd': 'REGRESSED'})
+        self.assertFalse(report['ok'])
+        self.assertEqual(report['rows'][1]['pct'], 10.0)
+
+    def test_compare_reports_missing_keys(self) -> None:
+        report = compare_bench({'summary': {'a': {'mean': 1.0}}},
+                               {'summary': {'b': {'mean': 1.0}}})
+        self.assertFalse(report['ok'])
+        self.assertEqual([row['status'] for row in report['rows']],
+                         ['MISSING', 'MISSING'])
+
+    def test_compare_cli_exit_codes(self) -> None:
+        baseline = {'summary': {'boot cache=default pin=none': {'mean': 10.0}}}
+        current = {'summary': {'boot cache=default pin=none': {'mean': 10.2}}}
+        with tempfile.TemporaryDirectory(prefix='vm-bench-compare-') as tmp:
+            left = Path(tmp) / 'base.json'
+            right = Path(tmp) / 'current.json'
+            left.write_text(json.dumps(baseline))
+            right.write_text(json.dumps(current))
+            same = subprocess.run(
+                [sys.executable, '-B', str(VM / 'bench.py'), '--compare',
+                 str(left), str(right), '--threshold', '0.05'],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(same.returncode, 0, same.stderr)
+            self.assertEqual(json.loads(same.stdout)['ok'], True)
+            worse = subprocess.run(
+                [sys.executable, '-B', str(VM / 'bench.py'), '--compare',
+                 str(left), str(right), '--threshold', '0.01'],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(worse.returncode, 1)
+            self.assertEqual(json.loads(worse.stdout)['rows'][0]['status'],
+                             'REGRESSED')
+
     def test_failure_path_writes_bench_json_and_exits_nonzero(self) -> None:
         completed = subprocess.run(
             [sys.executable, "-B", str(VM / "bench.py"),
@@ -114,6 +155,7 @@ class BenchTests(unittest.TestCase):
         self.assertIn('--repeats', completed.stdout)
         self.assertIn('--matrix', completed.stdout)
         self.assertIn('--kernel', completed.stdout)
+        self.assertIn('--compare', completed.stdout)
 
 
 if __name__ == '__main__':
