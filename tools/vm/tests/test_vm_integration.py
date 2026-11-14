@@ -164,6 +164,52 @@ class VMIntegrationTests(unittest.TestCase):
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
 
+    def test_daemon_qmp_input(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-input-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            def input_cmd(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'input', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=60)
+
+            started = cli('start', '--kernel', 'compat',
+                          '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            qmp = daemon_dir / 'qmp.sock'
+            try:
+                key = input_cmd('--qmp', str(qmp), '--key', 'a')
+                self.assertEqual(key.returncode, 0, key.stdout + key.stderr)
+                key_result = json.loads(key.stdout)
+                self.assertTrue(key_result['ok'])
+                self.assertEqual(key_result['qcode'], 'a')
+
+                click = input_cmd('--qmp', str(qmp), '--click', '100,100',
+                                  '--width', '1280', '--height', '720')
+                self.assertEqual(click.returncode, 0, click.stdout + click.stderr)
+                click_result = json.loads(click.stdout)
+                self.assertTrue(click_result['ok'])
+                self.assertEqual((click_result['x'], click_result['y']), (100, 100))
+
+                status = cli('status', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(status.returncode, 0, status.stderr)
+                values = json.loads(status.stdout)
+                self.assertEqual(values['state'], 'ready')
+                self.assertTrue(values['qemu_alive'])
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_daemon_stop_during_inflight_exec(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-inflight-') as tmp:
             daemon_dir = Path(tmp) / 'daemon'

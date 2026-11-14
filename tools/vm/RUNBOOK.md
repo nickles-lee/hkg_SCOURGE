@@ -207,7 +207,9 @@ and verifies the marker is gone. A lock-contention test holds `state.lock`
 externally: `daemon start` must fail with "state is already in use", leave no
 QEMU, then succeed cleanly after the lock is released. Stop during a long
 in-flight exec returns promptly (bounded guest-lock wait), kills QEMU and
-leaves status stopped. A stale control socket is detected in about
+leaves status stopped. An opt-in test starts a compat daemon and exercises
+both QMP key (`a`) and absolute tablet click input without disturbing the
+guest. A stale control socket is detected in about
 0.5 s: status reports `reachable:false`, `exec` fails with a control-socket
 diagnostic, and a clean restart succeeds after the stale daemon exits.
 
