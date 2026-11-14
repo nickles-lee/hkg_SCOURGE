@@ -259,6 +259,58 @@ class ResultSchemaTests(unittest.TestCase):
                          'compat_pin.version', 'compat_pin.state'):
             self.assertIn(expected, joined)
 
+    def test_run_provenance_fields(self) -> None:
+        good = valid_result(
+            qemu='QEMU emulator version 10.0', output_streams='merged',
+            graphics_mode='patched-offscreen', fidelity='vendor kernel',
+            display_device='virtio-vga', label='demo', interactive=False,
+            keep_overlay=False, overlays_retained=False,
+            generated_storage_retained=False, audit_requested=False,
+            mode='compat', kernel_target='compat', cache='directsync',
+            smp=2, memory_mb=3072, qemu_pid=123,
+            qemu_returncode=None, total_seconds=1.5,
+            network={'enabled': True, 'mode': 'user-restrict',
+                     'hostfwd': 'tcp:127.0.0.1:2222-:22'},
+            audio={'enabled': True, 'device': 'intel-hda',
+                   'host_backend': 'none'},
+            state={'path': '/s', 'persistent': True, 'reset': False,
+                   'overlays': {'rootfs': '/s/rootfs.qcow2'},
+                   'flush_rc': 0, 'flush_seconds': 0.1},
+            share={'path': '/h', 'mountpoint': '/media/host',
+                   'setup_rc': 0, 'seconds': 0.2})
+        self.assertEqual(validate_result(good), [])
+
+        bad = valid_result(
+            qemu=1, output_streams=1, graphics_mode=1, fidelity=1,
+            display_device=1, label=1, interactive='no', keep_overlay=1,
+            overlays_retained='x', generated_storage_retained=1,
+            audit_requested='x', mode='other', kernel_target='other',
+            cache='bogus', smp=0, memory_mb=-1, qemu_pid=0,
+            qemu_returncode='x', total_seconds=-1,
+            network={'enabled': 'yes', 'mode': 1, 'hostfwd': 1},
+            audio={'enabled': 'yes', 'device': '', 'host_backend': 1},
+            state={'path': '', 'persistent': 1, 'reset': 'x',
+                   'overlays': {'rootfs': ''}, 'flush_rc': 'x',
+                   'flush_seconds': -1},
+            share={'path': '', 'mountpoint': 1, 'setup_rc': 'x',
+                   'seconds': -1})
+        joined = '\n'.join(validate_result(bad))
+        for expected in ('qemu must be a string', 'output_streams',
+                         'graphics_mode', 'fidelity', 'display_device',
+                         'label', 'interactive', 'keep_overlay',
+                         'overlays_retained', 'generated_storage_retained',
+                         'audit_requested', 'mode must be vendor or compat',
+                         'kernel_target must be vendor or compat',
+                         'cache must be a known', 'smp must be an integer',
+                         'memory_mb', 'qemu_pid', 'qemu_returncode',
+                         'total_seconds', 'network.enabled', 'network.mode',
+                         'audio.enabled', 'audio.device', 'state.path',
+                         'state.persistent', 'state.overlays.rootfs',
+                         'state.flush_rc', 'state.flush_seconds',
+                         'share.path', 'share.mountpoint', 'share.setup_rc',
+                         'share.seconds'):
+            self.assertIn(expected, joined)
+
     def test_verdict_rc_consistency(self) -> None:
         cases = [
             (valid_result(verdict='PASS', rc=1), 'PASS requires rc == 0'),

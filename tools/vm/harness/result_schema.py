@@ -173,6 +173,108 @@ def _check_compat_pin(value, problems: list[str]) -> None:
             problems.append(f'compat_pin.{key} must be a string')
 
 
+def _check_state_evidence(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('state must be an object or null')
+        return
+    if not isinstance(value.get('path'), str) or not value['path']:
+        problems.append('state.path must be a non-empty string')
+    for key in ('persistent', 'reset'):
+        if key in value and not isinstance(value[key], bool):
+            problems.append(f'state.{key} must be boolean')
+    overlays = value.get('overlays')
+    if overlays is not None:
+        if not isinstance(overlays, dict):
+            problems.append('state.overlays must be an object')
+        else:
+            for name, path in overlays.items():
+                if not isinstance(path, str) or not path:
+                    problems.append(f'state.overlays.{name} must be a non-empty string')
+    if 'flush_rc' in value and not _is_int(value['flush_rc']):
+        problems.append('state.flush_rc must be an integer')
+    if 'flush_seconds' in value and (
+            not _is_number(value['flush_seconds'])
+            or value['flush_seconds'] < 0):
+        problems.append('state.flush_seconds must be non-negative')
+
+
+def _check_share_evidence(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('share must be an object or null')
+        return
+    for key in ('path', 'mountpoint'):
+        if not isinstance(value.get(key), str) or not value[key]:
+            problems.append(f'share.{key} must be a non-empty string')
+    if 'setup_rc' in value and not _is_int(value['setup_rc']):
+        problems.append('share.setup_rc must be an integer')
+    if 'seconds' in value and (not _is_number(value['seconds'])
+                               or value['seconds'] < 0):
+        problems.append('share.seconds must be non-negative')
+
+
+def _check_network_evidence(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('network must be an object or null')
+        return
+    if 'enabled' in value and not isinstance(value['enabled'], bool):
+        problems.append('network.enabled must be boolean')
+    for key in ('mode', 'hostfwd'):
+        if key in value and not isinstance(value[key], str):
+            problems.append(f'network.{key} must be a string')
+
+
+def _check_audio_evidence(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('audio must be an object or null')
+        return
+    if 'enabled' in value and not isinstance(value['enabled'], bool):
+        problems.append('audio.enabled must be boolean')
+    for key in ('device', 'host_backend'):
+        if key in value and (not isinstance(value[key], str)
+                             or not value[key]):
+            problems.append(f'audio.{key} must be a non-empty string')
+
+
+def _check_run_fields(result, problems: list[str]) -> None:
+    for name in ('qemu', 'output_streams', 'graphics_mode', 'fidelity',
+                 'display_device', 'label'):
+        if name in result and not isinstance(result[name], str):
+            problems.append(f'{name} must be a string')
+    for name in ('interactive', 'keep_overlay', 'overlays_retained',
+                 'generated_storage_retained', 'audit_requested'):
+        if name in result and not isinstance(result[name], bool):
+            problems.append(f'{name} must be boolean')
+    for name in ('mode', 'kernel_target'):
+        value = result.get(name)
+        if value is not None and value not in ('vendor', 'compat'):
+            problems.append(f'{name} must be vendor or compat')
+    cache = result.get('cache')
+    if cache is not None and cache not in (
+            'writeback', 'writethrough', 'directsync', 'unsafe', 'none'):
+        problems.append('cache must be a known qcow2 cache mode')
+    for name, minimum in (('smp', 1), ('memory_mb', 1)):
+        value = result.get(name)
+        if value is not None and (not _is_int(value) or value < minimum):
+            problems.append(f'{name} must be an integer >= {minimum}')
+    qemu_pid = result.get('qemu_pid')
+    if qemu_pid is not None and (not _is_int(qemu_pid) or qemu_pid <= 0):
+        problems.append('qemu_pid must be a positive integer')
+    returncode = result.get('qemu_returncode')
+    if returncode is not None and not _is_int(returncode):
+        problems.append('qemu_returncode must be an integer or null')
+    total = result.get('total_seconds')
+    if total is not None and (not _is_number(total) or total < 0):
+        problems.append('total_seconds must be non-negative')
+    if result.get('network') is not None:
+        _check_network_evidence(result['network'], problems)
+    if result.get('audio') is not None:
+        _check_audio_evidence(result['audio'], problems)
+    if result.get('state') is not None:
+        _check_state_evidence(result['state'], problems)
+    if result.get('share') is not None:
+        _check_share_evidence(result['share'], problems)
+
+
 def _check_lock(value, problems: list[str]) -> None:
     if not isinstance(value, dict):
         problems.append('lock must be an object')
@@ -437,6 +539,7 @@ def validate_result(result) -> list[str]:
         _check_lock(result['lock'], problems)
     if 'failure_bundle' in result and result['failure_bundle'] is not None:
         _check_bundle(result['failure_bundle'], problems)
+    _check_run_fields(result, problems)
     return problems
 
 
