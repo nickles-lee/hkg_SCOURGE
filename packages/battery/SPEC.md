@@ -89,6 +89,21 @@ argument     array of bytes
 The factory `EVRemoteChargeDoorOpen/Close(int signalMode)` sets `0xDF`/`0xEF`
 only when `signalMode == 1`; all-`FF` is the no-command form.
 
+The same interface's fixed-field method is used by the vendor blue-light
+path and is exposed by the helper for other first-party apps:
+
+```
+destination  com.lge.car.micom
+path         /Can
+interface    com.lge.car.micom.can
+method       SetCANFixedMicomRecv
+arguments    array of bytes (CAN id hi, id lo), int32 start, int32 size,
+             int32 data
+```
+
+`micom-send fixed <idhi> <idlo> <start> <size> <data>` wraps this call;
+Tweaks uses it for CAN 0x063F (status bit 26/2, level bit 12/4).
+
 ### 4.3 M-CAN status (not visible on `can0`)
 
 The daemon still decodes these if they appear (bench tests, other variants),
@@ -406,7 +421,12 @@ cable state is advisory; the gear/Park signal is not a gate for now.
    - Copy the vendor `dbus-send` to `/rw_data/battery/bin/CANService` and
      install the `/rw_data/battery/bin/micom-send` wrapper; stamp both with
      the same label.  The daemon sends every CAN frame through the wrapper,
-     which keeps the whitelisted `CANService` process alive.  See
+     which keeps the whitelisted `CANService` process alive.  The wrapper
+     accepts raw `SetCANMicomRecv` frames and the
+     `fixed <idhi> <idlo> <start> <size> <data>` form for
+     `SetCANFixedMicomRecv` (used by Tweaks).  Consumers must check for that
+     method string before reusing the helper: an older raw-only wrapper would
+     treat `fixed` as a raw array and still exit 0.  See
      `docs/MICOM_WHITELIST.md`.
    - Write the expected label to `/rw_data/battery/smack_expected`; the
      daemon reports `smack`, `smack_expected`, `smack_ok`, `smack_send`,

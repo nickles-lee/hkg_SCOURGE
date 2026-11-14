@@ -71,6 +71,19 @@ vendor uses, and applies the same Hyundai warmth to the front display while
 projection is foreground. Deep red night mode asserts the vendor maximum
 cluster level (9) and a deep-red front brightness.
 
+The micom service only accepts CAN sends from a process whose executable
+basename is whitelisted (`AppHomeScreen`, `TmsRemoteApp`,
+`micommanager_userspace`, `CANService`); a plain `dbus-send` child is dropped
+silently. The daemon therefore sends through the helper the Battery app ships:
+`/rw_data/battery/bin/micom-send`, which runs a `dbus-send` copy named
+`CANService`. If Battery is not installed — or its helper predates the
+`fixed <idhi> <idlo> <start> <size> <data>` mode — the Tweaks installer
+creates its own fixed-capable helper under `/rw_data/tweaks/bin/`. The active
+path is `can_service` in the config and `can_source` in `status.json`. The
+installer result reports `can_source=battery|local|config|dbus` (`config` is
+a custom fixed-capable path already present in `config.conf`). See
+`packages/battery/docs/MICOM_WHITELIST.md` for the decompiled evidence.
+
 ## Firmware evidence
 
 - `AppSetup` — `APP_SETTING_DISP_GAMMA_R_G_B`,
@@ -257,6 +270,7 @@ tzdata_version_file=/rw_data/tweaks/tzdata_version
 offline_status_path=/update/offline_status
 session_bus_file=/tmp/session_appmgr
 dbus_send_path=/usr/bin/dbus-send
+can_service=/rw_data/battery/bin/micom-send
 xdg_runtime_dir=/var/run/user/root
 reboot_command=/bin/systemctl
 reboot_wdt_ms=20000
@@ -291,15 +305,26 @@ SMACK label gates.
   old 0-based configs are migrated on the next install).
 - **Deep red shows no cluster change** — it asserts CAN level 9 whenever the
   cluster fix is on and night mode is effective (filter on, or projection
-  active). Check `blu_level_sent`/`blu_forced` in `status.json` and the
-  `micom BLU` lines in `failures.log` if the micom write was rejected.
+  active). `blu_status_sent`/`blu_level_sent` mean the frame was **queued to
+  the helper**, not that the micom acknowledged it (the factory senders use
+  no-reply, so the helper exits 0 by design). Check `can_source` first, then
+  the `micom BLU` lines in `failures.log`.
+- **`status.json` says `"can_source":"dbus"`** — the micom-send helper is
+  missing, not executable, or is an old raw-only Battery wrapper without the
+  `fixed` mode. The daemon then falls back to a plain `dbus-send` child that
+  the vendor micom silently drops. Reinstall Tweaks, or refresh Battery
+  (which provides `/rw_data/battery/bin/micom-send`); the installer result
+  records `can_service=` and `can_source=`.
 - **Front tint works but the instrument cluster never changes** — the most
-  common cause is the daemon's SMACK label. It must be `_` (floor), not
-  `Privileged`: only the floor label has access to `App::micommanager` and the
-  system-bus socket. Check `smack` in `/status`/`/health` (must be `_`) and
-  `smack_check=ok`/`smack=_` in `run_stuff_result.txt`; the diagnostic script prints the running
-  label and a no-CAN-write micom D-Bus probe (Introspect may activate the
-  service). Reinstall if it is not `_`.
+  common causes are the daemon's SMACK label and the micom sender whitelist.
+  The label must be `_` (floor), not `Privileged`: only the floor label has
+  access to `App::micommanager` and the system-bus socket. Check `smack` in
+  `/status`/`/health` (must be `_`) and `smack_check=ok`/`smack=_` in
+  `run_stuff_result.txt`. The CAN send must come from the whitelisted
+  `CANService` basename (`"can_source":"service"`); the diagnostic script
+  prints the helper paths and whether each supports `fixed`, the running
+  label, and a no-CAN-write micom D-Bus probe (Introspect may activate the
+  service). Reinstall if either check fails.
 - **Reboot says “service unavailable”** — the daemon is not reachable on
   `127.0.0.1:8091`. Check `systemctl status tweaks-daemon.service`, the
   `smack_check` field in `run_stuff_result.txt`, and the daemon log. The

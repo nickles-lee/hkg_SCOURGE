@@ -108,6 +108,20 @@ CANService --system --type=method_call --print-reply \
     com.lge.car.micom.can.SetCANMicomRecv <array>
 ```
 
+It also exposes the fixed-field form used by the vendor blue-light path and
+other first-party apps:
+
+```
+CANService --system --type=method_call --print-reply \
+    --reply-timeout=500 --dest=com.lge.car.micom /Can \
+    com.lge.car.micom.can.SetCANFixedMicomRecv \
+    <array:byte:idhi,idlo> <int32:start> <int32:size> <int32:data>
+```
+
+via the wrapper's `fixed <idhi> <idlo> <start> <size> <data>` mode; the raw
+`micom-send <array>` form is unchanged (and `raw <array>` is an explicit
+alias). Tweaks uses `fixed` for CAN 0x063F status/level writes.
+
 The basename `CANService` is on the vendor list. `--print-reply` keeps the
 `dbus-send` process alive for up to 500 ms while the micom resolves
 `/proc/<pid>/exe`; the wrapper waits for it and exits 0 even when the micom
@@ -123,6 +137,14 @@ Both files are installed by `run_stuff.sh` and receive the same
 `SMACK64EXEC` label as the daemon (the installer's own label, normally `_`).
 The session-bus Home/Star monitor still uses a copy of `dbus-monitor`; it
 does not send CAN frames and is not subject to the whitelist.
+
+Other SCOURGE packages reuse the helper rather than duplicating the vendor
+binary when Battery is present: Tweaks prefers
+`/rw_data/battery/bin/micom-send` and only installs its own copy under
+`/rw_data/tweaks/bin/` when Battery is absent **or its helper predates the
+`fixed` mode**. Consumers must check for `SetCANFixedMicomRecv` support, not
+just executability: an older raw-only wrapper would treat `fixed` as a raw
+array and still exit 0. Refresh Battery after updating such an install.
 
 A host-built libdbus helper was tried first, but the car's glibc is older
 than the build host's (the binary asked for `GLIBC_2.34`/`GLIBC_2.38`), so

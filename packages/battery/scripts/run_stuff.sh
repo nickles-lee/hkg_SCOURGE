@@ -223,6 +223,27 @@ set_exec_label "$HELPER_DIR/CANService"
 
 cat > "$HELPER_DIR/micom-send" <<EOF
 #!/bin/sh
+# Micom CAN-send helper. The vendor service whitelists the sender's
+# executable basename (CANService); see docs/MICOM_WHITELIST.md.
+#   micom-send <array>                        raw SetCANMicomRecv (legacy)
+#   micom-send raw <array>                    explicit raw form
+#   micom-send fixed <idhi> <idlo> <start> <size> <data>
+#                                             SetCANFixedMicomRecv
+# --print-reply keeps this process alive while the micom resolves
+# /proc/<pid>/exe. Exit 0 even when the micom does not reply (factory
+# senders use no-reply), so callers treat the frame as queued.
+case "\$1" in
+fixed)
+    "$HELPER_DIR/CANService" --system --type=method_call --print-reply \
+        --reply-timeout=500 --dest=com.lge.car.micom /Can \
+        com.lge.car.micom.can.SetCANFixedMicomRecv \
+        "array:byte:\$2,\$3" "int32:\$4" "int32:\$5" "int32:\$6" >/dev/null 2>&1
+    exit 0
+    ;;
+raw)
+    shift
+    ;;
+esac
 "$HELPER_DIR/CANService" --system --type=method_call --print-reply \
     --reply-timeout=500 --dest=com.lge.car.micom /Can \
     com.lge.car.micom.can.SetCANMicomRecv "\$1" >/dev/null 2>&1

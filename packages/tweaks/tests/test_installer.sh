@@ -155,12 +155,24 @@ exit 0
 EOF
 chmod 755 "$TMP/root/usr/bin/chsmack" "$TMP/root/usr/bin/getfattr" \
           "$TMP/root/usr/bin/setfattr"
+
+# Stand-in for the vendor dbus-send the installer copies to CANService. The
+# generated scripts replace the literal dbus-send with false, so the helper
+# source is injected with TWEAKS_DBUS_SEND.
+cat > "$TMP/can_dbus" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TMP/can.log"
+exit 0
+EOF
+chmod 755 "$TMP/can_dbus"
+
 TWEAKS_PATH="$TMP/root/usr/bin:/usr/bin:/bin"
 printf 'device %s ext4 rw 0 0\n' "$TMP/root" > "$TMP/mounts"
 export INSTALL_IO_ROOT="$TMP/root" INSTALL_IO_MOUNTS="$TMP/mounts"
 TWEAKS_SMACK_SELF=_
 TWEAKS_DAEMON_SMACK=_
-export TWEAKS_PATH TWEAKS_SMACK_SELF TWEAKS_DAEMON_SMACK
+TWEAKS_DBUS_SEND="$TMP/can_dbus"
+export TWEAKS_PATH TWEAKS_SMACK_SELF TWEAKS_DAEMON_SMACK TWEAKS_DBUS_SEND
 for f in main.qml Screen_AppStandbyClock_Confirm.qml Screen_AppStandbyClock_Confirm_Profile.qml; do
     printf '// STOCK_STANDBY_260128\n' > "$TMP/root/app/share/AppStandbyClock/qml_eco3.0/$f"
 done
@@ -264,6 +276,25 @@ grep -q 'chsmack -e "$SMACK_SELF"' "$ROOT/scripts/run_stuff.sh"
 ! grep -q 'chsmack -e Privileged' "$ROOT/scripts/run_stuff.sh"
 grep -q ' smack=' "$TMP/usb/run_stuff_result.txt"
 
+# Without Battery installed, the installer creates a local micom helper: a
+# copy of dbus-send under the whitelisted basename CANService plus a wrapper
+# with the same fixed/raw interface. The micom drops any other sender name.
+test -x "$TMP/rw/bin/CANService"
+test -x "$TMP/rw/bin/micom-send"
+grep -q "^can_service=$TMP/rw/bin/micom-send$" "$TMP/rw/config.conf"
+grep -q 'can_source=local' "$TMP/usb/run_stuff_result.txt"
+grep -q -- "-e _ $TMP/rw/bin/CANService" "$TMP/chsmack.log"
+grep -q -- "-e _ $TMP/rw/bin/micom-send" "$TMP/chsmack.log"
+: > "$TMP/can.log"
+"$TMP/rw/bin/micom-send" fixed 0x06 0x3f 26 2 2
+grep -q 'SetCANFixedMicomRecv array:byte:0x06,0x3f int32:26 int32:2 int32:2' "$TMP/can.log"
+"$TMP/rw/bin/micom-send" fixed 0x06 0x3f 26 4 5
+grep -q 'SetCANFixedMicomRecv array:byte:0x06,0x3f int32:26 int32:4 int32:5' "$TMP/can.log"
+"$TMP/rw/bin/micom-send" array:byte:0x04,0xa2,0x08,0xff
+grep -q 'SetCANMicomRecv array:byte:0x04,0xa2,0x08,0xff' "$TMP/can.log"
+"$TMP/rw/bin/micom-send" raw array:byte:0x04,0xa2,0x08,0xef
+grep -q 'SetCANMicomRecv array:byte:0x04,0xa2,0x08,0xef' "$TMP/can.log"
+
 # A legacy v1 config (zero-based CRTC pair) is migrated in place on the
 # next install, without touching deliberate custom values.
 sed -i 's/^config_version=2$/config_version=1/' "$TMP/rw/config.conf"
@@ -319,10 +350,71 @@ grep -q 'persist_smack=absent' "$TMP/usb/run_stuff_result.txt"
 mv "$TMP/tweaks_persist.bak" "$TMP/usb/payload/bin/tweaks_persist"
 cp "$TMP/manifest.md5.bak" "$TMP/usb/manifest.md5"
 
+# Battery's car-proven helper is preferred when present: a fresh config
+# records it and no local copy is made. Only a fixed-capable helper qualifies
+# (older Battery installs shipped a raw-only wrapper).
+mkdir -p "$TMP/battery/bin"
+printf '#!/bin/sh\n# SetCANFixedMicomRecv\ncase "$1" in\nfixed) : ;;\nesac\nexit 0\n' > "$TMP/battery/bin/micom-send"
+chmod 755 "$TMP/battery/bin/micom-send"
+
+# An existing valid config is preserved; the result must report the effective
+# path (local), not merely the detected Battery helper.
+TWEAKS_BATTERY_DIR="$TMP/battery" \
+TWEAKS_QML_ROOT="$TMP/root/app/share/AppHomeScreen" \
+TWEAKS_RW_DIR="$TMP/rw" \
+TWEAKS_SERVICE="$TMP/etc/systemd/system/tweaks-daemon.service" \
+TWEAKS_STANDBY_ROOT="$TMP/root/app/share/AppStandbyClock" \
+TWEAKS_OFFLINE_STATUS="$TMP/root/update/offline_status" \
+TWEAKS_WRANDR="$TMP/root/usr/bin/wrandr" \
+TWEAKS_WRANDR_REAL="$TMP/root/usr/bin/wrandr.real" \
+USB_DIR="$TMP/usb" \
+sh "$TMP/install.sh"
+grep -q 'status=OK' "$TMP/usb/run_stuff_result.txt"
+grep -q 'can_source=local' "$TMP/usb/run_stuff_result.txt"
+grep -q "^can_service=$TMP/rw/bin/micom-send$" "$TMP/rw/config.conf"
+
+# A raw-only Battery helper must be rejected: the installer falls back to its
+# own fixed-capable copy instead of exec'ing "fixed" as a raw array.
+mkdir -p "$TMP/battery_raw/bin"
+printf '#!/bin/sh\n# SetCANMicomRecv only\nexit 0\n' > "$TMP/battery_raw/bin/micom-send"
+chmod 755 "$TMP/battery_raw/bin/micom-send"
+rm -f "$TMP/rw/config.conf"
+TWEAKS_BATTERY_DIR="$TMP/battery_raw" \
+TWEAKS_QML_ROOT="$TMP/root/app/share/AppHomeScreen" \
+TWEAKS_RW_DIR="$TMP/rw" \
+TWEAKS_SERVICE="$TMP/etc/systemd/system/tweaks-daemon.service" \
+TWEAKS_STANDBY_ROOT="$TMP/root/app/share/AppStandbyClock" \
+TWEAKS_OFFLINE_STATUS="$TMP/root/update/offline_status" \
+TWEAKS_WRANDR="$TMP/root/usr/bin/wrandr" \
+TWEAKS_WRANDR_REAL="$TMP/root/usr/bin/wrandr.real" \
+USB_DIR="$TMP/usb" \
+sh "$TMP/install.sh"
+grep -q 'status=OK' "$TMP/usb/run_stuff_result.txt"
+grep -q 'can_source=local' "$TMP/usb/run_stuff_result.txt"
+grep -q "^can_service=$TMP/rw/bin/micom-send$" "$TMP/rw/config.conf"
+grep -q 'Battery micom helper is raw-only' "$TMP/rw/install.log"
+
+# Fresh config with a fixed-capable Battery helper.
+rm -f "$TMP/rw/config.conf"
+TWEAKS_BATTERY_DIR="$TMP/battery" \
+TWEAKS_QML_ROOT="$TMP/root/app/share/AppHomeScreen" \
+TWEAKS_RW_DIR="$TMP/rw" \
+TWEAKS_SERVICE="$TMP/etc/systemd/system/tweaks-daemon.service" \
+TWEAKS_STANDBY_ROOT="$TMP/root/app/share/AppStandbyClock" \
+TWEAKS_OFFLINE_STATUS="$TMP/root/update/offline_status" \
+TWEAKS_WRANDR="$TMP/root/usr/bin/wrandr" \
+TWEAKS_WRANDR_REAL="$TMP/root/usr/bin/wrandr.real" \
+USB_DIR="$TMP/usb" \
+sh "$TMP/install.sh"
+grep -q 'status=OK' "$TMP/usb/run_stuff_result.txt"
+grep -q 'can_source=battery' "$TMP/usb/run_stuff_result.txt"
+grep -q "^can_service=$TMP/battery/bin/micom-send$" "$TMP/rw/config.conf"
+
 # Pretend the user enabled OTA blocking before restoring.
 printf '1' > "$TMP/rw/ota_block_owned"
 printf '1' > "$TMP/root/update/offline_status"
-# Pretend the daemon left a front-display override behind (crash case).
+# Pretend the daemon left a cluster/front override behind (crash case).
+printf '1' > "$TMP/rw/blu_forced"
 printf 'crtc=1\nrestore=128:120:112\n' > "$TMP/rw/front_override"
 : > "$TMP/wrandr.log"
 
@@ -339,7 +431,9 @@ sh "$TMP/restore.sh"
 
 grep -q 'status=OK' "$TMP/usb/run_stuff_result.txt"
 grep -q -- '--crtc=1 --brightness=128:120:112' "$TMP/wrandr.log"
+grep -q "restored cluster blue-light off via $TMP/battery/bin/micom-send" "$TMP/rw/restore.log"
 test ! -f "$TMP/rw/front_override"
+test ! -d "$TMP/rw/bin"
 test ! -f "$Q/HomeScreen/TweaksPage.qml"
 test ! -f "$Q/HomeScreen/RebootPage.qml"
 test ! -f "$Q/component/TweaksTile.qml"

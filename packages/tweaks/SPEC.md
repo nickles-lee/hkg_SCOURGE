@@ -99,6 +99,26 @@ Brightness is kept at `128:128:128`.
 - While the cluster fix is on and night mode is effective, the daemon asserts
   the vehicle's level; deep-red night mode asserts level 9. Disabling the
   override restores the vehicle's status and level.
+- The send goes through the Battery-provided micom helper
+  (`can_service`, default `/rw_data/battery/bin/micom-send`; installer
+  falls back to a local `/rw_data/tweaks/bin/micom-send`). The vendor micom
+  only accepts CAN sends whose sender executable basename is whitelisted
+  (`AppHomeScreen`, `TmsRemoteApp`, `micommanager_userspace`,
+  `CANService`); a plain `dbus-send` child is dropped. Both the installer and
+  the daemon require the helper to advertise `SetCANFixedMicomRecv`
+  (an older raw-only Battery wrapper is rejected), and the daemon keeps the
+  direct `dbus-send` call only as a last-resort fallback. `can_source`
+  (`service` or `dbus`) in `status.json` reports the path actually in use;
+  the installer result additionally distinguishes `battery`, `local`, and
+  `config` (custom fixed-capable path).
+- `can_service` is exec'd as root. The unauthenticated `/set` endpoint only
+  accepts `/rw_data/battery/bin/micom-send` or
+  `/rw_data/tweaks/bin/micom-send` (exact basename, no `..`); config-file
+  values remain installer/root-controlled.
+- `blu_status_sent`/`blu_level_sent` record that a frame was queued to the
+  helper. They do not prove micom acceptance: the factory senders use
+  no-reply and the helper exits 0 by design. The cluster reaction is the only
+  car-side confirmation.
 - The daemon (and the persist helper it execs) runs on the SMACK floor label
   `_`, never `Privileged`: the floor label is the vendor's IPC context with
   access to `App::micommanager` and the system-bus socket, while `Privileged`

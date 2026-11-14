@@ -367,6 +367,79 @@ io_copy "$PAYLOAD/systemd/tweaks-daemon.service" "$SERVICE" || fail "service cop
 chmod 644 "$SERVICE" 2>/dev/null || true
 chown 0:0 "$SERVICE" 2>/dev/null || true
 
+# ---- micom CAN helper --------------------------------------------------
+# The vendor micom service silently drops CAN sends unless the sender's
+# executable basename is whitelisted (AppHomeScreen, TmsRemoteApp,
+# micommanager_userspace, CANService); see
+# battery/docs/MICOM_WHITELIST.md. Battery ships the car-proven helper, so
+# prefer it. Otherwise install a local copy of the vendor dbus-send under the
+# whitelisted name plus a wrapper with the same interface.
+micom_helper_supports_fixed() {
+    [ -f "$1" ] && grep -q 'SetCANFixedMicomRecv' "$1" 2>/dev/null && \
+        grep -q '^fixed)' "$1" 2>/dev/null
+}
+BATTERY_DIR="${TWEAKS_BATTERY_DIR:-/rw_data/battery}"
+CAN_SERVICE="$BATTERY_DIR/bin/micom-send"
+CAN_SOURCE=battery
+if [ -x "$CAN_SERVICE" ] && micom_helper_supports_fixed "$CAN_SERVICE"; then
+    log "micom CAN helper: using Battery helper $CAN_SERVICE"
+else
+    if [ -x "$CAN_SERVICE" ]; then
+        log "WARNING: Battery micom helper is raw-only (no fixed mode); installing the Tweaks copy"
+    fi
+    CAN_SOURCE=none
+    CAN_BIN_DIR="$RW_DIR/bin"
+    _dbus_send="${TWEAKS_DBUS_SEND:-$(command -v dbus-send 2>/dev/null || true)}"
+    if [ -n "$_dbus_send" ] && [ -x "$_dbus_send" ]; then
+        mkdir -p "$CAN_BIN_DIR" 2>/dev/null || fail "cannot create $CAN_BIN_DIR"
+        # Remove first: cp -f keeps the destination inode and its xattrs.
+        rm -f "$CAN_BIN_DIR/CANService" 2>/dev/null || true
+        cp -f "$_dbus_send" "$CAN_BIN_DIR/CANService" || fail "helper copy failed: CANService"
+        chmod 755 "$CAN_BIN_DIR/CANService" 2>/dev/null || fail "cannot make CANService executable"
+        chown 0:0 "$CAN_BIN_DIR/CANService" 2>/dev/null || true
+        set_exec_label "$CAN_BIN_DIR/CANService"
+        rm -f "$CAN_BIN_DIR/micom-send" 2>/dev/null || true
+        cat > "$CAN_BIN_DIR/micom-send" <<EOF || fail "cannot write micom-send wrapper"
+#!/bin/sh
+# Micom CAN-send helper (Tweaks fallback copy). The vendor service whitelists
+# the sender's executable basename (CANService); see
+# packages/battery/docs/MICOM_WHITELIST.md.
+#   micom-send <array>                        raw SetCANMicomRecv (legacy)
+#   micom-send raw <array>                    explicit raw form
+#   micom-send fixed <idhi> <idlo> <start> <size> <data>
+#                                             SetCANFixedMicomRecv
+# --print-reply keeps this process alive while the micom resolves
+# /proc/<pid>/exe. Exit 0 even when the micom does not reply (factory
+# senders use no-reply), so callers treat the frame as queued.
+case "\$1" in
+fixed)
+    "$CAN_BIN_DIR/CANService" --system --type=method_call --print-reply \\
+        --reply-timeout=500 --dest=com.lge.car.micom /Can \\
+        com.lge.car.micom.can.SetCANFixedMicomRecv \\
+        "array:byte:\$2,\$3" "int32:\$4" "int32:\$5" "int32:\$6" >/dev/null 2>&1
+    exit 0
+    ;;
+raw)
+    shift
+    ;;
+esac
+"$CAN_BIN_DIR/CANService" --system --type=method_call --print-reply \\
+    --reply-timeout=500 --dest=com.lge.car.micom /Can \\
+    com.lge.car.micom.can.SetCANMicomRecv "\$1" >/dev/null 2>&1
+exit 0
+EOF
+        chmod 755 "$CAN_BIN_DIR/micom-send" 2>/dev/null || fail "cannot make micom-send executable"
+        chown 0:0 "$CAN_BIN_DIR/micom-send" 2>/dev/null || true
+        [ -x "$CAN_BIN_DIR/micom-send" ] || fail "micom-send wrapper is not executable"
+        set_exec_label "$CAN_BIN_DIR/micom-send"
+        CAN_SERVICE="$CAN_BIN_DIR/micom-send"
+        CAN_SOURCE=local
+    else
+        log "WARNING: dbus-send not found; cluster CAN writes will fail the micom whitelist"
+    fi
+fi
+log "micom CAN helper available: path=${CAN_SERVICE:-unset}"
+
 # ---- default config ----------------------------------------------------
 if [ ! -f "$RW_DIR/config.conf" ]; then
     cat > "$RW_DIR/config.conf" <<EOF
@@ -396,6 +469,7 @@ tzdata_version_file=$RW_DIR/tzdata_version
 offline_status_path=/update/offline_status
 session_bus_file=/tmp/session_appmgr
 dbus_send_path=/usr/bin/dbus-send
+can_service=$CAN_SERVICE
 xdg_runtime_dir=/var/run/user/root
 EOF
     chmod 600 "$RW_DIR/config.conf" 2>/dev/null || true
@@ -444,6 +518,31 @@ fi
 if ! grep -q '^xdg_runtime_dir=' "$RW_DIR/config.conf" 2>/dev/null; then
     set_conf_key xdg_runtime_dir /var/run/user/root "$RW_DIR/config.conf"
 fi
+# Existing installs: record the detected helper, or migrate away from a helper
+# that no longer exists (Battery uninstalled, local copy removed) or is an old
+# raw-only wrapper without the fixed-field call.
+can_conf=$(cfg_value can_service "")
+if [ -n "$CAN_SERVICE" ] && { [ -z "$can_conf" ] || [ ! -x "$can_conf" ] || \
+   ! micom_helper_supports_fixed "$can_conf"; }; then
+    set_conf_key can_service "$CAN_SERVICE" "$RW_DIR/config.conf"
+    [ "$(cfg_value can_service "")" = "$CAN_SERVICE" ] || \
+        fail "cannot record can_service in config"
+    log "config can_service -> $CAN_SERVICE ($CAN_SOURCE)"
+fi
+# Report the path the daemon will actually use, not just the one detected:
+# an existing valid config is deliberately preserved.
+CAN_SERVICE=$(cfg_value can_service "$CAN_SERVICE")
+if [ -n "$CAN_SERVICE" ] && [ -x "$CAN_SERVICE" ] && \
+   micom_helper_supports_fixed "$CAN_SERVICE"; then
+    case "$CAN_SERVICE" in
+        "$BATTERY_DIR/bin/micom-send") CAN_SOURCE=battery ;;
+        "$RW_DIR/bin/micom-send") CAN_SOURCE=local ;;
+        *) CAN_SOURCE=config ;;
+    esac
+else
+    CAN_SOURCE=dbus
+fi
+log "micom CAN helper effective: source=$CAN_SOURCE path=${CAN_SERVICE:-unset}"
 
 # Mirror the two disclaimer settings as small files for AppStandbyClock.
 printf '%s' "$(cfg_value disclaimer_auto 1)" > "$RW_DIR/disclaimer_auto"
@@ -645,6 +744,7 @@ result "status=$final_status" "variant=$adv_variant/$wide_variant/$all_variant/$
        "smack_self=$SMACK_SELF" "smack=$DAEMON_SMACK" \
        "persist_smack=$PERSIST_SMACK" "daemon_smack=${RUNNING_SMACK:-none}" \
        "smack_check=$smack_check" \
+       "can_service=${CAN_SERVICE:-unset}" "can_source=$CAN_SOURCE" \
        "disclaimer=next-boot" "tzdata=$(cat "$RW_DIR/tzdata_version" 2>/dev/null | head -n 1)" \
        "ota_block=$(cfg_value ota_block 0)" "asset_warnings=$ASSET_WARNINGS" "log=$LOG"
 log "=== tweaks payload done ==="

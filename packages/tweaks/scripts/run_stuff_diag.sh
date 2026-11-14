@@ -93,12 +93,33 @@ echo
 echo "== persistence helper (stderr shows the registered app name) =="
 "$RW_DIR/tweaks_persist" read 2>&1 || true
 echo
+echo "== micom CAN helper =="
+can_conf=$(sed -n 's/^can_service=//p' "$RW_DIR/config.conf" 2>/dev/null | tail -n 1)
+can_effective="${can_conf:-/rw_data/battery/bin/micom-send}"
+echo "config can_service: ${can_conf:-unset (daemon default $can_effective)}"
+for f in "$can_conf" "$can_effective" /rw_data/battery/bin/micom-send \
+         /rw_data/battery/bin/CANService "$RW_DIR/bin/micom-send" \
+         "$RW_DIR/bin/CANService"; do
+    [ -n "$f" ] || continue
+    [ -e "$f" ] || continue
+    if [ -x "$f" ]; then x=yes; else x=no; fi
+    if grep -q 'SetCANFixedMicomRecv' "$f" 2>/dev/null; then fx=yes; else fx=no; fi
+    printf '%s: executable=%s fixed=%s\n' "$f" "$x" "$fx"
+done
+if [ -x "$can_effective" ] && grep -q 'SetCANFixedMicomRecv' "$can_effective" 2>/dev/null; then
+    echo "can_source would be: service"
+else
+    echo "can_source would be: dbus (helper missing, not executable, or raw-only)"
+fi
+echo
 echo "== SMACK labels =="
 echo "diagnostic process label: $(cat /proc/self/attr/current 2>/dev/null || echo unknown)"
 if command -v getfattr >/dev/null 2>&1; then
     for f in /usr/bin/wrandr /usr/bin/wrandr.real /usr/bin/dbus-send /usr/bin/pers_admin_svc \
              /app/bin/AppSetup /app/bin/TimeManager \
              "$RW_DIR/tweaks_daemon" "$RW_DIR/tweaks_persist" \
+             /rw_data/battery/bin/micom-send /rw_data/battery/bin/CANService \
+             "$RW_DIR/bin/micom-send" "$RW_DIR/bin/CANService" \
              "$RW_DIR/cluster_gamma" "$RW_DIR/config.conf" "$RW_DIR/status.json" \
              "$RW_DIR/smack_expected" "$QML_DIR/HomeScreen/TweaksPage.qml" \
              "$QML_DIR/HomeScreen/RebootPage.qml" \

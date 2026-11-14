@@ -257,3 +257,33 @@ status server correctly fail-fasts; the test raises `lo` with the vendor
 busybox), `/etc/passwd` is a symlink to `/tmp/passwd`, and `/var` is a symlink
 to `rw_data/var`.
 
+Micom sender whitelist (2026-11-14): the SMACK floor label is necessary but
+not sufficient. The decompiled `micommanager_userspace` (`FUN_0010b1e0`)
+checks the D-Bus sender's `/proc/<pid>/exe` basename against
+`AppHomeScreen`, `TmsRemoteApp`, `micommanager_userspace` and `CANService`,
+and silently drops everything else. A daemon that forks
+`/usr/bin/dbus-send` is therefore rejected even with `_` access; this is the
+remaining reason the cluster never changed. Battery already ships the
+car-proven workaround: a copy of the vendor `dbus-send` named `CANService`
+plus a `micom-send` wrapper (`--print-reply` keeps the whitelisted process
+alive). Tweaks now prefers `/rw_data/battery/bin/micom-send`, installs the
+same pair under `/rw_data/tweaks/bin/` when Battery is absent, and reports
+`can_service=`/`can_source=` in the install result and `can_source` in
+`status.json`. The direct `dbus-send` path remains only as a last resort and
+is expected to be dropped by the micom. See
+`packages/battery/docs/MICOM_WHITELIST.md` for the full decompilation.
+
+Upgrade and trust boundaries for the helper (2026-11-14, review): an older
+Battery install ships a raw-only `micom-send`. Calling it as
+`micom-send fixed ...` would treat `"fixed"` as the raw array argument, send
+a malformed `SetCANMicomRecv`, exit 0, and make Tweaks report success. The
+installer therefore only prefers a Battery helper that advertises
+`SetCANFixedMicomRecv` (otherwise it installs the local copy), the restore
+path applies the same check, and the daemon verifies the file before exec
+and before reporting `can_source=service`. The installer result reports the
+*effective* configured helper, not merely the one it detected, so an
+existing valid config is not misreported. Because `/set` is unauthenticated
+on localhost and the daemon execs `can_service` as root, `/set` accepts only
+the two installer-managed `micom-send` paths; arbitrary paths are rejected.
+Finally, `blu_*_sent` means “queued to the helper,” not “micom acknowledged”:
+the factory senders use no-reply and the helper intentionally exits 0.

@@ -137,8 +137,9 @@ PY
     then break; fi
     i=$((i+1)); sleep 0.2
 done
-python3 - <<'PY'
-import json,urllib.request
+python3 - "$TMP/rw/config.conf" <<'PY'
+import json,os,sys,urllib.request
+cfg=sys.argv[1]
 d=json.load(urllib.request.urlopen("http://127.0.0.1:18091/status", timeout=3))
 assert d["ok"] is True and d["cluster_fix"] == 1
 req=urllib.request.Request("http://127.0.0.1:18091/set?cluster_fix=0", method="POST")
@@ -148,6 +149,16 @@ req=urllib.request.Request("http://127.0.0.1:18091/set?disclaimer_auto=0&disclai
 d=json.load(urllib.request.urlopen(req, timeout=3))
 assert d["disclaimer_auto"] == 0 and d["disclaimer_timeout_ms"] == 3000
 assert d["auto_dst"] == 0 and d["dst_zone"] == "Europe/Dublin" and d["ota_block"] == 0
+# /set must not be able to point the root-exec'd helper at an arbitrary path,
+# and a rejected key must not rewrite the config (mtime marker at epoch 0).
+os.utime(cfg,(0,0))
+req=urllib.request.Request("http://127.0.0.1:18091/set?can_service=/tmp/evil", method="POST")
+d=json.load(urllib.request.urlopen(req, timeout=3))
+assert d["can_service"] != "/tmp/evil", d
+assert os.stat(cfg).st_mtime == 0, "rejected /set rewrote the config"
+req=urllib.request.Request("http://127.0.0.1:18091/set?can_service=/rw_data/tweaks/bin/micom-send", method="POST")
+d=json.load(urllib.request.urlopen(req, timeout=3))
+assert d["can_service"] == "/rw_data/tweaks/bin/micom-send", d
 req=urllib.request.Request("http://127.0.0.1:18091/restore", method="POST")
 d=json.load(urllib.request.urlopen(req, timeout=3))
 assert d["cluster_fix"] == 0 and d["infotainment_fix"] == 0
@@ -255,6 +266,78 @@ grep -q -- 'array:byte:0x06,0x3f int32:12 int32:4 int32:5' "$TMP/dbus.log"
 grep -q -- '--crtc=1 --brightness=128:116:104' "$TMP/wrandr.log"
 "$BIN" --rw-dir "$TMP/rw4" --set deep_red=1 >/dev/null   # leave it on for later blocks
 echo 0 > "$TMP/rw4/projection_state"
+
+# ---- micom CAN service ------------------------------------------------
+# A configured, executable micom-send helper must be used instead of a plain
+# dbus-send child: the vendor whitelists the sender executable basename
+# (CANService), so only the helper reaches the cluster.
+mkdir -p "$TMP/rw7"
+cat > "$TMP/fake-can-service" <<EOF
+#!/bin/sh
+# SetCANFixedMicomRecv
+case "\$1" in
+fixed) : ;;
+esac
+printf '%s\n' "\$*" >> "$TMP/can.log"
+exit 0
+EOF
+chmod +x "$TMP/fake-can-service"
+cat > "$TMP/rw7/config.conf" <<EOF
+cluster_fix=1
+infotainment_fix=1
+cluster_crtc=2
+main_crtc=1
+deep_red=1
+poll_ms=1000
+wrandr_path=$TMP/fake-wrandr
+persist_helper=$TMP/fake-persist-night
+tzdata_dir=/usr/share/zoneinfo
+tzdata_version_file=$TMP/rw7/tzdata_version
+offline_status_path=$TMP/offline-dr
+dbus_send_path=$TMP/fake-dbus
+can_service=$TMP/fake-can-service
+EOF
+echo 2026f > "$TMP/rw7/tzdata_version"
+echo 1 > "$TMP/rw7/projection_state"
+: > "$TMP/can.log"
+: > "$TMP/dbus.log"
+out=$("$BIN" --rw-dir "$TMP/rw7" --once --no-dbus)
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["blu_level_sent"] == 9, d; assert d["can_source"] == "service", d; assert d["can_service"].endswith("fake-can-service"), d'
+grep -q '^fixed 0x06 0x3f 26 2 2$' "$TMP/can.log"
+grep -q '^fixed 0x06 0x3f 12 4 9$' "$TMP/can.log"
+! grep -q 'SetCANFixedMicomRecv' "$TMP/dbus.log"
+
+# A missing helper path falls back to dbus-send and reports it.
+sed -i "s|^can_service=.*|can_service=$TMP/rw7/missing|" "$TMP/rw7/config.conf"
+: > "$TMP/dbus.log"
+out=$("$BIN" --rw-dir "$TMP/rw7" --once --no-dbus)
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["can_source"] == "dbus", d; assert d["blu_level_sent"] == 9, d'
+grep -q 'SetCANFixedMicomRecv' "$TMP/dbus.log"
+
+# An old raw-only helper (no fixed mode) must not be used: it would treat
+# "fixed" as a raw array and exit 0, faking success.
+cat > "$TMP/raw-only-helper" <<'EOF'
+#!/bin/sh
+# SetCANMicomRecv only
+exit 0
+EOF
+chmod +x "$TMP/raw-only-helper"
+sed -i "s|^can_service=.*|can_service=$TMP/raw-only-helper|" "$TMP/rw7/config.conf"
+: > "$TMP/dbus.log"
+out=$("$BIN" --rw-dir "$TMP/rw7" --once --no-dbus)
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["can_source"] == "dbus", d; assert d["blu_level_sent"] == 9, d'
+grep -q 'array:byte:0x06,0x3f int32:12 int32:4 int32:9' "$TMP/dbus.log"
+
+# A CLI --set with an untrusted helper path must fail, not silently save.
+cp "$TMP/rw7/config.conf" "$TMP/rw7/config.before"
+if "$BIN" --rw-dir "$TMP/rw7" --set can_service=/tmp/evil >/dev/null 2>&1; then
+    echo "invalid --set can_service accepted" >&2
+    exit 1
+fi
+cmp -s "$TMP/rw7/config.conf" "$TMP/rw7/config.before" || {
+    echo "invalid --set can_service rewrote the config" >&2
+    exit 1
+}
 
 # ---- new controls: disclaimer, auto-DST, OTA block ---------------------
 mkdir -p "$TMP/rw2" "$TMP/update2"

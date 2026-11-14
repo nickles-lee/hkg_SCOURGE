@@ -52,6 +52,19 @@ test -f "$RW/battery_daemon"
 test -f "$RW/bin/CANService"
 test -f "$RW/bin/micom-send"
 test -f "$RW/bin/dbus-monitor"
+grep -q 'SetCANFixedMicomRecv' "$RW/bin/micom-send"
+grep -q '^fixed)' "$RW/bin/micom-send"
+# The fixed-mode interface other first-party apps use (Tweaks blue light).
+cat > "$RW/bin/CANService" <<'CANEOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CAN_LOG"
+exit 0
+CANEOF
+chmod +x "$RW/bin/CANService"
+CAN_LOG="$STUB/can.log" "$RW/bin/micom-send" fixed 0x06 0x3f 26 2 2
+grep -q 'SetCANFixedMicomRecv array:byte:0x06,0x3f int32:26 int32:2 int32:2' "$STUB/can.log"
+CAN_LOG="$STUB/can.log" "$RW/bin/micom-send" raw array:byte:0x04,0xa2,0x08,0xff
+grep -q 'SetCANMicomRecv array:byte:0x04,0xa2,0x08,0xff' "$STUB/can.log"
 test -f "$RW/smack_expected"
 [ "$(cat "$RW/smack_expected")" = _ ]
 grep -q "smack_self=_" "$USB/run_stuff_result.txt"

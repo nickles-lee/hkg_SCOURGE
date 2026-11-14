@@ -51,6 +51,10 @@
 #define DEFAULT_OFFLINE_STATUS "/update/offline_status"
 #define DEFAULT_SESSION_BUS_FILE "/tmp/session_appmgr"
 #define DEFAULT_DBUS_SEND "/usr/bin/dbus-send"
+/* Battery's micom CAN helper: a copy of the vendor dbus-send installed under
+ * the whitelisted basename CANService. The vendor micom drops CAN sends from
+ * any other executable name (see battery docs/MICOM_WHITELIST.md). */
+#define DEFAULT_CAN_SERVICE "/rw_data/battery/bin/micom-send"
 #define DEFAULT_DST_ZONE "Europe/Amsterdam"
 #define DEFAULT_DST_DIR "/rw_data/tweaks/zoneinfo"
 #define DEFAULT_XDG_RUNTIME_DIR "/var/run/user/root"
@@ -123,6 +127,7 @@ typedef struct {
     char offline_status_path[MAX_PATH];
     char session_bus_file[MAX_PATH];
     char dbus_send_path[MAX_PATH];
+    char can_service[MAX_PATH];
     char xdg_runtime_dir[MAX_PATH];
     char reboot_command[MAX_PATH];
     int reboot_wdt_ms;
@@ -653,6 +658,59 @@ static void helper_smack(const char *path, char *out, size_t size)
         snprintf(out, size, "inherit");
 }
 
+/* The micom-send wrapper must support the fixed-field call. An older Battery
+ * install shipped a raw-only wrapper: exec'ing it with "fixed" sends a
+ * malformed raw frame, exits 0, and would make the daemon report success.
+ * Treat such a helper as unavailable and fall back to dbus-send. */
+static int helper_has_fixed(const char *path)
+{
+    char buf[4096];
+    if (!path || !path[0])
+        return 0;
+    if (read_file(path, buf, sizeof(buf)) < 0)
+        return 0;
+    /* Require both the method string and a `fixed)` case label, so a
+     * raw-only wrapper that merely mentions the method in a comment is not
+     * mistaken for a fixed-capable helper. */
+    return strstr(buf, "SetCANFixedMicomRecv") != NULL &&
+           (strncmp(buf, "fixed)", 6) == 0 ||
+            strstr(buf, "\nfixed)") != NULL);
+}
+
+static int can_service_ready(void)
+{
+    return cfg.can_service[0] &&
+           access(cfg.can_service, X_OK) == 0 &&
+           helper_has_fixed(cfg.can_service);
+}
+
+/* `/set` is reachable from any local process without authentication, and the
+ * daemon execs can_service as root. Only accept the installer-managed helper
+ * locations so a local process cannot point it at an arbitrary executable.
+ * This is a lexical check: the two directories must remain root-owned and
+ * non-writable (a symlink planted inside them is out of scope). */
+static int trusted_can_service(const char *p)
+{
+    static const char *dirs[] = {
+        "/rw_data/battery/bin/",
+        "/rw_data/tweaks/bin/",
+    };
+    const char *base;
+    size_t i;
+
+    if (!p || !p[0] || strstr(p, ".."))
+        return 0;
+    base = strrchr(p, '/');
+    if (!base || strcmp(base, "/micom-send") != 0)
+        return 0;
+    for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        size_t n = strlen(dirs[i]);
+        if (!strncmp(p, dirs[i], n) && p[n] && !strchr(p + n, '/'))
+            return 1;
+    }
+    return 0;
+}
+
 static void load_expected_smack(void)
 {
     char path[MAX_PATH];
@@ -779,6 +837,7 @@ static void load_config(void)
     snprintf(cfg.session_bus_file, sizeof(cfg.session_bus_file), "%s",
              DEFAULT_SESSION_BUS_FILE);
     snprintf(cfg.dbus_send_path, sizeof(cfg.dbus_send_path), "%s", DEFAULT_DBUS_SEND);
+    snprintf(cfg.can_service, sizeof(cfg.can_service), "%s", DEFAULT_CAN_SERVICE);
     snprintf(cfg.xdg_runtime_dir, sizeof(cfg.xdg_runtime_dir), "%s",
              DEFAULT_XDG_RUNTIME_DIR);
     snprintf(cfg.reboot_command, sizeof(cfg.reboot_command), "%s",
@@ -854,6 +913,8 @@ static void load_config(void)
             snprintf(cfg.session_bus_file, sizeof(cfg.session_bus_file), "%s", v);
         else if (!strcmp(k, "dbus_send_path"))
             snprintf(cfg.dbus_send_path, sizeof(cfg.dbus_send_path), "%s", v);
+        else if (!strcmp(k, "can_service"))
+            snprintf(cfg.can_service, sizeof(cfg.can_service), "%s", v);
         else if (!strcmp(k, "xdg_runtime_dir"))
             snprintf(cfg.xdg_runtime_dir, sizeof(cfg.xdg_runtime_dir), "%s", v);
         else if (!strcmp(k, "reboot_command"))
@@ -922,6 +983,7 @@ static void save_config(void)
              "offline_status_path=%s\n"
              "session_bus_file=%s\n"
              "dbus_send_path=%s\n"
+             "can_service=%s\n"
              "xdg_runtime_dir=%s\n"
              "reboot_command=%s\n"
              "reboot_wdt_ms=%d\n",
@@ -932,7 +994,8 @@ static void save_config(void)
              cfg.disclaimer_timeout_ms, cfg.auto_dst, cfg.dst_zone, cfg.dst_check_ms,
              cfg.ota_block, cfg.wrandr_path, cfg.persist_helper, cfg.tzdata_dir,
              cfg.zones_file, cfg.tzdata_version_file, cfg.offline_status_path,
-             cfg.session_bus_file, cfg.dbus_send_path, cfg.xdg_runtime_dir,
+             cfg.session_bus_file, cfg.dbus_send_path, cfg.can_service,
+             cfg.xdg_runtime_dir,
              cfg.reboot_command, cfg.reboot_wdt_ms);
     write_atomic(path, data);
 }
@@ -1801,19 +1864,32 @@ static int apply_gamma(int crtc, const char *gamma, char *last, size_t last_size
  */
 static int send_blu_signal(int start_bit, int size, int data)
 {
-    /* dbus-send takes each message argument as a separate argv word; a single
-     * combined string is parsed as one array-of-bytes value and the call goes
-     * out with signature "ay" instead of "ayiii" (verified against a real
-     * dbus-daemon in the VM lab). */
-    char arg_id[32], arg_bit[16], arg_size[16], arg_data[16], outpath[MAX_PATH];
+    /* Preferred path: Battery's micom-send helper. The vendor micom only
+     * accepts CAN sends from a process whose executable basename is on its
+     * whitelist (CANService); a plain dbus-send child is dropped. The helper
+     * is a copy of the vendor dbus-send installed under that name and takes
+     * "fixed <idhi> <idlo> <start> <size> <data>".
+     *
+     * Fallback: the direct dbus-send call (correct destination/interface and
+     * separate argv words), kept for hosts without the helper; the micom may
+     * reject it because of the basename check, which then shows up in
+     * blu_call.out and failures.log. */
+    char arg_hi[8], arg_lo[8], arg_bit[8], arg_size[8], arg_data[8];
+    char arg_id[32], arg_bit_i[16], arg_size_i[16], arg_data_i[16];
+    char outpath[MAX_PATH];
     int fd;
     pid_t pid;
 
+    snprintf(arg_hi, sizeof(arg_hi), "0x%02x", BLU_CAN_ID_HI);
+    snprintf(arg_lo, sizeof(arg_lo), "0x%02x", BLU_CAN_ID_LO);
+    snprintf(arg_bit, sizeof(arg_bit), "%d", start_bit);
+    snprintf(arg_size, sizeof(arg_size), "%d", size);
+    snprintf(arg_data, sizeof(arg_data), "%d", data);
     snprintf(arg_id, sizeof(arg_id), "array:byte:0x%02x,0x%02x",
              BLU_CAN_ID_HI, BLU_CAN_ID_LO);
-    snprintf(arg_bit, sizeof(arg_bit), "int32:%d", start_bit);
-    snprintf(arg_size, sizeof(arg_size), "int32:%d", size);
-    snprintf(arg_data, sizeof(arg_data), "int32:%d", data);
+    snprintf(arg_bit_i, sizeof(arg_bit_i), "int32:%d", start_bit);
+    snprintf(arg_size_i, sizeof(arg_size_i), "int32:%d", size);
+    snprintf(arg_data_i, sizeof(arg_data_i), "int32:%d", data);
     snprintf(outpath, sizeof(outpath), "%s/blu_call.out", cfg.rw_dir);
     fd = open(outpath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0)
@@ -1825,20 +1901,28 @@ static int send_blu_signal(int start_bit, int size, int data)
     }
     if (pid == 0) {
         dup2(fd, STDOUT_FILENO);
-        /* Capture dbus-send's errors too: a failed micom send must leave
-         * evidence in blu_call.out for the failure log. */
+        /* Capture helper errors too: a failed micom send must leave evidence
+         * in blu_call.out for the failure log. */
         dup2(fd, STDERR_FILENO);
         close(fd);
+        if (cfg.can_service[0] && access(cfg.can_service, X_OK) == 0 &&
+            helper_has_fixed(cfg.can_service)) {
+            execl(cfg.can_service, "micom-send", "fixed",
+                  arg_hi, arg_lo, arg_bit, arg_size, arg_data, (char *)NULL);
+            /* Exec failed; fall through to the direct call. */
+        }
         execl(cfg.dbus_send_path, "dbus-send", "--system", "--print-reply",
               "--reply-timeout=8000",
               "--dest=com.lge.car.micom", "/Can",
               "com.lge.car.micom.can.SetCANFixedMicomRecv",
-              arg_id, arg_bit, arg_size, arg_data, (char *)NULL);
+              arg_id, arg_bit_i, arg_size_i, arg_data_i, (char *)NULL);
         {
-            char err[256];
+            char err[320];
             int len = snprintf(err, sizeof(err),
                               "exec %s failed: %s\n",
-                              cfg.dbus_send_path, strerror(errno));
+                              cfg.can_service[0] ? cfg.can_service
+                                                 : cfg.dbus_send_path,
+                              strerror(errno));
             if (len > 0)
                 (void)!write(STDOUT_FILENO, err, strnlen(err, sizeof(err)));
         }
@@ -2442,6 +2526,8 @@ static void build_status(char *out, size_t size)
     char tzver[128], smack[128], smack_json[256];
     char smack_expected[128], smack_expected_json[256];
     char smack_dbus[128], smack_dbus_json[256];
+    char can_service_json[MAX_PATH * 2];
+    const char *can_source;
     char rmsg[256], rerr[512], rcmd[MAX_PATH];
     char hsource[32];
     int64_t wdt_in = 0;
@@ -2460,6 +2546,11 @@ static void build_status(char *out, size_t size)
     json_escape(smack_expected, smack_expected_json, sizeof(smack_expected_json));
     helper_smack(cfg.dbus_send_path, smack_dbus, sizeof(smack_dbus));
     json_escape(smack_dbus, smack_dbus_json, sizeof(smack_dbus_json));
+    json_escape(cfg.can_service, can_service_json, sizeof(can_service_json));
+    /* The source send_blu_signal will actually use right now. The micom
+     * silently drops a plain dbus-send child (basename whitelist), so a
+     * `dbus` source means the cluster write is expected to be ignored. */
+    can_source = can_service_ready() ? "service" : "dbus";
     json_escape(rt.reboot_message, rmsg, sizeof(rmsg));
     json_escape(rt.reboot_error, rerr, sizeof(rerr));
     json_escape(cfg.reboot_command, rcmd, sizeof(rcmd));
@@ -2508,6 +2599,8 @@ static void build_status(char *out, size_t size)
              "\"blu_forced\":%d,"
              "\"blu_status_sent\":%d,"
              "\"blu_level_sent\":%d,"
+             "\"can_service\":\"%s\","
+             "\"can_source\":\"%s\","
              "\"disclaimer_auto\":%d,"
              "\"disclaimer_timeout_ms\":%d,"
              "\"auto_dst\":%d,"
@@ -2564,6 +2657,8 @@ static void build_status(char *out, size_t size)
              rt.blu_forced ? 1 : 0,
              rt.blu_status_sent,
              rt.blu_level_sent,
+             can_service_json,
+             can_source,
              cfg.disclaimer_auto ? 1 : 0,
              cfg.disclaimer_timeout_ms,
              cfg.auto_dst ? 1 : 0,
@@ -3064,6 +3159,10 @@ static int apply_config_key(const char *k, const char *v)
     else if (!strcmp(k, "ota_block")) {
         cfg.ota_block = parse_bool(v) == 1;
         rt.ota_explicit_off = !cfg.ota_block;
+    } else if (!strcmp(k, "can_service")) {
+        if (!trusted_can_service(v))
+            return 0;
+        snprintf(cfg.can_service, sizeof(cfg.can_service), "%s", v);
     } else
         return 0;
     return 1;
@@ -3166,13 +3265,13 @@ static void handle_http(int fd)
             "cluster_fix", "infotainment_fix", "cluster_crtc", "main_crtc",
             "warmth_override", "force_filter_on", "deep_red", "disclaimer_auto",
             "disclaimer_timeout_ms", "auto_dst", "dst_zone", "dst_check_ms",
-            "ota_block", NULL
+            "ota_block", "can_service", NULL
         };
         int changed = 0;
         for (int i = 0; keys[i]; i++) {
             if (query_param(query, keys[i], val, sizeof(val))) {
-                apply_config_key(keys[i], val);
-                changed = 1;
+                if (apply_config_key(keys[i], val))
+                    changed = 1;
             }
         }
         if (changed) {

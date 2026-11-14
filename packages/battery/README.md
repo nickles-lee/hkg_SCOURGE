@@ -192,7 +192,10 @@ dbus-send --system --type=method_call --dest=com.lge.car.micom /Can \
   wrapper around a copy of the vendor `dbus-send` installed as
   `/rw_data/battery/bin/CANService`.  The vendor micom only accepts CAN sends
   from a short list of process names; `dbus-send` is not on it.  See
-  `docs/MICOM_WHITELIST.md`.
+  `docs/MICOM_WHITELIST.md`.  The wrapper also has a
+  `fixed <idhi> <idlo> <start> <size> <data>` mode for
+  `SetCANFixedMicomRecv`, used by Tweaks for the cluster blue-light 0x063F
+  signals; the raw `micom-send <array>` interface is unchanged.
 - Full WiCAN sequence mimicry: the `0x0C7` burst at 40 ms pacing plus the
   `0x4E8`/`0x4CC` cluster countdown during start and stop; without BMS
   status the start assumes active after the 70 s timeout; exhausted start

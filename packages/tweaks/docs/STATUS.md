@@ -1,6 +1,6 @@
 # Status — Tweaks app build
 
-**Date:** 2026-11-10
+**Date:** 2026-11-14
 **Target:** Ioniq 5 Gen5W, `NE_E.EUR.S5W_L.001.001.260128`
 
 ## Done
@@ -13,6 +13,12 @@
   - deep red night mode toggle (front 128:32:16, cluster CAN level 9)
   - daemon/persist run on the SMACK floor label `_` (micom/system-bus access);
     live label exposed in /status and /health
+  - cluster CAN sends go through the Battery micom helper
+    (`/rw_data/battery/bin/micom-send`, whitelisted `CANService` basename);
+    only a fixed-capable helper is accepted, so an older raw-only Battery
+    install falls back to a local `/rw_data/tweaks/bin/` copy. The installer
+    records `can_service=`/`can_source=` for the effective configured path,
+    and `/status` exposes `can_source` (`service` or `dbus`).
   - `/reboot`: `systemctl reboot --no-block`, then `sync()` + micom
     `SetETCCPUWDTReset array:byte:0x00` if the daemon is still alive after
     20 s; update/process guard and CSRF header
@@ -67,6 +73,9 @@
 - Confirm `tweaks_persist read` returns the blue-light keys on the car.
 - Confirm `dbus-monitor` sees `carplay_play_enable_status`,
   `android_auto_play_enable_status`, and `front_drawing_application`.
+- Confirm the micom whitelist path on the car: `status.json` must show
+  `"can_source":"service"` and the cluster must change; a `dbus` source means
+  the helper is missing and the vendor micom will drop the frame.
 - Visual check that the cluster and projection tints match.
 - Reboot persistence and restore check.
 - Confirm disclaimer auto-accept after reboot and touch-cancel behaviour.
