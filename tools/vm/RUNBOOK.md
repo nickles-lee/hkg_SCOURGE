@@ -113,7 +113,7 @@ python3 -B launch.py run --kernel compat --profile research \
 python3 -B launch.py list --limit 10
 python3 -B launch.py list --label battery
 python3 -B launch.py show <run-id>              # prints a schema: line to stderr
-python3 -B launch.py show <run-id> --strict     # exit 1 on schema problems
+python3 -B launch.py show <run-id> --strict     # same validate_file checks as check-run
 python3 -B launch.py check-run <run-id>         # JSON schema report, exit 0/1
 python3 -B launch.py extract <run-id> qmp-screenshot.png /tmp/shot.png
 python3 -B launch.py prune --keep 800        # dry-run

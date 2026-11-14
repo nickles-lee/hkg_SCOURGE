@@ -2123,13 +2123,8 @@ def main() -> int:
                 ap.error(f'run result not found: {run_path}')
             raw = run_path.read_text()
             print(raw, end='' if raw.endswith('\n') else '\n')
-            try:
-                data = json.loads(raw)
-                problems = validate_result(data)
-                state = schema_state(data, problems)
-            except json.JSONDecodeError as exc:
-                problems = [f'invalid JSON: {exc}']
-                state = 'invalid'
+            data, problems = validate_file(run_path)
+            state = schema_state(data, problems)
             print(f"schema: {state}"
                   + (f" ({len(problems)} problem(s))" if problems else ''),
                   file=sys.stderr)

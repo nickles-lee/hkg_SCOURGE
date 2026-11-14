@@ -229,6 +229,14 @@ class ResultSchemaTests(unittest.TestCase):
                  '--strict'], cwd=VM, capture_output=True, text=True, check=False)
             self.assertEqual(strict.returncode, 1)
             self.assertIn('schema: invalid', strict.stderr)
+
+            (run_dir / 'result.json').write_text(json.dumps(
+                valid_result(run_dir='/tmp/not-this-run')))
+            mismatch = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'show', run_id,
+                 '--strict'], cwd=VM, capture_output=True, text=True, check=False)
+            self.assertEqual(mismatch.returncode, 1)
+            self.assertIn('schema: invalid', mismatch.stderr)
         finally:
             import shutil
             shutil.rmtree(run_dir, ignore_errors=True)

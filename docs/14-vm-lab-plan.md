@@ -899,5 +899,7 @@ items beyond that.
   buttons. 381 tests; 182 VM commits.
 - **2026-11-14 — click parsing**: clear `--click X,Y` validation. 382 tests;
   183 VM commits.
+- **2026-11-14 — show consistency**: `show --strict` uses validate_file.
+  382 tests; 184 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
