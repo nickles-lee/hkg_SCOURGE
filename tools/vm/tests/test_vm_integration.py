@@ -695,6 +695,42 @@ class VMIntegrationTests(unittest.TestCase):
             self.assertIn('DRY_STATE_OK',
                           (directory / 'guest-output.log').read_text())
 
+    def test_daemon_config_missing_recovery(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-noconfig-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                (daemon_dir / 'config.json').unlink()
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+                values = json.loads(stopped.stdout)
+                self.assertEqual(values['state'], 'stopped')
+
+                restarted = cli('start', '--daemon-dir', str(daemon_dir),
+                                '--ready-timeout', '120', '--lock-timeout', '120')
+                self.assertEqual(restarted.returncode, 0,
+                                 restarted.stdout + restarted.stderr)
+                self.assertTrue((daemon_dir / 'config.json').is_file())
+                alive = cli('exec', '--daemon-dir', str(daemon_dir),
+                            '--cmd', 'echo CONFIG_MISSING_RECOVERED')
+                self.assertEqual(alive.returncode, 0,
+                                 alive.stdout + alive.stderr)
+                self.assertIn('CONFIG_MISSING_RECOVERED', alive.stdout)
+            finally:
+                cli('stop', '--daemon-dir', str(daemon_dir))
+
     def test_daemon_console_missing_serial(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-noserial-') as tmp:
             daemon_dir = Path(tmp) / 'daemon'
