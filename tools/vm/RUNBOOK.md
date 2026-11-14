@@ -127,7 +127,8 @@ overlays there) and, by default, skip any directory without `result.json`
 
 `check-run` validates the result core schema (`schema_version`, verdict, rc,
 timings, images/overlays, per-image provenance, `harness_sources` hashes,
-checks, lock/pin and related fields), requires a current-schema result's
+storage volume evidence, power-loss/USB-removal evidence, checks, lock/pin and
+related fields), requires a current-schema result's
 `run_dir` to match the directory it was loaded from, and includes
 verdict/rc consistency: PASS/DRY-RUN require rc 0, BLOCKED requires rc 77 and
 blockers, FAIL requires a nonzero rc.

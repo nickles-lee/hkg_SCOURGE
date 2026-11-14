@@ -72,6 +72,72 @@ def _check_overlays(value, problems: list[str]) -> None:
             problems.append(f'{prefix}.state_dir must be a string')
 
 
+def _check_storage(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('storage must be an object')
+        return
+    if value.get('mode') not in ('flat', 'split'):
+        problems.append('storage.mode must be flat or split')
+    volumes = value.get('volumes')
+    if not isinstance(volumes, dict):
+        problems.append('storage.volumes must be an object')
+    else:
+        for name, volume in volumes.items():
+            prefix = f'storage.volumes.{name}'
+            if not isinstance(volume, dict):
+                problems.append(f'{prefix} must be an object')
+                continue
+            for key in ('mountpoint', 'backing', 'overlay_name', 'filesystem'):
+                if not isinstance(volume.get(key), str) or not volume[key]:
+                    problems.append(f'{prefix}.{key} must be a non-empty string')
+            if not _is_int(volume.get('size_mib')) or volume['size_mib'] <= 0:
+                problems.append(f'{prefix}.size_mib must be a positive integer')
+            if not isinstance(volume.get('mount_options'), str):
+                problems.append(f'{prefix}.mount_options must be a string')
+    if 'setup' in value and not isinstance(value['setup'], dict):
+        problems.append('storage.setup must be an object')
+    if ('setup_seconds' in value
+            and not _is_number(value['setup_seconds'])):
+        problems.append('storage.setup_seconds must be a number')
+    for key in ('nonce', 'seed', 'transport'):
+        if key in value and not isinstance(value[key], str):
+            problems.append(f'storage.{key} must be a string')
+    for key in ('synthetic', 'production_layout_verified'):
+        if key in value and not isinstance(value[key], bool):
+            problems.append(f'storage.{key} must be boolean')
+
+
+def _check_power_loss(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('power_loss must be an object')
+        return
+    for key in ('requested', 'marker_seen', 'killed'):
+        if key in value and not isinstance(value[key], bool):
+            problems.append(f'power_loss.{key} must be boolean')
+    if 'marker' in value and (not isinstance(value['marker'], str)
+                              or not value['marker']):
+        problems.append('power_loss.marker must be a non-empty string')
+    if 'error' in value and not isinstance(value['error'], str):
+        problems.append('power_loss.error must be a string')
+
+
+def _check_usb_removal(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('usb_removal must be an object')
+        return
+    for key in ('requested', 'marker_seen'):
+        if key in value and not isinstance(value[key], bool):
+            problems.append(f'usb_removal.{key} must be boolean')
+    for key in ('device_id', 'marker'):
+        if key in value and (not isinstance(value[key], str)
+                             or not value[key]):
+            problems.append(f'usb_removal.{key} must be a non-empty string')
+    if 'qmp' in value and not isinstance(value['qmp'], dict):
+        problems.append('usb_removal.qmp must be an object')
+    if 'error' in value and not isinstance(value['error'], str):
+        problems.append('usb_removal.error must be a string')
+
+
 def _check_sources(value, problems: list[str]) -> None:
     if not isinstance(value, dict):
         problems.append('harness_sources must be an object')
@@ -130,6 +196,12 @@ def validate_result(result) -> list[str]:
     _check_overlays(result.get('overlays'), problems)
     if 'harness_sources' in result:
         _check_sources(result['harness_sources'], problems)
+    if 'storage' in result:
+        _check_storage(result['storage'], problems)
+    if result.get('power_loss') is not None:
+        _check_power_loss(result['power_loss'], problems)
+    if result.get('usb_removal') is not None:
+        _check_usb_removal(result['usb_removal'], problems)
     profile = result.get('profile')
     if not isinstance(profile, dict) or not isinstance(profile.get('name'), str):
         problems.append('profile.name must be a string')

@@ -93,6 +93,48 @@ class ResultSchemaTests(unittest.TestCase):
                          'harness_sources.a'):
             self.assertIn(expected, joined)
 
+    def test_evidence_structures(self) -> None:
+        good = valid_result(
+            storage={
+                'mode': 'split',
+                'volumes': {'update': {
+                    'mountpoint': '/update', 'size_mib': 16,
+                    'backing': '/b', 'overlay_name': 'storage_update',
+                    'filesystem': 'ext4', 'mount_options': 'rw'}},
+                'setup': {}, 'setup_seconds': 1.0, 'nonce': 'n',
+                'seed': 's', 'transport': 't', 'synthetic': True,
+                'production_layout_verified': False},
+            power_loss={'requested': True, 'marker': 'M',
+                        'marker_seen': True, 'killed': True},
+            usb_removal={'requested': True, 'device_id': 'usbdev',
+                         'marker': 'M', 'marker_seen': True,
+                         'qmp': {'ok': True}})
+        self.assertEqual(validate_result(good), [])
+
+        bad = valid_result(
+            storage={
+                'mode': 'raid',
+                'volumes': {'bad': 'str', 'worse': {
+                    'mountpoint': '', 'size_mib': 0, 'backing': 1,
+                    'overlay_name': '', 'filesystem': '',
+                    'mount_options': 1}},
+                'setup': [], 'setup_seconds': 'x', 'nonce': 1,
+                'synthetic': 'yes', 'production_layout_verified': 1},
+            power_loss={'requested': 'yes', 'marker': '',
+                        'marker_seen': 1, 'killed': 1, 'error': 1},
+            usb_removal={'requested': 'yes', 'device_id': '', 'marker': 1,
+                         'marker_seen': 1, 'qmp': 'x', 'error': 1})
+        joined = '\n'.join(validate_result(bad))
+        for expected in ('storage.mode', 'storage.volumes.bad',
+                         'storage.volumes.worse.mountpoint',
+                         'storage.volumes.worse.size_mib',
+                         'storage.setup must be an object',
+                         'storage.setup_seconds', 'storage.nonce',
+                         'storage.synthetic', 'power_loss.requested',
+                         'power_loss.marker', 'usb_removal.device_id',
+                         'usb_removal.qmp', 'usb_removal.error'):
+            self.assertIn(expected, joined)
+
     def test_verdict_rc_consistency(self) -> None:
         cases = [
             (valid_result(verdict='PASS', rc=1), 'PASS requires rc == 0'),
