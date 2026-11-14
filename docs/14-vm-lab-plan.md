@@ -677,5 +677,9 @@ items beyond that.
 - **2026-11-14 — real warmup/provenance benchmark test**: one warmup + one
   measured boot, schema-valid document, PASS rows, source provenance and
   metrics. Real run PASS (14.1 s). 297 tests (28 skipped); 98 VM commits.
+- **2026-11-14 — daemon state-lock contention**: external `state.lock`
+  holder makes start fail with state-busy and no QEMU; release then verifies
+  clean start/exec/stop. Real run PASS (7.7 s). 298 tests (29 skipped); 99
+  VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

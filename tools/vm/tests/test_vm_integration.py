@@ -4,6 +4,7 @@
 """Opt-in tests: vendor programs execute only in the isolated QEMU guest."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -162,6 +163,58 @@ class VMIntegrationTests(unittest.TestCase):
                     [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', 'stop',
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
+
+    def test_daemon_state_lock_contention(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-lock-') as tmp:
+            root = Path(tmp)
+            state = root / 'state'
+            state.mkdir()
+            failed_dir = root / 'failed-daemon'
+            clean_dir = root / 'clean-daemon'
+            lock_path = state / 'state.lock'
+            holder = open(lock_path, 'w')
+            fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            try:
+                failed = cli('start', '--daemon-dir', str(failed_dir),
+                             '--state', str(state),
+                             '--ready-timeout', '120', '--lock-timeout', '120')
+                combined = failed.stdout + failed.stderr
+                self.assertNotEqual(failed.returncode, 0, combined)
+                self.assertIn('state is already in use', combined)
+                status = json.loads((failed_dir / 'status.json').read_text())
+                self.assertEqual(status['state'], 'error')
+                self.assertNotIn('qemu_pid', status)
+
+                fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+                holder.close()
+
+                started = cli('start', '--daemon-dir', str(clean_dir),
+                              '--state', str(state),
+                              '--ready-timeout', '120', '--lock-timeout', '120')
+                combined = started.stdout + started.stderr
+                if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                    self.skipTest('VM lab is busy with another run')
+                self.assertEqual(started.returncode, 0, combined)
+                alive = cli('exec', '--daemon-dir', str(clean_dir),
+                            '--cmd', 'echo STATE_LOCK_RECOVERED')
+                self.assertEqual(alive.returncode, 0,
+                                 alive.stdout + alive.stderr)
+                self.assertIn('STATE_LOCK_RECOVERED', alive.stdout)
+                stopped = cli('stop', '--daemon-dir', str(clean_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+            finally:
+                try:
+                    fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+                except (OSError, ValueError):
+                    pass
+                holder.close()
 
     def test_daemon_state_reset(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-reset-') as tmp:
