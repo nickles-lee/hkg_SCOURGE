@@ -189,7 +189,10 @@ python3 -B launch.py daemon stop
 
 The daemon keeps the QEMU process, serial reader, QMP socket and state lock
 alive; `exec`/`screenshot` use a control socket in `runs/daemon/`.
-`daemon list --root runs [--json]` reports every daemon directory with its
+`daemon screenshot` keeps at most `--screenshot-keep N` (default 10) newest
+`screenshot-*.png` captures in the daemon directory; older captures are
+pruned and reported in the response `pruned` list. `daemon list --root runs
+[--json]` reports every daemon directory with its
 recorded state, daemon/QEMU PID liveness and kernel/state config without
 contacting the sockets; a ready/starting record whose daemon process is gone
 is marked `STALE` (JSON `stale: true`), and `--fail-stale` makes the

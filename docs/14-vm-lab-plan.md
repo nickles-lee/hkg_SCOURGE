@@ -848,5 +848,7 @@ items beyond that.
 - **2026-11-14 — frame-limit boundary**: overflow write logged/dropped,
   decoded state unchanged; real vehicle-state PASS on nine checks. 357 tests;
   159 VM commits.
+- **2026-11-14 — screenshot retention bound**: `--screenshot-keep` prunes
+  daemon captures; unit + gated coverage. 359 tests; 160 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

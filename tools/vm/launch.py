@@ -134,6 +134,7 @@ def daemon_restart_argv(config: dict, daemon_dir: Path,
         ('ready_timeout', '--ready-timeout'),
         ('lock_timeout', '--lock-timeout'),
         ('command_log_max', '--command-log-max'),
+        ('screenshot_keep', '--screenshot-keep'),
         ('pin_cpu', '--pin-cpu'),
     )
     for key, flag in mapping:
@@ -1649,6 +1650,8 @@ def main() -> int:
                     help='lock queue wait, capped at --ready-timeout')
     ds.add_argument('--command-log-max', type=int, default=1024 * 1024,
                     help='daemon command-log cap in bytes (rotates once)')
+    ds.add_argument('--screenshot-keep', type=int, default=10,
+                    help='keep the newest N screenshot captures in the daemon dir')
     ds.add_argument('--pin-cpu', type=int, default=None, metavar='N',
                     help='pin all QEMU threads to host CPU N (performance experiment)')
     dserve = dsub.add_parser('_serve')
@@ -1800,6 +1803,8 @@ def main() -> int:
                     ap.error(str(exc))
             if args.command_log_max <= 0:
                 ap.error('--command-log-max must be positive')
+            if args.screenshot_keep <= 0:
+                ap.error('--screenshot-keep must be positive')
             if args.kernel == 'compat':
                 pin = verify_kernel_pin()
                 if not pin['ok']:
@@ -1837,6 +1842,7 @@ def main() -> int:
                 'ready_timeout': args.ready_timeout,
                 'lock_timeout': args.lock_timeout,
                 'command_log_max': args.command_log_max,
+                'screenshot_keep': args.screenshot_keep,
                 'pin_cpu': args.pin_cpu,
             }
             try:

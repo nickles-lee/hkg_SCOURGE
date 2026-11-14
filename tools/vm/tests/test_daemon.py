@@ -106,7 +106,7 @@ class DaemonTests(unittest.TestCase):
             'usb_host': ['058f:6366'], 'smp': 2, 'memory_mb': 3072,
             'apic': True, 'label': 'demo', 'cache': 'writethrough',
             'ready_timeout': 42, 'lock_timeout': 43,
-            'command_log_max': 1234, 'pin_cpu': 3,
+            'command_log_max': 1234, 'screenshot_keep': 7, 'pin_cpu': 3,
         }
         argv = launch.daemon_restart_argv(config, self.root)
         joined = ' '.join(argv)
@@ -119,7 +119,8 @@ class DaemonTests(unittest.TestCase):
                          '--smp 2', '--memory 3072', '--apic',
                          '--label demo', '--cache writethrough',
                          '--ready-timeout 42', '--lock-timeout 43',
-                         '--command-log-max 1234', '--pin-cpu 3'):
+                         '--command-log-max 1234', '--screenshot-keep 7',
+                         '--pin-cpu 3'):
             self.assertIn(expected, joined)
         self.assertNotIn('--reset', argv)
         self.assertIn('--reset', launch.daemon_restart_argv(
@@ -188,6 +189,18 @@ class DaemonTests(unittest.TestCase):
         self.assertFalse(daemon.daemon_pid_matches(os.getpid()))
         self.assertFalse(daemon.daemon_pid_matches(99999999))
         self.assertFalse(daemon.daemon_pid_matches(None))
+
+    def test_prune_screenshots_keeps_newest(self) -> None:
+        for index in range(4):
+            path = self.root / f'screenshot-{index}.png'
+            path.write_bytes(b'png')
+            os.utime(path, (100 + index, 100 + index))
+        removed = daemon.prune_screenshots(self.root, 2)
+        self.assertEqual(sorted(removed), ['screenshot-0.png', 'screenshot-1.png'])
+        remaining = sorted(path.name for path in self.root.glob('screenshot-*.png'))
+        self.assertEqual(remaining, ['screenshot-2.png', 'screenshot-3.png'])
+        self.assertEqual(daemon.prune_screenshots(self.root, 0), [])
+        self.assertEqual(len(list(self.root.glob('screenshot-*.png'))), 2)
 
     def test_command_log_rotation_cap(self) -> None:
         path = self.root / 'commands.log'

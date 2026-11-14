@@ -21,6 +21,27 @@ from .governor import LockTimeout, run_lock
 
 DEFAULT_DAEMON_DIR = "runs/daemon"
 DEFAULT_COMMAND_LOG_MAX = 1024 * 1024
+DEFAULT_SCREENSHOT_KEEP = 10
+
+
+def prune_screenshots(daemon_dir: Path, keep: int) -> list[str]:
+    """Keep the newest `keep` screenshot captures; return removed names."""
+    if keep <= 0:
+        return []
+    directory = Path(daemon_dir)
+    try:
+        files = sorted(directory.glob("screenshot-*.png"),
+                       key=lambda path: path.stat().st_mtime, reverse=True)
+    except OSError:
+        return []
+    removed = []
+    for path in files[keep:]:
+        try:
+            path.unlink()
+            removed.append(path.name)
+        except OSError:
+            pass
+    return removed
 
 
 def append_command_log(path: Path, text: str, max_bytes: int) -> None:
@@ -280,6 +301,7 @@ def _serve(config: dict) -> int:
 
     daemon_dir = Path(config["daemon_dir"])
     command_log_max = int(config.get("command_log_max", DEFAULT_COMMAND_LOG_MAX))
+    screenshot_keep = int(config.get("screenshot_keep", DEFAULT_SCREENSHOT_KEEP))
     kernel_target = config.get("kernel_target", "vendor")
     status = {"state": "starting", "daemon_pid": os.getpid(), "mode": kernel_target,
               "daemon_dir": str(daemon_dir), "started": time.time()}
@@ -429,6 +451,9 @@ def _serve(config: dict) -> int:
                     output.parent.mkdir(parents=True, exist_ok=True)
                     result = launch.qmp_screendump(qmp_socket, output)
                     response = {"ok": True, "screenshot": result}
+                    pruned = prune_screenshots(daemon_dir, screenshot_keep)
+                    if pruned:
+                        response["pruned"] = pruned
                 elif action == "stop":
                     # Never let a long-running exec hold stop hostage. Sync
                     # only when the guest lock is available without waiting.
