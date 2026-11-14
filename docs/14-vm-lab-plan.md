@@ -850,5 +850,8 @@ items beyond that.
   159 VM commits.
 - **2026-11-14 — screenshot retention bound**: `--screenshot-keep` prunes
   daemon captures; unit + gated coverage. 359 tests; 160 VM commits.
+- **2026-11-14 — regression summary diagnostics**: suite rows carry
+  guest_rc/error/failures/checks; real two-scenario suite PASS. 361 tests;
+  161 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

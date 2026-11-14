@@ -417,7 +417,9 @@ python3 -B launch.py run --cmd '...' --no-lock   # controlled opt-out only
 `result.json` records the lock (`held`, `path`, `pid`, `waited_seconds`);
 inside a regression suite the child runs record `held: false` because the
 suite holds the lock, and `summary.json` records both `locked: true` and the
-`suite_lock` evidence. Daemon status records the lock it holds.
+`suite_lock` evidence, plus per-run `guest_rc`, `error`, bounded
+`failures`/`failure_count` and `checks` for triage without the child log.
+Daemon status records the lock it holds.
 A blocked second run exits with a clear `another VM boot holds ...` error.
 
 ## Virgl experiment

@@ -20,6 +20,29 @@ from harness.storage import parse_sizes
 VM = Path(__file__).resolve().parent
 
 
+def summarize_run(iteration: int, scenario_name: str, detail: dict, rc: int,
+                  result_file: Path | None, log: Path) -> dict:
+    """One suite row, including enough detail to triage without the log."""
+    failures = detail.get("failures") or []
+    if not isinstance(failures, list):
+        failures = [str(failures)]
+    return {
+        "iteration": iteration,
+        "scenario": scenario_name,
+        "verdict": detail.get("verdict", "FAIL"),
+        "rc": rc,
+        "guest_rc": detail.get("guest_rc"),
+        "error": detail.get("error"),
+        "failures": failures[:5],
+        "failure_count": len(failures),
+        "checks": detail.get("checks"),
+        "known_failure": bool(detail.get("known_failure")),
+        "known_issue": detail.get("known_issue"),
+        "result": str(result_file) if result_file else None,
+        "log": str(log),
+    }
+
+
 def run_suite(args, scenarios, lock_info: dict | None = None) -> int:
     directory = VM / 'runs' / f'regression-{time.time_ns()}'
     directory.mkdir(parents=True)
@@ -61,13 +84,11 @@ def run_suite(args, scenarios, lock_info: dict | None = None) -> int:
             first = next((line[5:] for line in text.splitlines() if line.startswith('run: ')), None)
             result_file = Path(first) / 'result.json' if first else None
             detail = json.loads(result_file.read_text()) if result_file and result_file.is_file() else {}
-            verdict = detail.get('verdict', 'FAIL')
-            known_failure = bool(detail.get('known_failure'))
-            results.append({'iteration': iteration + 1, 'scenario': scenario['name'],
-                            'verdict': verdict, 'rc': completed.returncode,
-                            'known_failure': known_failure,
-                            'known_issue': detail.get('known_issue'),
-                            'result': str(result_file) if result_file else None, 'log': str(log)})
+            row = summarize_run(iteration + 1, scenario['name'], detail,
+                                completed.returncode, result_file, log)
+            results.append(row)
+            verdict = row['verdict']
+            known_failure = row['known_failure']
             label = f'{verdict} (known)' if known_failure else verdict
             print(f"{iteration + 1}/{args.repeat} {scenario['name']}: {label} rc={completed.returncode}", flush=True)
     unchanged = before == identities()
