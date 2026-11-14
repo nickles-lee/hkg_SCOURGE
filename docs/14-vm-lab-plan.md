@@ -623,5 +623,9 @@ items beyond that.
   test writes a marker through one daemon, stops it, restarts on the same
   `--state`, and verifies the marker survives; real run PASS (52.6 s).
   280 tests (14 skipped).
+- **2026-11-14 — QMP screenshot regression test**: gated `ui-smoke` run
+  captures a real QMP frame, baselines it, verifies zero-diff, then perturbs
+  a copy and requires a failure. Real run PASS (20.7 s). 281 tests
+  (15 skipped).
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

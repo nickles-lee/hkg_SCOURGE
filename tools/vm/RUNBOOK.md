@@ -279,7 +279,10 @@ python3 -B launch.py visual list
 Baselines live in `baselines/` (gitignored); `compare` writes a diff PNG and
 reports changed pixels/ratio. A deliberate UI change is rebaselined by
 running the `baseline` command against the reviewed frame. Baselines are
-workspace-local, so each agent can choose the frames it guards.
+workspace-local, so each agent can choose the frames it guards. The opt-in
+VM suite (`IONIQ_RUN_VM_TESTS=1`) includes an end-to-end test that captures a
+real `ui-smoke` QMP frame, baselines it, compares it (zero changed pixels),
+then perturbs a copy and requires the diff to fail.
 
 ## Dry run
 

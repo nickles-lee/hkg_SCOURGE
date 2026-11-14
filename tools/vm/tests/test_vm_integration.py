@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
@@ -160,6 +161,61 @@ class VMIntegrationTests(unittest.TestCase):
                     [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', 'stop',
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
+
+    def test_qmp_screenshot_visual_regression(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow required for visual regression')
+        name = f'ui-smoke-test-{os.getpid()}'
+        baselines = VM / 'baselines'
+        baseline_png = baselines / f'{name}.png'
+        baseline_json = baselines / f'{name}.png.json'
+        diff_png = baselines / f'{name}.png.diff.png'
+        temp_id = f'visual-diff-{os.getpid()}'
+        temp_dir = VM / 'runs' / temp_id
+        process, result = self.run_guest(
+            '--kernel', 'compat', '--scenario', 'ui-smoke',
+            '--qmp-screenshot', '--timeout', '180')
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertEqual(result['verdict'], 'PASS')
+        shot = Path(result['screenshot']['qmp']['path'])
+        self.assertTrue(shot.is_file())
+        self.assertTrue((result['screenshot'].get('qmp_pixels') or {}).get('bbox'))
+        run_id = Path(result['run_dir']).name
+
+        def visual(*args):
+            return subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'visual', *args],
+                cwd=VM, capture_output=True, text=True, timeout=60)
+
+        try:
+            created = visual('baseline', run_id, 'qmp-screenshot.png', name)
+            self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
+            same = visual('compare', run_id, 'qmp-screenshot.png', name,
+                          '--threshold', '0.0')
+            self.assertEqual(same.returncode, 0, same.stdout + same.stderr)
+            same_status = json.loads(same.stdout)
+            self.assertTrue(same_status['ok'])
+            self.assertEqual(same_status['changed_pixels'], 0)
+
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            with Image.open(shot) as image:
+                changed = image.convert('RGB')
+            changed.putpixel((0, 0), (255, 0, 0))
+            changed.save(temp_dir / 'qmp-screenshot.png')
+            different = visual('compare', temp_id, 'qmp-screenshot.png', name,
+                               '--threshold', '0.0')
+            self.assertEqual(different.returncode, 1,
+                             different.stdout + different.stderr)
+            changed_status = json.loads(different.stdout)
+            self.assertFalse(changed_status['ok'])
+            self.assertGreater(changed_status['changed_pixels'], 0)
+            self.assertTrue(Path(changed_status['diff']).is_file())
+        finally:
+            for path in (baseline_png, baseline_json, diff_png):
+                path.unlink(missing_ok=True)
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_daemon_state_survives_restart(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-state-') as tmp:
