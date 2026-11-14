@@ -1456,7 +1456,8 @@ def doctor(verify_images: bool = False, tools: Path | None = None,
     result_schema = check_all_results(VM)
     check("result_schema", result_schema["ok"], {
         k: result_schema[k]
-        for k in ("checked", "valid", "legacy", "invalid", "missing")
+        for k in ("checked", "valid", "legacy", "invalid", "missing",
+                  "bench_only")
     })
     bench_schema = check_all_bench(VM)
     check("bench_schema", bench_schema["ok"], {

@@ -877,5 +877,7 @@ items beyond that.
   warmups are invalid. 370 tests; 171 VM commits.
 - **2026-11-14 — list state filter**: daemon list can filter by state/stale.
   371 tests; 172 VM commits.
+- **2026-11-14 — bench-only result accounting**: benchmark dirs are separate
+  from missing runs. 371 tests; 173 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

@@ -189,7 +189,8 @@ def schema_state(result: dict | None, problems: list[str]) -> str:
 def check_all_results(vm_dir: Path) -> dict:
     """Bulk-validate every run with a result.json; missing dirs are reported."""
     root = Path(vm_dir) / 'runs'
-    counts = {'valid': 0, 'legacy': 0, 'invalid': 0, 'missing': 0}
+    counts = {'valid': 0, 'legacy': 0, 'invalid': 0, 'missing': 0,
+              'bench_only': 0}
     problems: list[dict] = []
     entries = []
     try:
@@ -199,7 +200,10 @@ def check_all_results(vm_dir: Path) -> dict:
     for path in entries:
         result_file = path / 'result.json'
         if not result_file.is_file():
-            counts['missing'] += 1
+            if (path / 'bench.json').is_file():
+                counts['bench_only'] += 1
+            else:
+                counts['missing'] += 1
             continue
         data, validation = validate_file(result_file)
         if data is None:

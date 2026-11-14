@@ -155,6 +155,9 @@ class ResultSchemaTests(unittest.TestCase):
                 data = valid_result(run_dir=str(path), **overrides)
                 (path / 'result.json').write_text(json.dumps(data))
             (runs_root / 'missing').mkdir()
+            bench_only = runs_root / 'bench-only'
+            bench_only.mkdir()
+            (bench_only / 'bench.json').write_text('{}')
             report = check_all_results(root)
             self.assertFalse(report['ok'])
             self.assertEqual(report['checked'], 3)
@@ -162,6 +165,7 @@ class ResultSchemaTests(unittest.TestCase):
             self.assertEqual(report['legacy'], 1)
             self.assertEqual(report['invalid'], 1)
             self.assertEqual(report['missing'], 1)
+            self.assertEqual(report['bench_only'], 1)
             self.assertEqual(report['problems'][0]['run'], 'invalid')
 
     def test_list_schema_filter(self) -> None:

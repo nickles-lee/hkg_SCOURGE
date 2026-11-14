@@ -132,7 +132,8 @@ checks, lock/pin and related fields), requires a current-schema result's
 verdict/rc consistency: PASS/DRY-RUN require rc 0, BLOCKED requires rc 77 and
 blockers, FAIL requires a nonzero rc.
 `check-run --all` scans every run result and reports `valid`, `legacy`,
-`invalid` and result-less dirs, exiting 1 only when a current-schema result is
+`invalid`, result-less dirs (`missing`) and benchmark-only dirs
+(`bench_only`), exiting 1 only when a current-schema result is
 invalid/unreadable. `list --json` includes `schema_state`/`schema_ok`/
 `schema_problems`, and `list --schema ok|legacy|invalid|missing` filters runs
 by state; current-schema invalid results get a `!schema` marker in text
