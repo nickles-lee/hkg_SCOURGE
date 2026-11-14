@@ -131,7 +131,8 @@ invalid/unreadable. `list --json` includes `schema_state`/`schema_ok`/
 `schema_problems`, and `list --schema ok|legacy|invalid|missing` filters runs
 by state; current-schema invalid results get a `!schema` marker in text
 output, while older schema versions are reported as `legacy`. `doctor`
-reports the same bulk `result_schema` health.
+reports the same bulk `result_schema` health plus `bench_schema` health for
+every `runs/bench-*/bench.json`.
 
 State reuse:
 

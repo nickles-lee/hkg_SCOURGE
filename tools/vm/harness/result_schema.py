@@ -157,6 +157,41 @@ def check_all_results(vm_dir: Path) -> dict:
     }
 
 
+def check_all_bench(vm_dir: Path) -> dict:
+    """Bulk-validate every bench.json under runs/."""
+    root = Path(vm_dir) / 'runs'
+    checked = valid = invalid = 0
+    problems: list[dict] = []
+    try:
+        paths = sorted(root.glob('*/bench.json'))
+    except OSError:
+        paths = []
+    for path in paths:
+        checked += 1
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            invalid += 1
+            problems.append({'bench': path.parent.name,
+                             'problems': [f'cannot read: {exc}']})
+            continue
+        document_problems = validate_bench(data)
+        if document_problems:
+            invalid += 1
+            problems.append({'bench': path.parent.name,
+                             'problems': document_problems})
+        else:
+            valid += 1
+    return {
+        'ok': invalid == 0,
+        'checked': checked,
+        'valid': valid,
+        'invalid': invalid,
+        'problem_count': len(problems),
+        'problems': problems[:100],
+    }
+
+
 BENCH_VERDICTS = VERDICTS
 
 

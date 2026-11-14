@@ -62,8 +62,8 @@ from harness.state import StateBusy, create_state_overlays
 from harness.visual import baseline as visual_baseline
 from harness.visual import compare as visual_compare
 from harness.visual import list_baselines
-from harness.result_schema import (check_all_results, schema_state,
-                                   validate_file, validate_result)
+from harness.result_schema import (check_all_bench, check_all_results,
+                                   schema_state, validate_file, validate_result)
 from harness.results import evaluate, evaluate_systemd_transition, phase_summary
 from harness.scenarios import scenario_state
 from harness.storage import VOLUMES, cleanup_storage, create_storage, mount_script, parse_sizes
@@ -1451,6 +1451,10 @@ def doctor(verify_images: bool = False, tools: Path | None = None,
         k: result_schema[k]
         for k in ("checked", "valid", "legacy", "invalid", "missing")
     })
+    bench_schema = check_all_bench(VM)
+    check("bench_schema", bench_schema["ok"], {
+        k: bench_schema[k] for k in ("checked", "valid", "invalid")
+    })
 
     state = compat_state(VM)
     if graphics:
@@ -1477,6 +1481,8 @@ def doctor(verify_images: bool = False, tools: Path | None = None,
         actions.append("fix scenario JSON contract problems reported by doctor")
     if checks.get("result_schema", {}).get("ok") is False:
         actions.append("inspect invalid runs: launch.py check-run --all")
+    if checks.get("bench_schema", {}).get("ok") is False:
+        actions.append("inspect invalid benchmark documents under runs/bench-*")
     if graphics:
         if checks.get("compat_initramfs", {}).get("ok") is False:
             actions.append("build the compat initramfs: sh compat/build-initramfs.sh")

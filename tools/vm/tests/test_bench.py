@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from bench import (build_argv, compare_bench, result_path, source_state,
                    row_verdict, summarize, validate_child, validate_matrix,
                    variants)
-from harness.result_schema import validate_bench
+from harness.result_schema import check_all_bench, validate_bench
 from harness.config import load_scenario
 
 VM = Path(__file__).resolve().parents[1]
@@ -63,6 +63,30 @@ def child_result(**overrides):
 
 
 class BenchTests(unittest.TestCase):
+    def test_check_all_bench_reports_documents(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='vm-bench-all-') as tmp:
+            root = Path(tmp)
+            good = root / 'runs' / 'bench-good'
+            good.mkdir(parents=True)
+            (good / 'bench.json').write_text(json.dumps(
+                {'ok': True, 'repeats': 1, 'scenarios': ['boot'],
+                 'rows': [], 'summary': {}}))
+            bad = root / 'runs' / 'bench-bad'
+            bad.mkdir()
+            (bad / 'bench.json').write_text(json.dumps({'ok': 'yes'}))
+            empty = root / 'runs' / 'bench-empty'
+            empty.mkdir()
+            report = check_all_bench(root)
+            self.assertFalse(report['ok'])
+            self.assertEqual(report['checked'], 2)
+            self.assertEqual(report['valid'], 1)
+            self.assertEqual(report['invalid'], 1)
+            self.assertEqual(report['problems'][0]['bench'], 'bench-bad')
+            (bad / 'bench.json').unlink()
+            report = check_all_bench(root)
+            self.assertTrue(report['ok'])
+            self.assertEqual(report['checked'], 1)
+
     def test_bench_schema_row_consistency(self) -> None:
         row = {'scenario': 'boot', 'iteration': 1, 'cache': None,
                'pin_cpu': None, 'verdict': 'PASS', 'rc': 0, 'log': 'x.log'}
