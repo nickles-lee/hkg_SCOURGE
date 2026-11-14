@@ -106,7 +106,7 @@ def main():
     s = can_socket()
 
     stub_dir = tempfile.mkdtemp(prefix="battery_stub_")
-    stub = os.path.join(stub_dir, "dbus-send")
+    stub = os.path.join(stub_dir, "CANService")
     dbus_log = os.path.join(stub_dir, "dbus.log")
     dbus_fail = os.path.join(stub_dir, "fail")
     door_fail = os.path.join(stub_dir, "door_fail")
@@ -151,7 +151,8 @@ def main():
     daemon = subprocess.Popen(
         [DAEMON, "--iface", IFACE, "--port", str(PORT),
          "--status-file", "/tmp/battery_status.json",
-         "--dbus-send", stub,
+         "--micom-send", stub,
+         "--temp-hold-ms", "1000",
          "--session-bus-file", bus_file],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     try:
@@ -231,19 +232,30 @@ def main():
 
         st = http("/status")
         assert st["batt_min_c"] == 7, st
-        assert st["temp_source"] == "0x2FC", st
+        assert st["temp_source"] == "0x2FC b2", st
+        assert st["batt_b2"] == 7 and st["batt_b4"] == 0, st
+        assert st["temp_byte"] == 2, st
         assert st["batt_raw"] == "0A 00 07 08 00 00 90 9D", st
         assert st["soc_pct"] == 78.5, st
         assert st["soc_valid"] is True, st
-        print("baseline ok: 0x2FC min 7 C, SoC", st["soc_pct"])
+        print("baseline ok: 0x2FC b2 7 C, SoC", st["soc_pct"])
 
-        # 0x152 must not override the fresh 0x2FC minimum.
-        send(s, 0x152, [10, 12, 0, 0, 0, 0, 0, 0])
-        time.sleep(0.1)
+        # A single 0x2FC frame with b2=0 is held at the last non-zero value.
+        send(s, 0x2FC, [0x0A, 0, 0, 8, 0, 0, 0x90, 0x9D])
+        time.sleep(0.05)
         st = http("/status")
         assert st["batt_min_c"] == 7, st
-        assert st["temp_source"] == "0x2FC", st
-        print("0x152 fallback priority ok")
+        assert "held" in st["temp_source"], st
+        print("0x2FC transient-zero hold ok")
+
+        # After the hold window a sustained 0 is reported as 0.
+        time.sleep(1.2)
+        send(s, 0x2FC, [0x0A, 0, 0, 8, 0, 0, 0x90, 0x9D])
+        time.sleep(0.05)
+        st = http("/status")
+        assert st["batt_min_c"] == 0, st
+        assert st["temp_source"] == "0x2FC b2", st
+        print("0x2FC sustained-zero expiry ok")
 
         # Min temperature at/above 21 C blocks preheat (WiCAN cutoff).
         send(s, 0x2FC, [0x0A, 0, 21, 0, 0, 0, 0x90, 0x9D])
@@ -342,7 +354,6 @@ def main():
 
         # ---- advisory checks must not block --------------------------
         send(s, 0x2FC, [0x0A, 0, 7, 8, 0, 0, 0x90, 0x18])  # 12%
-        send(s, 0x152, [25, 25, 0, 0, 0, 0, 0, 0])
         send(s, 0x2AE, [0x01, 0x00, 0xFF, 0x3F, 0x06, 0x01, 0x00, 0x00])
         time.sleep(0.1)
         r = http("/start", "POST")
@@ -555,7 +566,7 @@ def main():
         proc2 = subprocess.Popen(
             [DAEMON, "--iface", IFACE, "--port", str(PORT2),
              "--status-file", "/tmp/battery_status2.json",
-             "--dbus-send", stub, "--no-session-monitor",
+             "--micom-send", stub, "--no-session-monitor",
              "--retry-ms", "300", "--started-timeout-ms", "1500"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         try:

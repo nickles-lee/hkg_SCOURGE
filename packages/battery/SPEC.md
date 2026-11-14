@@ -53,8 +53,9 @@ through `com.lge.car.micom` `/Can` `SetCANMicomRecv`.
 | `0x2FC` | SoC and battery temperature | byte7 / 2 = percent; byte2 = minimum °C (the factory `CANService` `m_nEVMinBattTempVal`). Byte 3 is not used. |
 | `0x326` | charge connector | `(byte3 >> 2) & 3` non-zero = cable connected; `byte4 & 3` non-zero = charging |
 
-`0x152` byte0 is a min-temperature fallback when `0x2FC` has not been seen for
-5 s. The page shows only the minimum cell temperature; there is no max.
+There is no `0x152` fallback: the factory `CANService` only decodes `0x2FC`.
+The daemon holds the last non-zero value through a transient 0 (`--temp-hold-ms`,
+default 60 s) and can be switched to Gen2 byte4 with `--temp-byte 4`. The page shows only the minimum cell temperature; there is no max.
 
 ### 4.2 M-CAN commands (TX, via micom)
 
@@ -97,7 +98,7 @@ but the QML uses the factory models instead:
 |---|---|---|---|
 | `0x036` | gear | raw frame kept; `gear_b3` = `byte3 & 3`, `gear_b4` = `byte4 & 0x0F` — the two factory binaries disagree on the byte (AppHomeScreen reads byte3, TmsRemoteApp byte4), so both are reported and the on-car sniff settles it | `AppNModeModel.gearPosRightTxtImg` |
 | `0x038` | READY | `(byte0 & 0x0F) == 0x04` | `AppPHEVModel.vcuEvReady` |
-| `0x152` | battery temp | byte0/1 signed °C | daemon `0x2FC` |
+| `0x2FC` | min cell temp | byte2 (Gen3High) or byte4 (Gen2); default byte2 |
 | `0x2AD` | precondition state | `byte1 & 0x1F`: 00 off, 01 idle, 05 preparing, 15 active | `AppPHEVModel.heatBatteryPercent` |
 | `0x2AE` | utility | byte4 01 normal, 06 utility | `AppPHEVModel.utilityMode` |
 | `0x3AA` | charge door | `(byte4 >> 1) & 3`: 1 open, 2 closed | daemon last command |
@@ -232,8 +233,9 @@ POST /logs/dump
 `charging`, `door_state`, `door_state_name`, `door_known`, `door_source`,
 `door_warn`, `door_opt`, `door_busy`, `door_allowed`, `door_block_reason`,
 `door_message`, `batt_cond`, `batt_cond_known`, `gear_raw`, `gear_b3`,
-`gear_b4`, `smack`, `smack_expected`, `smack_ok`, `smack_send`,
-`smack_monitor`, `dump_state`, `dump_message`, `dump_dir`,
+`gear_b4`, `batt_b2`, `batt_b4`, `batt_age_ms`, `temp_byte`,
+`smack`, `smack_expected`, `smack_ok`, `smack_send`, `smack_monitor`,
+`micom_name`, `micom_path`, `dump_state`, `dump_message`, `dump_dir`,
 `home_seq`, `home_source`, `last_app_key`, `home_monitor`,
 `ver`, `send_ok`, `send_fail`, `last_send`.
 
@@ -401,9 +403,14 @@ cable state is advisory; the gear/Park signal is not a gate for now.
      the install fails; there is no silent fallback.
    - Remove each destination before copying: `cp -f` keeps the destination
      inode and its xattrs, so a stale exec label would otherwise survive.
+   - Copy the vendor `dbus-send` to `/rw_data/battery/bin/CANService` and
+     install the `/rw_data/battery/bin/micom-send` wrapper; stamp both with
+     the same label.  The daemon sends every CAN frame through the wrapper,
+     which keeps the whitelisted `CANService` process alive.  See
+     `docs/MICOM_WHITELIST.md`.
    - Write the expected label to `/rw_data/battery/smack_expected`; the
-     daemon reports `smack`, `smack_expected`, `smack_ok`, `smack_send` and
-     `smack_monitor` in `/status`.
+     daemon reports `smack`, `smack_expected`, `smack_ok`, `smack_send`,
+     `smack_monitor`, `micom_name` and `micom_path` in `/status`.
    - After starting the service, read the live daemon's
      `/proc/<pid>/attr/current` into `daemon_smack`; a mismatch is reported
      as `smack_check=mismatch` and fails the install.
@@ -433,7 +440,7 @@ Environment overrides used by the offline test:
 
 | Test | Result |
 |---|---|
-| `tests/test_daemon.py` on `vcan0` | pass (0x2FC temp, micom 0x0C7 at 40 ms, 0x4E8/0x4CC cluster display, assume-active, cleanup stop burst, factory door frames 0x4A2 (arm/open/close), door gates, optimistic feedback, door send-fail not masked by dash frames, BMS 0x00 stop exit, cluster display without preheat, unknown-cable door, 0x25D batt_cond, 0x036 raw gear, session-bus Home/Star monitor, `/logs` tail, manual USB dump, error dump + 10 min rate limit, sniff) |
+| `tests/test_daemon.py` on `vcan0` | pass (0x2FC b2/b4 + transient-zero hold, micom 0x0C7 at 40 ms, 0x4E8/0x4CC cluster display, assume-active, cleanup stop burst, factory door frames 0x4A2 (arm/open/close), door gates, optimistic feedback, door send-fail not masked by dash frames, BMS 0x00 stop exit, cluster display without preheat, unknown-cable door, 0x25D batt_cond, 0x036 raw gear, session-bus Home/Star monitor, `/logs` tail, manual USB dump, error dump + 10 min rate limit, sniff) |
 | `tests/test_logdump.sh` | pass (bundle contents, reason, pruning to 5, no-USB failure) |
 | `tests/test_installer.sh` | pass (install, reinstall, restore, Hello, restore-after-Hello) |
 | `qmllint` (vendor Qt 5.4, 260128 VM) | pass for all five QML files |
@@ -446,6 +453,9 @@ Environment overrides used by the offline test:
   then reports the commanded state (`door_source = "command"`).
 - `0x326` byte3 bit 2 is the AC connector status. DC fast charging also sets
   the charging bit, which the daemon treats as cable present.
+- The `0x2FC` temperature byte depends on the CAN generation (byte2 on
+  Gen3High, byte4 on Gen2).  The default is byte2; `--temp-byte 4` selects
+  byte4.  The footer shows both bytes so one car run settles it.
 - The page is a QML overlay inside `AppHomeScreen`, not a separate process/app
   ID.
 - The daemon assumes `can0` is I-CAN; other interfaces can be selected with

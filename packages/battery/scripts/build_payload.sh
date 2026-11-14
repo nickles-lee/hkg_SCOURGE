@@ -38,6 +38,7 @@ cp -a "$HERE/artifacts/systemd/battery-daemon.service" "$OUT/payload/systemd/"
 cp -a "$HERE/src/battery_daemon" "$OUT/payload/bin/battery_daemon"
 cp -a "$HERE/backup/AppHomeScreen" "$OUT/backup/"
 cp -a "$HERE/docs/README_STICK.txt" "$OUT/README.txt"
+cp -a "$HERE/docs/MICOM_WHITELIST.md" "$OUT/docs/"
 
 # Hash of the Hello-patched Advanced file this payload was generated from.
 md5sum "$HERE/backup/hello/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.qml" \

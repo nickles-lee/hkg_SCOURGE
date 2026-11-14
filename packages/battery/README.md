@@ -106,10 +106,12 @@ The installer:
 4. Installs the QML, icons, daemon and systemd unit. On a reinstall, a failed
    QML copy is retried after unlinking the destination (and remounting `/`
    rw if it went ro); the original `cp` error is kept in the install log.
-   The daemon and the copied `dbus-send`/`dbus-monitor` helpers are stamped
-   with the installer's own SMACK label (`_` in the normal USB flow). The
-   install fails if the `SMACK64EXEC` readback does not match, and reports
-   the live daemon label as `daemon_smack` in `run_stuff_result.txt`.
+   The daemon and the `CANService`/`dbus-monitor` helpers are stamped with
+   the installer's own SMACK label (`_` in the normal USB flow). The install
+   fails if the `SMACK64EXEC` readback does not match, and reports the live
+   daemon label as `daemon_smack` in `run_stuff_result.txt`.  `CANService` is
+   the micom sender; the vendor service only accepts CAN sends from that
+   process name.  See `docs/MICOM_WHITELIST.md`.
 5. Starts and enables `battery-daemon.service`.
 6. Restarts `AppHomeScreen` through AppLauncher app ID 11.
 
@@ -141,8 +143,10 @@ observed charging cable vetoes the command.
 
 The daemon also writes `/rw_data/battery/status.json` once per second; the QML
 page falls back to that file if HTTP is unavailable. `/status` includes
-`smack`, `smack_expected`, `smack_ok`, `smack_send`, `smack_monitor` so the
-privileged daemon and its helpers can be verified without a shell.
+`smack`, `smack_expected`, `smack_ok`, `smack_send`, `smack_monitor`,
+`micom_name`, `micom_path`, `batt_b2`, `batt_b4`, `batt_age_ms` and
+`temp_byte` so the privileged daemon, its helpers and the temperature source
+can be verified without a shell.
 
 ### Live console and USB log dumps
 
@@ -184,6 +188,11 @@ dbus-send --system --type=method_call --dest=com.lge.car.micom /Can \
   `0x4C5` is not a door command; it belongs to the target-SoC path.
   An unknown cable state (no `0x326` on the bus) is advisory and no longer
   blocks the door.
+- All micom frames are sent through `/rw_data/battery/bin/micom-send`, a
+  wrapper around a copy of the vendor `dbus-send` installed as
+  `/rw_data/battery/bin/CANService`.  The vendor micom only accepts CAN sends
+  from a short list of process names; `dbus-send` is not on it.  See
+  `docs/MICOM_WHITELIST.md`.
 - Full WiCAN sequence mimicry: the `0x0C7` burst at 40 ms pacing plus the
   `0x4E8`/`0x4CC` cluster countdown during start and stop; without BMS
   status the start assumes active after the 70 s timeout; exhausted start
@@ -214,7 +223,8 @@ dbus-send --system --type=method_call --dest=com.lge.car.micom /Can \
 
 ## Test evidence
 
-- `python3 tests/test_daemon.py` on `vcan0`: `0x2FC` temperature, micom
+- `python3 tests/test_daemon.py` on `vcan0`: `0x2FC` b2/b4 temperature with
+  transient-zero hold, micom
   `0x0C7`/`0x4ED`/`0x4A2` arrays, the charge-door cable gate (gear gate
   disabled), optimistic feedback, the send-failed path, the session-bus
   Home/Star monitor, the WiCAN sequence tests (assume-active, cleanup stop,
@@ -228,6 +238,10 @@ dbus-send --system --type=method_call --dest=com.lge.car.micom /Can \
 - The daemon runs on the vendor 4.1.27 kernel (`--help` verified in the VM).
 - A `dbus-monitor` capture confirms the micom call carries
   `04 a2 08 ff ff ff df ff ff ff ff`.
+- The `CANService`/`micom-send` helper pair is installed by `run_stuff.sh`
+  from the vendor `dbus-send`; the VM validates its D-Bus message.  The micom
+  whitelist itself is documented in `docs/MICOM_WHITELIST.md` and verified
+  on-car with `battery_daemon --micom-check` / `--micom-test`.
 
 ## Known limitations
 

@@ -10,11 +10,13 @@ ConditionPathExists=/rw_data/battery/battery_daemon
 [Service]
 Type=simple
 Environment=PATH=/bin:/sbin:/usr/bin:/usr/sbin
-# The daemon and the D-Bus helpers copied by the installer carry the same
-# SMACK64EXEC label as run_stuff.sh itself (normally "_").  Do not use
-# SmackProcessLabel: the vendor 4.1.27 kernel only supports /proc/attr/current
-# and systemd reports status 237/SMACK_PROCESS_LABEL.
-ExecStart=/bin/sh -c 'exec /rw_data/battery/battery_daemon --iface can0 --port 8088 --status-file /rw_data/battery/status.json --dbus-send /rw_data/battery/bin/dbus-send --dbus-monitor /rw_data/battery/bin/dbus-monitor >> /rw_data/battery/daemon.log 2>&1'
+# The daemon and the micom helper carry the same SMACK64EXEC label as
+# run_stuff.sh itself (normally "_").  The micom service only accepts CAN
+# sends from a small set of process names; the helper is installed as
+# "CANService" and stays alive briefly for the micom's sender check.
+# Do not use SmackProcessLabel: the vendor 4.1.27 kernel only supports
+# /proc/attr/current and systemd reports status 237/SMACK_PROCESS_LABEL.
+ExecStart=/bin/sh -c 'exec /rw_data/battery/battery_daemon --iface can0 --port 8088 --status-file /rw_data/battery/status.json --micom-send /rw_data/battery/bin/micom-send --micom-bin /rw_data/battery/bin/CANService --dbus-monitor /rw_data/battery/bin/dbus-monitor >> /rw_data/battery/daemon.log 2>&1'
 Restart=always
 RestartSec=3
 

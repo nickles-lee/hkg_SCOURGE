@@ -206,19 +206,43 @@ chmod 755 "$RW_DIR/battery_daemon" 2>/dev/null || true
 chown root:root "$RW_DIR/battery_daemon" 2>/dev/null || true
 set_exec_label "$RW_DIR/battery_daemon"
 
-# D-Bus helpers.  Copy them under /rw_data and stamp the same exec label, so
-# the daemon's children never depend on how the vendor labeled /usr/bin/dbus-*.
+# Micom helper.  The vendor micom only accepts CAN sends from a small set of
+# process names (AppHomeScreen, TmsRemoteApp, micommanager_userspace,
+# CANService); see docs/MICOM_WHITELIST.md.  The vendor dbus-send binary is
+# copied under the whitelisted name, and a tiny wrapper keeps it alive for
+# the micom's /proc/<pid>/exe check.
 HELPER_DIR="$RW_DIR/bin"
 mkdir -p "$HELPER_DIR" 2>/dev/null || fail "cannot create $HELPER_DIR"
-for _tool in dbus-send dbus-monitor; do
-    _src=$(command -v "$_tool" 2>/dev/null || true)
-    [ -n "$_src" ] && [ -x "$_src" ] || fail "helper not found: $_tool"
-    rm -f "$HELPER_DIR/$_tool" 2>/dev/null || true
-    cp -f "$_src" "$HELPER_DIR/$_tool" || fail "helper copy failed: $_tool"
-    chmod 755 "$HELPER_DIR/$_tool" 2>/dev/null || true
-    chown root:root "$HELPER_DIR/$_tool" 2>/dev/null || true
-    set_exec_label "$HELPER_DIR/$_tool"
-done
+_src=$(command -v dbus-send 2>/dev/null || true)
+[ -n "$_src" ] && [ -x "$_src" ] || fail "helper not found: dbus-send"
+rm -f "$HELPER_DIR/CANService" 2>/dev/null || true
+cp -f "$_src" "$HELPER_DIR/CANService" || fail "helper copy failed: CANService"
+chmod 755 "$HELPER_DIR/CANService" 2>/dev/null || true
+chown root:root "$HELPER_DIR/CANService" 2>/dev/null || true
+set_exec_label "$HELPER_DIR/CANService"
+
+cat > "$HELPER_DIR/micom-send" <<EOF
+#!/bin/sh
+"$HELPER_DIR/CANService" --system --type=method_call --print-reply \
+    --reply-timeout=500 --dest=com.lge.car.micom /Can \
+    com.lge.car.micom.can.SetCANMicomRecv "\$1" >/dev/null 2>&1
+exit 0
+EOF
+chmod 755 "$HELPER_DIR/micom-send" 2>/dev/null || true
+chown root:root "$HELPER_DIR/micom-send" 2>/dev/null || true
+set_exec_label "$HELPER_DIR/micom-send"
+
+# Session-bus Home/Star monitor.  This is not a micom sender and is not
+# subject to the whitelist.
+_src=$(command -v dbus-monitor 2>/dev/null || true)
+[ -n "$_src" ] && [ -x "$_src" ] || fail "helper not found: dbus-monitor"
+rm -f "$HELPER_DIR/dbus-monitor" 2>/dev/null || true
+cp -f "$_src" "$HELPER_DIR/dbus-monitor" || fail "helper copy failed: dbus-monitor"
+chmod 755 "$HELPER_DIR/dbus-monitor" 2>/dev/null || true
+chown root:root "$HELPER_DIR/dbus-monitor" 2>/dev/null || true
+set_exec_label "$HELPER_DIR/dbus-monitor"
+# Remove the old dbus-send copy; the daemon no longer uses it for micom.
+rm -f "$HELPER_DIR/dbus-send" 2>/dev/null || true
 
 # Expected label for the daemon's self-check, and fresh runtime files so an
 # old labeled status/log cannot block the new process or the QML file path.
@@ -296,7 +320,7 @@ if [ "$daemon_status" != "systemd-ok" ]; then
         if ! pidof battery_daemon >/dev/null 2>&1; then
             ( "$RW_DIR/battery_daemon" --iface can0 --port 8088 \
                 --status-file "$RW_DIR/status.json" \
-                --dbus-send "$RW_DIR/bin/dbus-send" \
+                --micom-send "$RW_DIR/bin/micom-send" --micom-bin "$RW_DIR/bin/CANService" \
                 --dbus-monitor "$RW_DIR/bin/dbus-monitor" \
                 >> "$RW_DIR/daemon.log" 2>&1 & ) 2>/dev/null || true
             sleep 1
@@ -344,7 +368,7 @@ if [ -n "$payload_daemon_md5" ] && command -v md5sum >/dev/null 2>&1; then
         if ! pidof battery_daemon >/dev/null 2>&1 && [ -x "$RW_DIR/battery_daemon" ]; then
             ( "$RW_DIR/battery_daemon" --iface can0 --port 8088 \
                 --status-file "$RW_DIR/status.json" \
-                --dbus-send "$RW_DIR/bin/dbus-send" \
+                --micom-send "$RW_DIR/bin/micom-send" --micom-bin "$RW_DIR/bin/CANService" \
                 --dbus-monitor "$RW_DIR/bin/dbus-monitor" \
                 >> "$RW_DIR/daemon.log" 2>&1 & ) 2>/dev/null || true
             sleep 1
@@ -441,7 +465,7 @@ result "status=$final_status" "already_patched=$already" "variant=$variant" \
        "backup=$BACKUP_HU" "installed=$installed" "daemon=$daemon_status" \
        "daemon_fresh=$daemon_fresh" \
        "daemon_smack=${daemon_smack:-none}" \
-       "smack_check=$smack_check" \
+       "smack_check=$smack_check" "micom=CANService" \
        "restart=$restart" "asset_warnings=$ASSET_WARNINGS" "log=$LOG"
 log "=== battery payload done ==="
 [ "$final_status" = "OK" ] || exit 1

@@ -64,7 +64,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BATTERY_DAEMON_VERSION "2026-11-10.6"
+#define BATTERY_DAEMON_VERSION "2026-11-14.1"
 
 #define IFACE_DEFAULT "can0"
 #define HTTP_PORT 8088
@@ -73,7 +73,6 @@
 #define ID_BMU 0x0C7
 #define ID_CLUSTER 0x4E8        /* cluster distance/flag display */
 #define ID_CLUSTER_ICON 0x4CC   /* cluster icon request, data[0] = 0x02 */
-#define ID_BATT_TEMP 0x152
 #define ID_BATT_COND 0x25D
 #define ID_SOC 0x2FC
 #define ID_PRECOND 0x2AD
@@ -161,6 +160,17 @@ static int g_batt_min_c = 0;
 static bool g_batt_valid = false;
 static int64_t g_batt_ms = 0;
 static const char *g_temp_source = "none";
+/* 0x2FC carries the min cell temperature in byte 2 on Gen3High and in
+ * byte 4 on Gen2.  The daemon defaults to byte 2 (factory Gen3High) and can
+ * be switched with --temp-byte 4.  A transient 0 in the selected byte is
+ * held at the last non-zero value for --temp-hold-ms. */
+static int g_temp_b2 = 0;
+static int g_temp_b4 = 0;
+static int g_temp_byte = 2;
+static int g_temp_hold = 0;
+static bool g_temp_hold_valid = false;
+static int64_t g_temp_hold_ms = 0;
+static int64_t g_temp_hold_opt_ms = 60000;
 static uint8_t g_soc_frame[8];
 static bool g_soc_frame_valid = false;
 static int g_soc_raw = 0;
@@ -216,8 +226,14 @@ static int g_door_attempts = 0;
 static int64_t g_door_deadline_ms = 0;
 static int64_t g_door_last_ms = 0;
 static char g_door_msg[64] = "unknown";
-static const char *g_dbus_send = "/usr/bin/dbus-send";
-/* The charge-door feedback tracks the exit status of its OWN dbus-send
+/* The micom only accepts CAN-send calls from a small set of process names
+ * (see docs/MICOM_WHITELIST.md).  The installer ships this helper as
+ * "CANService"; it stays alive briefly so the micom's /proc/<pid>/exe check
+ * can resolve it. */
+static const char *g_micom_send = "/rw_data/battery/bin/micom-send";
+static const char *g_micom_bin = "/rw_data/battery/bin/CANService";
+static char g_micom_name[64] = "CANService";
+/* The charge-door feedback tracks the exit status of its OWN micom helper
  * child.  A single shared status would be clobbered by the burst and dash
  * sends (the dash forks a child every 500 ms), masking a failed door
  * command as a success. */
@@ -358,8 +374,11 @@ static void init_smack_diag(void)
     g_smack_ok = (g_smack_expected[0] == '\0' ||
                   strcmp(g_smack, g_smack_expected) == 0);
 
-    helper_label(g_dbus_send, g_smack_send, sizeof(g_smack_send));
+    helper_label(g_micom_bin, g_smack_send, sizeof(g_smack_send));
     helper_label(g_dbus_monitor, g_smack_monitor, sizeof(g_smack_monitor));
+    const char *mslash = strrchr(g_micom_bin, '/');
+    snprintf(g_micom_name, sizeof(g_micom_name), "%s",
+             mslash ? mslash + 1 : g_micom_bin);
 
     fprintf(stderr,
             "battery_daemon: smack=%s expected=%s ok=%s "
@@ -413,17 +432,16 @@ static int can_open(const char *iface, bool filtered)
         return -1;
     }
 
-    struct can_filter filter[10];
-    filter[0].can_id = ID_BATT_TEMP; filter[0].can_mask = CAN_SFF_MASK;
-    filter[1].can_id = ID_BATT_COND; filter[1].can_mask = CAN_SFF_MASK;
-    filter[2].can_id = ID_SOC;       filter[2].can_mask = CAN_SFF_MASK;
-    filter[3].can_id = ID_PRECOND;   filter[3].can_mask = CAN_SFF_MASK;
-    filter[4].can_id = ID_POWER;     filter[4].can_mask = CAN_SFF_MASK;
-    filter[5].can_id = ID_UTIL;      filter[5].can_mask = CAN_SFF_MASK;
-    filter[6].can_id = ID_CLUSTER;   filter[6].can_mask = CAN_SFF_MASK;
-    filter[7].can_id = ID_GEAR;      filter[7].can_mask = CAN_SFF_MASK;
-    filter[8].can_id = ID_CHARGE;    filter[8].can_mask = CAN_SFF_MASK;
-    filter[9].can_id = ID_CHARGEDOOR;filter[9].can_mask = CAN_SFF_MASK;
+    struct can_filter filter[9];
+    filter[0].can_id = ID_BATT_COND; filter[0].can_mask = CAN_SFF_MASK;
+    filter[1].can_id = ID_SOC;       filter[1].can_mask = CAN_SFF_MASK;
+    filter[2].can_id = ID_PRECOND;   filter[2].can_mask = CAN_SFF_MASK;
+    filter[3].can_id = ID_POWER;     filter[3].can_mask = CAN_SFF_MASK;
+    filter[4].can_id = ID_UTIL;      filter[4].can_mask = CAN_SFF_MASK;
+    filter[5].can_id = ID_CLUSTER;   filter[5].can_mask = CAN_SFF_MASK;
+    filter[6].can_id = ID_GEAR;      filter[6].can_mask = CAN_SFF_MASK;
+    filter[7].can_id = ID_CHARGE;    filter[7].can_mask = CAN_SFF_MASK;
+    filter[8].can_id = ID_CHARGEDOOR;filter[8].can_mask = CAN_SFF_MASK;
     if (filtered &&
         setsockopt(fd, SOL_CAN_RAW, CAN_RAW_FILTER, filter, sizeof(filter)) < 0) {
         perror("setsockopt(CAN_RAW_FILTER)");
@@ -466,10 +484,7 @@ static int send_micom_frame(uint16_t can_id, const uint8_t data[8])
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        execl(g_dbus_send, "dbus-send", "--system",
-              "--type=method_call", "--dest=com.lge.car.micom",
-              "/Can", "com.lge.car.micom.can.SetCANMicomRecv",
-              arg, (char *)NULL);
+        execl(g_micom_send, "CANService", arg, (char *)NULL);
         _exit(127);
     }
     return (int)pid;
@@ -1169,29 +1184,38 @@ static void handle_frame(const struct can_frame *f)
 {
     int64_t now = now_ms();
     switch (f->can_id & CAN_SFF_MASK) {
-    case ID_BATT_TEMP:
-        /* M-CAN fallback.  Byte 0 is the min temperature; it is only used
-         * when the I-CAN 0x2FC temperature is missing or stale. */
-        if (!g_batt_valid || now - g_batt_ms > 5000) {
-            g_batt_min_c = (int8_t)f->data[0];
-            g_batt_valid = true;
-            g_batt_ms = now;
-            g_temp_source = "0x152";
-        }
-        break;
-    case ID_SOC:
+    case ID_SOC: {
         g_soc_raw = f->data[7];
         g_soc_valid = true;
         g_soc_ms = now;
         memcpy(g_soc_frame, f->data, 8);
         g_soc_frame_valid = true;
-        /* The factory CANService uses only byte 2 as the min battery
-         * temperature.  Byte 3 is not a reliable max on all variants. */
-        g_batt_min_c = (int8_t)f->data[2];
+        /* The factory CANService decodes the min cell temperature from
+         * 0x2FC byte 2 (Gen3High) or byte 4 (Gen2).  Battery defaults to
+         * byte 2 and can be switched with --temp-byte 4.  A single frame
+         * reporting 0 is held at the last non-zero value for a while; the
+         * car's battery temperature cannot change instantly. */
+        g_temp_b2 = f->data[2];
+        g_temp_b4 = f->data[4];
+        int raw = (g_temp_byte == 4) ? g_temp_b4 : g_temp_b2;
+        int chosen = raw;
+        const char *source = (g_temp_byte == 4) ? "0x2FC b4" : "0x2FC b2";
+        if (raw == 0 && g_temp_hold_valid &&
+            now - g_temp_hold_ms <= g_temp_hold_opt_ms) {
+            chosen = g_temp_hold;
+            source = (g_temp_byte == 4) ? "0x2FC b4(held)" : "0x2FC b2(held)";
+        }
+        if (raw != 0) {
+            g_temp_hold = raw;
+            g_temp_hold_valid = true;
+            g_temp_hold_ms = now;
+        }
+        g_batt_min_c = chosen;
         g_batt_valid = true;
         g_batt_ms = now;
-        g_temp_source = "0x2FC";
+        g_temp_source = source;
         break;
+    }
     case ID_PRECOND: {
         int raw = f->data[1] & 0x1F;
         if (!g_precond_known || raw != g_precond_raw) {
@@ -1318,6 +1342,7 @@ static size_t build_status(char *buf, size_t sz)
     char gear_raw[32] = "";
     char sm[64], se[64], ss[64], smon[64];
     char ds[16], dm[192], dd[512];
+    char mn[64], mp[512];
     json_escape(sm, sizeof(sm), g_smack);
     json_escape(se, sizeof(se), g_smack_expected);
     json_escape(ss, sizeof(ss), g_smack_send);
@@ -1325,6 +1350,8 @@ static size_t build_status(char *buf, size_t sz)
     json_escape(ds, sizeof(ds), g_dump_state);
     json_escape(dm, sizeof(dm), g_dump_message);
     json_escape(dd, sizeof(dd), g_dump_dir);
+    json_escape(mn, sizeof(mn), g_micom_name);
+    json_escape(mp, sizeof(mp), g_micom_send);
     if (g_soc_frame_valid) {
         snprintf(raw, sizeof(raw), "%02X %02X %02X %02X %02X %02X %02X %02X",
                  g_soc_frame[0], g_soc_frame[1], g_soc_frame[2], g_soc_frame[3],
@@ -1341,6 +1368,8 @@ static size_t build_status(char *buf, size_t sz)
         "\"batt_min_c\":%d,\"batt_valid\":%s,"
         "\"batt_raw\":\"%s\","
         "\"temp_source\":\"%s\","
+        "\"batt_b2\":%d,\"batt_b4\":%d,\"batt_age_ms\":%lld,"
+        "\"temp_byte\":%d,"
         "\"soc_pct\":%.1f,\"soc_valid\":%s,"
         "\"ready\":%s,\"utility\":%s,\"blocked\":%s,\"blocked_reason\":\"%s\","
         "\"dash\":%s,\"factory_nav\":%s,"
@@ -1358,6 +1387,7 @@ static size_t build_status(char *buf, size_t sz)
         "\"gear_raw\":\"%s\",\"gear_b3\":%d,\"gear_b4\":%d,"
         "\"smack\":\"%s\",\"smack_expected\":\"%s\",\"smack_ok\":%s,"
         "\"smack_send\":\"%s\",\"smack_monitor\":\"%s\","
+        "\"micom_name\":\"%s\",\"micom_path\":\"%s\","
         "\"dump_state\":\"%s\",\"dump_message\":\"%s\",\"dump_dir\":\"%s\","
         "\"home_seq\":%d,\"home_source\":\"%s\",\"last_app_key\":%d,"
         "\"home_monitor\":%s}\n",
@@ -1365,6 +1395,9 @@ static size_t build_status(char *buf, size_t sz)
         g_batt_min_c, g_batt_valid ? "true" : "false",
         raw,
         g_temp_source,
+        g_temp_b2, g_temp_b4,
+        (long long)(g_batt_valid ? now_ms() - g_batt_ms : -1),
+        g_temp_byte,
         g_soc_raw / 2.0, g_soc_valid ? "true" : "false",
         g_ready ? "true" : "false", g_utility ? "true" : "false",
         blocked ? "true" : "false", blocked_reason(),
@@ -1390,6 +1423,7 @@ static size_t build_status(char *buf, size_t sz)
         g_gear_frame_valid ? (int)(g_gear_frame[3] & 0x03) : -1,
         g_gear_frame_valid ? (int)(g_gear_frame[4] & 0x0F) : -1,
         sm, se, g_smack_ok ? "true" : "false", ss, smon,
+        mn, mp,
         ds, dm, dd,
         g_home_seq, g_home_source, g_last_app_key,
         g_home_monitor ? "true" : "false");
@@ -2214,20 +2248,78 @@ static void sniff_bus(int seconds)
     fflush(stdout);
 }
 
+static int micom_check(void)
+{
+    char out[8192];
+    int rc = run_capture(out, sizeof(out),
+        "dbus-send --system --print-reply --dest=org.freedesktop.DBus "
+        "/org/freedesktop/DBus org.freedesktop.DBus.ListNames", 3000);
+    printf("list_names_rc=%d\n%s\n", rc, out);
+    bool owned = strstr(out, "com.lge.car.micom") != NULL;
+    printf("micom_owned=%s\n", owned ? "yes" : "no");
+
+    if (owned) {
+        rc = run_capture(out, sizeof(out),
+            "dbus-send --system --print-reply --dest=org.freedesktop.DBus "
+            "/org/freedesktop/DBus org.freedesktop.DBus.GetConnectionUnixProcessID "
+            "string:com.lge.car.micom", 3000);
+        printf("pid_reply_rc=%d\n%s\n", rc, out);
+        char *p = strstr(out, "uint32");
+        if (p) {
+            unsigned pid = (unsigned)strtoul(p + 6, NULL, 10);
+            char path[64], exe[512];
+            snprintf(path, sizeof(path), "/proc/%u/exe", pid);
+            ssize_t n = readlink(path, exe, sizeof(exe) - 1);
+            printf("micom_pid=%u\n", pid);
+            if (n > 0) {
+                exe[n] = '\0';
+                printf("micom_exe=%s\n", exe);
+            }
+        }
+    }
+
+    char self[512];
+    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (n > 0) {
+        self[n] = '\0';
+        const char *slash = strrchr(self, '/');
+        printf("self_exe=%s\nself_name=%s\n", self,
+               slash ? slash + 1 : self);
+    }
+    return owned ? 0 : 1;
+}
+
+static int micom_test(void)
+{
+    char binq[700];
+    shq(binq, sizeof(binq), g_micom_bin);
+    char cmd[1400];
+    snprintf(cmd, sizeof(cmd),
+        "%s --system --type=method_call --print-reply --reply-timeout=500 "
+        "--dest=com.lge.car.micom /Can com.lge.car.micom.can.SetCANMicomRecv "
+        "array:byte:0x04,0xe8,0x08,0x00,0x00,0x00,0x00,0x01,0x00,0x01,0x00",
+        binq);
+    char out[8192];
+    int rc = run_capture(out, sizeof(out), cmd, 3000);
+    printf("micom_test helper=%s rc=%d\n%s\n", g_micom_name, rc, out);
+    return rc == 0 ? 0 : 1;
+}
+
 static void usage(const char *argv0)
 {
     fprintf(stderr,
             "usage: %s [--iface can0] [--port 8088] [--status-file PATH]"
-            " [--dbus-send PATH]\n"
-            "       %s [--session-bus-file PATH] [--dbus-monitor PATH]"
-            " [--no-session-monitor]\n"
-            "       %s [--retry-ms N] [--started-timeout-ms N]"
-            " [--smack] [--version]\n"
+            " [--micom-send PATH] [--micom-bin PATH]\n"
+            "       %s [--temp-byte 2|4] [--temp-hold-ms N]"
+            " [--session-bus-file PATH]\n"
+            "       %s [--dbus-monitor PATH] [--no-session-monitor]"
+            " [--retry-ms N] [--started-timeout-ms N]\n"
+            "       %s [--smack] [--micom-check] [--micom-test] [--version]\n"
             "       %s --dump-logs [--usb DIR] [--reason TEXT]"
             " [--status-file PATH]\n"
             "       %s --start|--stop|--dash-on|--dash-off|"
             "--door-open|--door-close|--door-toggle|--status|--sniff [seconds]\n",
-            argv0, argv0, argv0, argv0, argv0);
+            argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 int main(int argc, char **argv)
@@ -2236,6 +2328,8 @@ int main(int argc, char **argv)
     bool one_shot = false;
     bool smack_info = false;
     bool dump_mode = false;
+    bool micom_check_flag = false;
+    bool micom_test_mode = false;
     const char *dump_usb = NULL;
     const char *dump_reason = "manual";
     enum { OS_NONE, OS_START, OS_STOP, OS_DASH_ON, OS_DASH_OFF,
@@ -2246,7 +2340,15 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "--iface") && i + 1 < argc) g_iface = argv[++i];
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--status-file") && i + 1 < argc) g_status_path = argv[++i];
-        else if (!strcmp(argv[i], "--dbus-send") && i + 1 < argc) g_dbus_send = argv[++i];
+        else if (!strcmp(argv[i], "--micom-send") && i + 1 < argc) g_micom_send = argv[++i];
+        else if (!strcmp(argv[i], "--micom-bin") && i + 1 < argc) g_micom_bin = argv[++i];
+        else if (!strcmp(argv[i], "--dbus-send") && i + 1 < argc) g_micom_send = argv[++i];
+        else if (!strcmp(argv[i], "--temp-byte") && i + 1 < argc)
+            g_temp_byte = (atoi(argv[++i]) == 4) ? 4 : 2;
+        else if (!strcmp(argv[i], "--temp-hold-ms") && i + 1 < argc)
+            g_temp_hold_opt_ms = atoll(argv[++i]);
+        else if (!strcmp(argv[i], "--micom-check")) micom_check_flag = true;
+        else if (!strcmp(argv[i], "--micom-test")) micom_test_mode = true;
         else if (!strcmp(argv[i], "--session-bus-file") && i + 1 < argc) g_session_bus_file = argv[++i];
         else if (!strcmp(argv[i], "--dbus-monitor") && i + 1 < argc) g_dbus_monitor = argv[++i];
         else if (!strcmp(argv[i], "--no-session-monitor")) g_session_bus_file = "";
@@ -2290,6 +2392,10 @@ int main(int argc, char **argv)
         bool ok = dump_logs_to_usb(dump_usb, dump_reason);
         return ok ? 0 : 1;
     }
+    if (micom_check_flag)
+        return micom_check();
+    if (micom_test_mode)
+        return micom_test();
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);

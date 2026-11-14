@@ -103,6 +103,12 @@ Item {
     property bool smackOk: true
     property string smackSend: ""
     property string smackMonitor: ""
+    property int battB2: 0
+    property int battB4: 0
+    property int battAgeMs: -1
+    property int tempByte: 2
+    property string micomName: ""
+    property string micomPath: ""
     // ---- live log console + USB dump ---------------------------------
     readonly property bool showConsole: width >= 1700
     property string consoleSource: "daemon"
@@ -270,6 +276,12 @@ Item {
         smackOk = d.smack_ok !== false
         smackSend = d.smack_send || ""
         smackMonitor = d.smack_monitor || ""
+        battB2 = (typeof d.batt_b2 === "number") ? d.batt_b2 : 0
+        battB4 = (typeof d.batt_b4 === "number") ? d.batt_b4 : 0
+        battAgeMs = (typeof d.batt_age_ms === "number") ? d.batt_age_ms : -1
+        tempByte = (typeof d.temp_byte === "number") ? d.temp_byte : 2
+        micomName = d.micom_name || ""
+        micomPath = d.micom_path || ""
         dumpState = d.dump_state || "idle"
         dumpMessage = d.dump_message || ""
         dumpDir = d.dump_dir || ""
@@ -915,13 +927,20 @@ Item {
                 var smack = root.smack ? root.smack : "?"
                 if (!root.smackOk && root.smackExpected)
                     smack += " (want " + root.smackExpected + ")"
+                var age = root.battAgeMs >= 0
+                          ? Math.round(root.battAgeMs / 1000) + "s" : "?"
+                var micom = root.micomName ? root.micomName : "?"
                 var line = "FG " + fg + "   \u00b7   " + cond
                            + "   \u00b7   Smack " + smack
+                           + "   \u00b7   Micom " + micom
                            + "   \u00b7   Gear " + gear
                            + " (raw " + root.rawGear
                            + " b3=" + root.gearB3 + " b4=" + root.gearB4 + ")"
                            + "   \u00b7   Service " + svc
-                           + "   \u00b7   Temp " + src + "   \u00b7   Cable " + cab
+                           + "   \u00b7   Temp " + src
+                           + " b2=" + root.battB2 + " b4=" + root.battB4
+                           + " age=" + age
+                           + "   \u00b7   Cable " + cab
                            + "   \u00b7   BMS " + raw
                 if (root.homeSeq > 0)
                     line += "   \u00b7   Home " + root.homeSeq
