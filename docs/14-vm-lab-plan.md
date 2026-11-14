@@ -721,5 +721,8 @@ items beyond that.
 - **2026-11-14 — one-shot state-lock contention**: held state.lock fails a
   run before QEMU; release allows clean run. Real run PASS (6.2 s). 311 tests
   (42 skipped); 112 VM commits.
+- **2026-11-14 — daemon post-stop diagnostics**: idempotent stop; stopped/
+  unreachable status; exec/screenshot fail fast; clean restart. Real run
+  PASS (16.1 s). 312 tests (43 skipped); 113 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

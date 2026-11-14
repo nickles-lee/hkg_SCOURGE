@@ -40,6 +40,65 @@ class VMIntegrationTests(unittest.TestCase):
         if result.get('qemu_pid'):
             self.assertFalse(Path(f"/proc/{result['qemu_pid']}").exists())
 
+    def test_daemon_stop_idempotent_and_post_stop_diagnostics(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-poststop-') as tmp:
+            root = Path(tmp)
+            daemon_dir = root / 'daemon'
+            output = root / 'post-stop.png'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                first = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(first.returncode, 0,
+                                 first.stdout + first.stderr)
+                second = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(second.returncode, 0,
+                                 second.stdout + second.stderr)
+                values = json.loads(second.stdout)
+                self.assertEqual(values['state'], 'stopped')
+
+                status = cli('status', '--daemon-dir', str(daemon_dir))
+                self.assertNotEqual(status.returncode, 0)
+                values = json.loads(status.stdout)
+                self.assertEqual(values['state'], 'stopped')
+                self.assertFalse(values['reachable'])
+                self.assertIn('control socket', values['reachable_error'])
+
+                exec_fail = cli('exec', '--daemon-dir', str(daemon_dir),
+                                '--cmd', 'echo SHOULD_NOT_RUN')
+                self.assertNotEqual(exec_fail.returncode, 0)
+                self.assertIn('control socket',
+                              exec_fail.stdout + exec_fail.stderr)
+
+                shot_fail = cli('screenshot', '--daemon-dir', str(daemon_dir),
+                                '--output', str(output))
+                self.assertNotEqual(shot_fail.returncode, 0)
+                self.assertIn('control socket',
+                              shot_fail.stdout + shot_fail.stderr)
+                self.assertFalse(output.exists())
+
+                restarted = cli('start', '--daemon-dir', str(daemon_dir),
+                                '--ready-timeout', '120', '--lock-timeout', '120')
+                self.assertEqual(restarted.returncode, 0,
+                                 restarted.stdout + restarted.stderr)
+                alive = cli('exec', '--daemon-dir', str(daemon_dir),
+                            '--cmd', 'echo POST_STOP_RESTART_OK')
+                self.assertEqual(alive.returncode, 0,
+                                 alive.stdout + alive.stderr)
+                self.assertIn('POST_STOP_RESTART_OK', alive.stdout)
+            finally:
+                cli('stop', '--daemon-dir', str(daemon_dir))
+
     def test_run_state_lock_contention(self):
         with tempfile.TemporaryDirectory(prefix='vm-run-state-lock-') as tmp:
             state = Path(tmp) / 'state'
