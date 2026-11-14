@@ -838,6 +838,41 @@ class VMIntegrationTests(unittest.TestCase):
         self.assertIn('AUDIO_OK', output)
         self.assert_cleaned(result)
 
+    def test_daemon_restart_command(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-restart-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            first = json.loads(started.stdout)
+            try:
+                restarted = cli('restart', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(restarted.returncode, 0,
+                                 restarted.stdout + restarted.stderr)
+                status = cli('status', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(status.returncode, 0, status.stderr)
+                values = json.loads(status.stdout)
+                self.assertEqual(values['state'], 'ready')
+                self.assertNotEqual(values['qemu_pid'], first['qemu_pid'])
+                alive = cli('exec', '--daemon-dir', str(daemon_dir),
+                            '--cmd', 'echo RESTART_COMMAND_OK')
+                self.assertEqual(alive.returncode, 0,
+                                 alive.stdout + alive.stderr)
+                self.assertIn('RESTART_COMMAND_OK', alive.stdout)
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_daemon_control_protocol_rejects_bad_requests(self):
         import socket
         with tempfile.TemporaryDirectory(prefix='vm-daemon-badctl-') as tmp:

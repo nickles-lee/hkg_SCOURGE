@@ -175,6 +175,7 @@ Boot once and iterate without cold boots:
 python3 -B launch.py daemon start --kernel compat --state states/daemon \
   --label daily
 python3 -B launch.py daemon status
+python3 -B launch.py daemon restart
 python3 -B launch.py daemon exec --cmd 'uname -r; ls /media/host'
 python3 -B launch.py daemon screenshot --output /tmp/daemon.png
 python3 -B launch.py daemon console --lines 80
@@ -183,7 +184,9 @@ python3 -B launch.py daemon stop
 ```
 
 The daemon keeps the QEMU process, serial reader, QMP socket and state lock
-alive; `exec`/`screenshot` use a control socket in `runs/daemon/`. A failed
+alive; `exec`/`screenshot` use a control socket in `runs/daemon/`.
+`daemon restart` stops and starts again from the stored `config.json`
+(kernel, state, devices, cache, lock and pin settings). A failed
 `daemon start` includes the last serial lines and QEMU return code in the
 status/error shown by the CLI. Unknown control actions and malformed JSON
 requests return an error without disturbing the daemon. State

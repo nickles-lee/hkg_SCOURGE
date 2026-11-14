@@ -1599,6 +1599,8 @@ def main() -> int:
                     help='pin all QEMU threads to host CPU N (performance experiment)')
     dserve = dsub.add_parser('_serve')
     dserve.add_argument('--config', type=Path, required=True)
+    drestart = dsub.add_parser('restart', help='stop and start with the stored config')
+    drestart.add_argument('--daemon-dir', type=Path, default=VM / 'runs' / 'daemon')
     for name in ('status', 'stop', 'screenshot', 'console', 'exec'):
         p = dsub.add_parser(name)
         p.add_argument('--daemon-dir', type=Path, default=VM / 'runs' / 'daemon')
@@ -1768,6 +1770,49 @@ def main() -> int:
                 ap.error(str(exc))
             print(json.dumps(status, indent=2))
             return 0
+        if args.daemon_action == 'restart':
+            config_file = daemon_mod.config_path(daemon_dir)
+            if not config_file.is_file():
+                print('ERROR: daemon config missing; start it first',
+                      file=sys.stderr)
+                return 1
+            try:
+                config = json.loads(config_file.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f'ERROR: cannot read daemon config: {exc}', file=sys.stderr)
+                return 1
+            if not isinstance(config, dict):
+                print('ERROR: daemon config is not an object', file=sys.stderr)
+                return 1
+            daemon_mod.stop(daemon_dir)
+            argv = [sys.executable, '-B', str(VM / 'launch.py'), 'daemon',
+                    'start', '--daemon-dir', str(daemon_dir),
+                    '--kernel', config.get('kernel_target', 'vendor')]
+            mapping = (
+                ('state', '--state'), ('tools', '--tools'), ('usb', '--usb'),
+                ('payload', '--payload'), ('share', '--share'),
+                ('display', '--display'), ('vnc_display', '--vnc-display'),
+                ('display_device', '--display-device'),
+                ('smp', '--smp'), ('memory_mb', '--memory'),
+                ('label', '--label'), ('cache', '--cache'),
+                ('ready_timeout', '--ready-timeout'),
+                ('lock_timeout', '--lock-timeout'),
+                ('command_log_max', '--command-log-max'),
+                ('pin_cpu', '--pin-cpu'),
+            )
+            for key, flag in mapping:
+                value = config.get(key)
+                if value is not None:
+                    argv.extend([flag, str(value)])
+            if config.get('network'):
+                argv.append('--network')
+            if config.get('audio'):
+                argv.append('--audio')
+            if config.get('apic'):
+                argv.append('--apic')
+            for device in config.get('usb_host') or []:
+                argv.extend(['--usb-host', str(device)])
+            return subprocess.run(argv, cwd=str(VM)).returncode
         if args.daemon_action == 'status':
             status = daemon_mod.read_status(daemon_dir)
             try:
