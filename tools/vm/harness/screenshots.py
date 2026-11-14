@@ -18,19 +18,27 @@ def nonblack_bbox(path: Path) -> dict | None:
     image = Image.open(path).convert("RGB")
     width, height = image.size
     pixels = image.load()
-    xs: list[int] = []
-    ys: list[int] = []
+    count = 0
+    min_x, min_y = width, height
+    max_x = max_y = -1
     for y in range(height):
         for x in range(width):
             red, green, blue = pixels[x, y]
             if red + green + blue > 30:
-                xs.append(x)
-                ys.append(y)
-    if not xs:
+                count += 1
+                if x < min_x:
+                    min_x = x
+                if y < min_y:
+                    min_y = y
+                if x > max_x:
+                    max_x = x
+                if y > max_y:
+                    max_y = y
+    if not count:
         return {"count": 0, "bbox": None, "width": width, "height": height}
     return {
-        "count": len(xs),
-        "bbox": [min(xs), min(ys), max(xs), max(ys)],
+        "count": count,
+        "bbox": [min_x, min_y, max_x, max_y],
         "width": width,
         "height": height,
     }

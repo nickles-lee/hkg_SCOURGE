@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -47,6 +48,29 @@ class UiSmokeTests(unittest.TestCase):
         self.assertEqual(evaluate(text, 0, scenario)['verdict'], 'PASS')
         self.assertEqual(evaluate(text.replace('qml-ready PASS', 'qml-ready FAIL'),
                                   0, scenario)['verdict'], 'FAIL')
+
+    def test_nonblack_bbox_bounds(self) -> None:
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow required')
+        with tempfile.TemporaryDirectory(prefix='vm-bbox-') as tmp:
+            root = Path(tmp)
+            colored = root / 'colored.png'
+            image = Image.new('RGB', (10, 8), (0, 0, 0))
+            image.putpixel((1, 2), (255, 0, 0))
+            image.putpixel((7, 6), (0, 255, 0))
+            image.save(colored)
+            result = nonblack_bbox(colored)
+            self.assertEqual(result['count'], 2)
+            self.assertEqual(result['bbox'], [1, 2, 7, 6])
+            self.assertEqual((result['width'], result['height']), (10, 8))
+
+            black = root / 'black.png'
+            Image.new('RGB', (4, 4), (0, 0, 0)).save(black)
+            empty = nonblack_bbox(black)
+            self.assertEqual(empty['count'], 0)
+            self.assertIsNone(empty['bbox'])
 
     def test_committed_probe_frame_has_visible_pixels(self) -> None:
         image = VM / 'docs' / 'screenshots' / 'mode-c-probe.png'
