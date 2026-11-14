@@ -220,9 +220,9 @@ Corrupting `status.json` does not crash the daemon: status reports
 unreachable/missing state, exec still works, stop rewrites `stopped`, and a
 restart succeeds. Stopping twice is idempotent; after stop, status reports
 `stopped`/unreachable and exec/screenshot fail fast without artifacts. A
-screenshot copy to an unwritable/missing destination fails with a clear
-error, removes the daemon-dir capture, and leaves the daemon healthy; a
-subsequent stop/restart in the same directory succeeds. Deleting `serial.log`
+screenshot copy to an unwritable/missing destination or a read-only directory
+fails with a clear error, removes the daemon-dir capture, and leaves the
+daemon healthy; a subsequent stop/restart in the same directory succeeds. Deleting `serial.log`
 makes `daemon console` fail with "serial log missing" while exec/status
 remain usable. Deleting `config.json` does not block stop; restart recreates
 it and exec works. A persistent overlay whose backing does not match the expected

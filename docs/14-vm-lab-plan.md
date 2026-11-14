@@ -754,5 +754,8 @@ items beyond that.
 - **2026-11-14 — daemon missing-config recovery**: deleted config.json does
   not block stop; restart recreates it. Real run PASS (13.0 s). 320 tests
   (50 skipped); 123 VM commits.
+- **2026-11-14 — read-only screenshot copy failure**: copy fails cleanly,
+  capture removed, daemon healthy. Real run PASS (26.3 s). 321 tests
+  (51 skipped); 124 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

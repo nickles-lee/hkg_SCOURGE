@@ -695,6 +695,47 @@ class VMIntegrationTests(unittest.TestCase):
             self.assertIn('DRY_STATE_OK',
                           (directory / 'guest-output.log').read_text())
 
+    def test_daemon_screenshot_copy_directory(self):
+        if os.geteuid() == 0:
+            self.skipTest('permission failure is not reliable as root')
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-copydir-') as tmp:
+            root = Path(tmp)
+            daemon_dir = root / 'daemon'
+            destination = root / 'readonly-dir'
+            destination.mkdir()
+            destination.chmod(0o500)
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=180)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                failed = cli('screenshot', '--daemon-dir', str(daemon_dir),
+                             '--output', str(destination))
+                self.assertNotEqual(failed.returncode, 0,
+                                    failed.stdout + failed.stderr)
+                self.assertIn('cannot copy screenshot',
+                              failed.stdout + failed.stderr)
+                self.assertEqual(list(daemon_dir.glob('screenshot-*.png')), [])
+
+                alive = cli('exec', '--daemon-dir', str(daemon_dir),
+                            '--cmd', 'echo COPY_DIRECTORY_SAFE')
+                self.assertEqual(alive.returncode, 0,
+                                 alive.stdout + alive.stderr)
+                self.assertIn('COPY_DIRECTORY_SAFE', alive.stdout)
+            finally:
+                destination.chmod(0o700)
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_daemon_config_missing_recovery(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-noconfig-') as tmp:
             daemon_dir = Path(tmp) / 'daemon'
