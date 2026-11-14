@@ -209,7 +209,7 @@ QEMU, then succeed cleanly after the lock is released. Stop during a long
 in-flight exec returns promptly (bounded guest-lock wait), kills QEMU and
 leaves status stopped. An opt-in test starts a compat daemon and exercises
 both QMP key (`a`) and absolute tablet click input without disturbing the
-guest. A duplicate `daemon start` must fail with "daemon already running"
+guest; a right-click variant covers the alternate pointer button. A duplicate `daemon start` must fail with "daemon already running"
 without disturbing the active daemon. A direct screenshot request with an
 output path outside the daemon directory is rejected and leaves the VM
 healthy; a symlink inside the directory that resolves outside is rejected

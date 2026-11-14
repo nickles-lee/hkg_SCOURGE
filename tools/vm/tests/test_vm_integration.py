@@ -785,6 +785,43 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertEqual(stopped.returncode, 0,
                                  stopped.stdout + stopped.stderr)
 
+    def test_daemon_qmp_right_click(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-rightclick-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=180)
+
+            started = cli('start', '--kernel', 'compat',
+                          '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            qmp = daemon_dir / 'qmp.sock'
+            try:
+                clicked = subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'input',
+                     '--qmp', str(qmp), '--click', '200,150',
+                     '--width', '1280', '--height', '720', '--button', 'right'],
+                    cwd=VM, capture_output=True, text=True, timeout=60)
+                self.assertEqual(clicked.returncode, 0,
+                                 clicked.stdout + clicked.stderr)
+                value = json.loads(clicked.stdout)
+                self.assertTrue(value['ok'])
+                self.assertEqual(value['button'], 'right')
+                self.assertEqual((value['x'], value['y']), (200, 150))
+                status = cli('status', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(status.returncode, 0, status.stderr)
+                self.assertTrue(json.loads(status.stdout)['qemu_alive'])
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_daemon_command_log_corruption(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-badlog-') as tmp:
             daemon_dir = Path(tmp) / 'daemon'

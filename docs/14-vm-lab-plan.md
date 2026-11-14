@@ -770,5 +770,8 @@ items beyond that.
   discard exec results; response records `log_error`; test uses a directory
   in place of the log. Real run PASS (6.9 s). 325 tests (55 skipped); 128 VM
   commits.
+- **2026-11-14 — QMP right-click coverage**: right-button absolute click
+  verified with a live compat daemon. Real run PASS (4.4 s). 326 tests
+  (56 skipped); 129 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
