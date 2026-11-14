@@ -825,5 +825,8 @@ items beyond that.
 - **2026-11-14 — benchmark child validation**: child result.json schema is
   enforced per row; failures retain schema_problems. 346 tests; 149 VM
   commits.
+- **2026-11-14 — bench row/variant consistency**: rows/warmups must match
+  benchmarked scenarios, declared variants and repeat/warmup bounds. 347
+  tests; 150 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

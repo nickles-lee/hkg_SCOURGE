@@ -208,6 +208,13 @@ def validate_bench(bench) -> list[str]:
                 problems.append(f'variants[{index}].cache must be a string or null')
             if variant.get('pin_cpu') is not None and not _is_int(variant['pin_cpu']):
                 problems.append(f'variants[{index}].pin_cpu must be an integer or null')
+    scenario_names = ([item for item in scenarios if isinstance(item, str)]
+                      if isinstance(scenarios, list) else [])
+    declared = None
+    if isinstance(variants, list):
+        declared = {(item.get('cache'), item.get('pin_cpu'))
+                    for item in variants if isinstance(item, dict)}
+    repeat_limit = bench.get('repeats')
     rows = bench.get('rows')
     if not isinstance(rows, list):
         problems.append('rows must be a list')
@@ -219,8 +226,15 @@ def validate_bench(bench) -> list[str]:
                 continue
             if not isinstance(row.get('scenario'), str) or not row['scenario']:
                 problems.append(f'{prefix}.scenario must be a non-empty string')
+            elif scenario_names and row['scenario'] not in scenario_names:
+                problems.append(f'{prefix}.scenario is not a benchmarked scenario')
+            if (declared is not None
+                    and (row.get('cache'), row.get('pin_cpu')) not in declared):
+                problems.append(f'{prefix} is not a declared variant')
             if not _is_int(row.get('iteration')) or row['iteration'] < 1:
                 problems.append(f'{prefix}.iteration must be an integer >= 1')
+            elif _is_int(repeat_limit) and row['iteration'] > repeat_limit:
+                problems.append(f'{prefix}.iteration exceeds repeats')
             if row.get('verdict') not in BENCH_VERDICTS:
                 problems.append(f'{prefix}.verdict must be one of {sorted(BENCH_VERDICTS)}')
             if not _is_int(row.get('rc')):
@@ -257,6 +271,7 @@ def validate_bench(bench) -> list[str]:
                         problems.append(f'metrics[{key!r}].{metric} is unknown')
                     elif not _summary_ok(value):
                         problems.append(f'metrics[{key!r}].{metric} must be a summary')
+    warmup_limit = bench.get('warmup', 0)
     warmups = bench.get('warmups', [])
     if not isinstance(warmups, list):
         problems.append('warmups must be a list')
@@ -267,8 +282,15 @@ def validate_bench(bench) -> list[str]:
                 continue
             if not isinstance(row.get('scenario'), str):
                 problems.append(f'warmups[{index}].scenario must be a string')
+            elif scenario_names and row['scenario'] not in scenario_names:
+                problems.append(f'warmups[{index}].scenario is not benchmarked')
+            if (declared is not None
+                    and (row.get('cache'), row.get('pin_cpu')) not in declared):
+                problems.append(f'warmups[{index}] is not a declared variant')
             if not _is_int(row.get('warmup')) or row['warmup'] < 1:
                 problems.append(f'warmups[{index}].warmup must be an integer >= 1')
+            elif _is_int(warmup_limit) and row['warmup'] > warmup_limit:
+                problems.append(f'warmups[{index}].warmup exceeds warmup count')
             if row.get('verdict') not in BENCH_VERDICTS:
                 problems.append(f'warmups[{index}].verdict is invalid')
             if not _is_int(row.get('rc')):

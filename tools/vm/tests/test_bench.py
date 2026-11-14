@@ -63,6 +63,33 @@ def child_result(**overrides):
 
 
 class BenchTests(unittest.TestCase):
+    def test_bench_schema_row_consistency(self) -> None:
+        row = {'scenario': 'boot', 'iteration': 1, 'cache': None,
+               'pin_cpu': None, 'verdict': 'PASS', 'rc': 0, 'log': 'x.log'}
+        self.assertEqual(validate_bench(bench_doc(rows=[row])), [])
+        missing = bench_doc(rows=[dict(row, scenario='other')])
+        self.assertIn('not a benchmarked scenario',
+                      '\n'.join(validate_bench(missing)))
+        variant = bench_doc(rows=[dict(row, cache='writeback')])
+        self.assertIn('not a declared variant',
+                      '\n'.join(validate_bench(variant)))
+        too_many = bench_doc(rows=[dict(row, iteration=2)])
+        self.assertIn('exceeds repeats', '\n'.join(validate_bench(too_many)))
+        warm = bench_doc(warmups=[{'scenario': 'boot', 'warmup': 1,
+                                   'cache': None, 'pin_cpu': None,
+                                   'verdict': 'PASS', 'rc': 0,
+                                   'log': 'w.log'}])
+        self.assertIn('exceeds warmup count',
+                      '\n'.join(validate_bench(warm)))
+        warm_variant = bench_doc(warmups=[{'scenario': 'boot', 'warmup': 1,
+                                           'cache': 'writeback',
+                                           'pin_cpu': None,
+                                           'verdict': 'PASS', 'rc': 0,
+                                           'log': 'w.log'}],
+                                 warmup=1)
+        self.assertIn('not a declared variant',
+                      '\n'.join(validate_bench(warm_variant)))
+
     def test_validate_child_result(self) -> None:
         self.assertEqual(validate_child(child_result(), 0), ('PASS', []))
         verdict, problems = validate_child(child_result(), 2)
