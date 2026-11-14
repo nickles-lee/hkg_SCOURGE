@@ -138,6 +138,52 @@ def _check_usb_removal(value, problems: list[str]) -> None:
         problems.append('usb_removal.error must be a string')
 
 
+def _check_patch(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('patch must be an object')
+        return
+    attempts = value.get('connect_attempts')
+    if attempts is not None and (not _is_int(attempts) or attempts < 1):
+        problems.append('patch.connect_attempts must be an integer >= 1')
+    for key in ('stop', 'driver_init', 'table_entry', 'original',
+                'replacement', 'mode', 'kernel', 'initramfs'):
+        if key in value and not isinstance(value[key], str):
+            problems.append(f'patch.{key} must be a string')
+    if 'stop_signal' in value and (not isinstance(value['stop_signal'], str)
+                                   or not value['stop_signal']):
+        problems.append('patch.stop_signal must be a non-empty string')
+
+
+def _check_phase(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('phase must be an object')
+        return
+    for key in ('ok', 'fail', 'appupgrade', 'launch_requested', 'usb_mount'):
+        if key in value and not isinstance(value[key], bool):
+            problems.append(f'phase.{key} must be boolean')
+    for key in ('steps', 'timeouts', 'waits', 'dmclient_standby',
+                'verify_key'):
+        if key in value and not isinstance(value[key], list):
+            problems.append(f'phase.{key} must be a list')
+
+
+def _check_audit(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('audit must be an object')
+        return
+    if 'status' in value and (not isinstance(value['status'], str)
+                              or not value['status']):
+        problems.append('audit.status must be a non-empty string')
+    if 'path' in value and not isinstance(value['path'], str):
+        problems.append('audit.path must be a string')
+    for key in ('gaps', 'missing_required'):
+        if key in value:
+            items = value[key]
+            if (not isinstance(items, list)
+                    or any(not isinstance(item, str) for item in items)):
+                problems.append(f'audit.{key} must be a list of strings')
+
+
 def _check_screenshot(value, problems: list[str]) -> None:
     if not isinstance(value, dict):
         problems.append('screenshot must be an object')
@@ -262,6 +308,12 @@ def validate_result(result) -> list[str]:
         _check_usb_removal(result['usb_removal'], problems)
     if result.get('screenshot') is not None:
         _check_screenshot(result['screenshot'], problems)
+    if result.get('patch') is not None:
+        _check_patch(result['patch'], problems)
+    if result.get('phase') is not None:
+        _check_phase(result['phase'], problems)
+    if result.get('audit') is not None:
+        _check_audit(result['audit'], problems)
     profile = result.get('profile')
     if not isinstance(profile, dict) or not isinstance(profile.get('name'), str):
         problems.append('profile.name must be a string')

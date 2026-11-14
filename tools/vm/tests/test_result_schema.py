@@ -165,6 +165,33 @@ class ResultSchemaTests(unittest.TestCase):
                          'screenshot.qmp_pixels.bbox'):
             self.assertIn(expected, joined)
 
+    def test_patch_phase_audit_evidence(self) -> None:
+        good = valid_result(
+            patch={'driver_init': '0x1', 'table_entry': '0x2', 'stop': 'T05',
+                   'stop_signal': 'T05', 'connect_attempts': 2,
+                   'original': 'aa', 'replacement': 'bb'},
+            phase={'ok': True, 'fail': False, 'steps': ['a'],
+                   'timeouts': [], 'waits': ['w'], 'dmclient_standby': [],
+                   'verify_key': [], 'appupgrade': False,
+                   'launch_requested': True, 'usb_mount': True},
+            audit={'status': 'PASS', 'path': '/env.json', 'gaps': ['g'],
+                   'missing_required': []})
+        self.assertEqual(validate_result(good), [])
+
+        bad = valid_result(
+            patch={'connect_attempts': 0, 'stop_signal': '',
+                   'driver_init': 1, 'original': 2},
+            phase={'ok': 'yes', 'fail': 1, 'steps': 'x', 'waits': {}},
+            audit={'status': '', 'path': 1, 'gaps': [1],
+                   'missing_required': 'x'})
+        joined = '\n'.join(validate_result(bad))
+        for expected in ('patch.connect_attempts', 'patch.stop_signal',
+                         'patch.driver_init', 'patch.original',
+                         'phase.ok', 'phase.fail', 'phase.steps',
+                         'phase.waits', 'audit.status', 'audit.path',
+                         'audit.gaps', 'audit.missing_required'):
+            self.assertIn(expected, joined)
+
     def test_verdict_rc_consistency(self) -> None:
         cases = [
             (valid_result(verdict='PASS', rc=1), 'PASS requires rc == 0'),
