@@ -381,6 +381,53 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertEqual(stopped.returncode, 0,
                                  stopped.stdout + stopped.stderr)
 
+    def test_daemon_recovers_from_corrupt_status(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-badstatus-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                (daemon_dir / 'status.json').write_text('{not json')
+                observed = cli('status', '--daemon-dir', str(daemon_dir))
+                self.assertNotEqual(observed.returncode, 0)
+                values = json.loads(observed.stdout)
+                self.assertTrue(values.get('reachable'))
+                self.assertTrue(values.get('qemu_alive'))
+
+                alive = cli('exec', '--daemon-dir', str(daemon_dir),
+                            '--cmd', 'echo CORRUPT_STATUS_SAFE')
+                self.assertEqual(alive.returncode, 0,
+                                 alive.stdout + alive.stderr)
+                self.assertIn('CORRUPT_STATUS_SAFE', alive.stdout)
+
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+                after = json.loads((daemon_dir / 'status.json').read_text())
+                self.assertEqual(after['state'], 'stopped')
+
+                restarted = cli('start', '--daemon-dir', str(daemon_dir),
+                                '--ready-timeout', '120', '--lock-timeout', '120')
+                self.assertEqual(restarted.returncode, 0,
+                                 restarted.stdout + restarted.stderr)
+                again = cli('exec', '--daemon-dir', str(daemon_dir),
+                            '--cmd', 'echo RESTARTED_FROM_BAD_STATUS')
+                self.assertEqual(again.returncode, 0,
+                                 again.stdout + again.stderr)
+                self.assertIn('RESTARTED_FROM_BAD_STATUS', again.stdout)
+            finally:
+                cli('stop', '--daemon-dir', str(daemon_dir))
+
     def test_daemon_qmp_input_invalid(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-input-bad-') as tmp:
             daemon_dir = Path(tmp) / 'daemon'

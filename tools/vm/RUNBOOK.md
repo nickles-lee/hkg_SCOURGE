@@ -214,7 +214,10 @@ without disturbing the active daemon. A direct screenshot request with an
 output path outside the daemon directory is rejected and leaves the VM
 healthy. Two simultaneous `exec` requests are serialized by the guest lock;
 both return their own output with no cross-talk. Out-of-bounds clicks and
-invalid QMP qcodes fail with diagnostics and leave the daemon healthy. A persistent overlay whose backing does not match the expected
+invalid QMP qcodes fail with diagnostics and leave the daemon healthy.
+Corrupting `status.json` does not crash the daemon: status reports
+unreachable/missing state, exec still works, stop rewrites `stopped`, and a
+restart succeeds. A persistent overlay whose backing does not match the expected
 image is rejected as a "backing mismatch" before QEMU starts. A corrupted
 overlay fails cleanly without QEMU, and `--reset` rebuilds it for a clean
 start/exec/stop. A stale control socket is detected in about
