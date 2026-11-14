@@ -760,5 +760,8 @@ items beyond that.
 - **2026-11-14 — dry-run boot-lock bypass**: dry runs complete while the
   global lock is held, with DRY-RUN/no QEMU. Real run PASS (0.15 s). 322
   tests (52 skipped); 125 VM commits.
+- **2026-11-14 — one-shot missing-overlay rebuild**: deleted state overlay
+  is recreated and loses the marker. Real run PASS (12.7 s). 323 tests
+  (53 skipped); 126 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

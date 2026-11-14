@@ -637,6 +637,40 @@ class VMIntegrationTests(unittest.TestCase):
             finally:
                 cli('stop', '--daemon-dir', str(daemon_dir))
 
+    def test_run_state_missing_overlay_rebuilt(self):
+        with tempfile.TemporaryDirectory(prefix='vm-run-missing-') as tmp:
+            state = Path(tmp) / 'state'
+
+            def run(*args):
+                completed = subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'run',
+                     '--state', str(state), '--timeout', '60', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=180)
+                combined = completed.stdout + completed.stderr
+                if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                    self.skipTest('VM lab is busy with another run')
+                self.assertEqual(completed.returncode, 0, combined)
+                directory = next(Path(line[5:].strip())
+                                 for line in completed.stdout.splitlines()
+                                 if line.startswith('run: '))
+                return json.loads((directory / 'result.json').read_text())
+
+            written = run('--cmd',
+                          "mkdir -p /rw_data && printf 'missing-overlay-marker\\n' "
+                          "> /rw_data/missing-overlay-marker && sync")
+            self.assertEqual(written['verdict'], 'PASS')
+            overlay = state / 'rootfs.qcow2'
+            self.assertTrue(overlay.is_file())
+            overlay.unlink()
+
+            rebuilt = run('--cmd',
+                          'if [ -e /rw_data/missing-overlay-marker ]; then '
+                          'echo STILL_THERE; else echo MISSING_OVERLAY_CLEAN; fi')
+            self.assertEqual(rebuilt['verdict'], 'PASS')
+            self.assertIn('MISSING_OVERLAY_CLEAN',
+                          (Path(rebuilt['run_dir']) / 'guest-output.log').read_text())
+            self.assertTrue(overlay.is_file())
+
     def test_run_state_backing_mismatch(self):
         with tempfile.TemporaryDirectory(prefix='vm-run-mismatch-') as tmp:
             root = Path(tmp)
