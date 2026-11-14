@@ -1050,6 +1050,10 @@ class VMIntegrationTests(unittest.TestCase):
                 config = json.loads((daemon_dir / 'config.json').read_text())
                 self.assertEqual(config['exec_output_max'], 1000)
                 self.assertEqual(config['screenshot_keep'], 2)
+                status = cli('status', '--daemon-dir', str(daemon_dir))
+                values = json.loads(status.stdout)
+                self.assertEqual(values['exec_output_max'], 1000)
+                self.assertEqual(values['screenshot_keep'], 2)
 
                 executed = cli(
                     'exec', '--daemon-dir', str(daemon_dir), '--cmd',

@@ -417,10 +417,14 @@ def _serve(config: dict) -> int:
         ser.read_until(b"IONIQ_VM_READY", float(config.get("ready_timeout", 180)),
                        fatal=True)
         launch.wait_shell(ser, float(config.get("ready_timeout", 180)))
-        status.update({"state": "ready", "boot_seconds": round(time.monotonic() - started, 2),
+        status.update({"state": "ready",
+                       "boot_seconds": round(time.monotonic() - started, 2),
                        "qemu_pid": proc.pid, "qmp": str(qmp_socket),
                        "display": config.get("display", "none"),
                        "display_device": display_device,
+                       "command_log_max": command_log_max,
+                       "screenshot_keep": screenshot_keep,
+                       "exec_output_max": exec_output_max,
                        "overlays": {name: item["path"] for name, item in overlays.items()},
                        "state_dir": str(state) if state else None,
                        "serial": str(daemon_dir / "serial.log")})
