@@ -201,8 +201,9 @@ stores the capped text. `daemon screenshot` keeps at most
 `screenshot-*.png` captures in the daemon directory; older captures are
 pruned and reported in the response `pruned` list. `daemon list --root runs
 [--json] [--state ready|stale|...]` reports every daemon directory with its
-recorded state, daemon/QEMU PID liveness and kernel/state config without
-contacting the sockets; a ready/starting record whose daemon process is gone
+recorded state, daemon/QEMU PID liveness, kernel/state config and artifact
+counters (`command_log_bytes`, `screenshot_count`) without contacting the
+sockets; a ready/starting record whose daemon process is gone
 is marked `STALE` (JSON `stale: true`), and `--fail-stale` makes the
 command exit 1 when any entry is stale (useful in scripts/doctor-like checks). `daemon restart` stops and starts again from the
 stored `config.json` (kernel, state, devices, cache, lock and pin settings). Add `--reset` to

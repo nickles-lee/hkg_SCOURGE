@@ -1814,7 +1814,9 @@ def main() -> int:
                     print(f"{row['dir']} {row['state'] or 'unknown':8} "
                           f"daemon={'alive' if row['daemon_alive'] else 'dead':5} "
                           f"qemu={'alive' if row['qemu_alive'] else 'dead':5} "
-                          f"kernel={row['kernel'] or '?'}{marker}")
+                          f"kernel={row['kernel'] or '?'} "
+                          f"log={row['command_log_bytes']}B "
+                          f"shots={row['screenshot_count']}{marker}")
             if args.fail_stale and any(row['stale'] for row in rows):
                 return 1
             return 0

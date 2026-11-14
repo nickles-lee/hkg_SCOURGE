@@ -887,5 +887,7 @@ items beyond that.
   tests; 176 VM commits.
 - **2026-11-14 — exec output cap**: tail-limited output with truncation
   warning; unit + gated coverage. 377 tests; 177 VM commits.
+- **2026-11-14 — list artifact counters**: daemon list reports command-log
+  bytes and screenshot count. 377 tests; 178 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

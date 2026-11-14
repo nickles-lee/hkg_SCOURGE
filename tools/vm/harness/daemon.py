@@ -166,6 +166,7 @@ def list_daemons(root: Path) -> list[dict]:
         daemon_pid = status.get("daemon_pid")
         qemu_pid = status.get("qemu_pid")
         daemon_alive = bool(daemon_pid and daemon_pid_matches(daemon_pid, path))
+        command_log = path / "daemon-commands.log"
         state = status.get("state")
         rows.append({
             "dir": str(path),
@@ -177,6 +178,9 @@ def list_daemons(root: Path) -> list[dict]:
             "stale": state in ("starting", "ready") and not daemon_alive,
             "kernel": config.get("kernel_target"),
             "state_dir": config.get("state"),
+            "command_log_bytes": (command_log.stat().st_size
+                                  if command_log.is_file() else 0),
+            "screenshot_count": len(list(path.glob("screenshot-*.png"))),
         })
     return rows
 
