@@ -52,6 +52,29 @@ class DaemonTests(unittest.TestCase):
         self.assertFalse(rows['d2']['stale'])
         self.assertEqual(daemon.list_daemons(self.root / 'missing'), [])
 
+    def test_daemon_list_state_filter(self) -> None:
+        root = self.root / 'root'
+        ready = root / 'ready'
+        ready.mkdir(parents=True)
+        daemon.write_status(ready, {'state': 'ready', 'daemon_pid': os.getpid(),
+                                    'qemu_pid': 99999999})
+        stopped = root / 'stopped'
+        stopped.mkdir()
+        daemon.write_status(stopped, {'state': 'stopped'})
+
+        def listing(value):
+            completed = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', 'list',
+                 '--root', str(root), '--json', '--state', value],
+                cwd=VM, capture_output=True, text=True, check=False)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            return {Path(row['dir']).name for row in json.loads(completed.stdout)}
+
+        self.assertEqual(listing('ready'), {'ready'})
+        self.assertEqual(listing('stale'), {'ready'})
+        self.assertEqual(listing('stopped'), {'stopped'})
+        self.assertEqual(listing('error'), set())
+
     def test_exec_rejects_invalid_timeout(self) -> None:
         for value in ('0', '-1', 'nan', 'inf'):
             completed = subprocess.run(

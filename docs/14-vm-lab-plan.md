@@ -875,5 +875,7 @@ items beyond that.
   369 tests; 170 VM commits.
 - **2026-11-14 — benchmark duplicate rejection**: duplicate variants/rows/
   warmups are invalid. 370 tests; 171 VM commits.
+- **2026-11-14 — list state filter**: daemon list can filter by state/stale.
+  371 tests; 172 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

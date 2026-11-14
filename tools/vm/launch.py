@@ -1675,6 +1675,9 @@ def main() -> int:
     dlist.add_argument('--json', action='store_true')
     dlist.add_argument('--fail-stale', action='store_true',
                        help='exit 1 when any daemon entry is stale')
+    dlist.add_argument('--state', choices=('starting', 'ready', 'stopped',
+                                           'error', 'stale'), default=None,
+                       help='only show entries in this state')
     for name in ('status', 'stop', 'screenshot', 'console', 'exec'):
         p = dsub.add_parser(name)
         p.add_argument('--daemon-dir', type=Path, default=VM / 'runs' / 'daemon')
@@ -1790,6 +1793,10 @@ def main() -> int:
             return daemon_mod._serve(config)
         if args.daemon_action == 'list':
             rows = daemon_mod.list_daemons(args.root)
+            if args.state == 'stale':
+                rows = [row for row in rows if row['stale']]
+            elif args.state:
+                rows = [row for row in rows if row['state'] == args.state]
             if args.json:
                 print(json.dumps(rows, indent=2))
             else:
