@@ -155,6 +155,17 @@ def daemon_restart_argv(config: dict, daemon_dir: Path,
     return argv
 
 
+def parse_click(value: str) -> tuple[int, int]:
+    """Parse --click X,Y with clear errors."""
+    parts = value.split(',')
+    if len(parts) != 2:
+        raise ValueError('--click requires X,Y')
+    try:
+        return int(parts[0].strip()), int(parts[1].strip())
+    except ValueError as exc:
+        raise ValueError('--click coordinates must be integers') from exc
+
+
 def qemu_preexec(pin_cpu: int | None = None):
     """Child-side setup: parent-death signal plus optional host CPU pinning."""
     def _preexec() -> None:
@@ -1977,7 +1988,7 @@ def main() -> int:
             ap.error('input requires exactly one of --click X,Y or --key QCODE')
         try:
             if args.click:
-                x, y = (int(part) for part in args.click.split(',', 1))
+                x, y = parse_click(args.click)
                 result = qmp_click(args.qmp, x, y, args.width, args.height,
                                    args.button)
             else:

@@ -897,5 +897,7 @@ items beyond that.
   lists; unit coverage. 380 tests; 181 VM commits.
 - **2026-11-14 — QMP button validation**: library rejects unknown pointer
   buttons. 381 tests; 182 VM commits.
+- **2026-11-14 — click parsing**: clear `--click X,Y` validation. 382 tests;
+  183 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

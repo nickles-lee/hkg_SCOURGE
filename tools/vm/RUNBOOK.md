@@ -153,7 +153,7 @@ Optional share/display/input/network/audio:
 ```sh
 --share DIR --display vnc --vnc-display :7 --network --audio
 --usb-host 058f:6366
-python3 -B launch.py input --qmp <run>/qmp.sock --click 640,360
+python3 -B launch.py input --qmp <run>/qmp.sock --click 640,360   # X,Y integers
 python3 -B launch.py input --qmp <run>/qmp.sock --key ret
 ```
 

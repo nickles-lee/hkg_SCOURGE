@@ -43,6 +43,13 @@ class InputTests(unittest.TestCase):
                                button="middle")
         self.assertEqual(result["button"], "middle")
 
+    def test_parse_click(self) -> None:
+        self.assertEqual(launch.parse_click('10,20'), (10, 20))
+        self.assertEqual(launch.parse_click(' 3 , 4 '), (3, 4))
+        for value in ('10', '1,2,3', 'a,b', ''):
+            with self.assertRaises(ValueError):
+                launch.parse_click(value)
+
     def test_key_sends_down_and_up(self) -> None:
         with patch.object(qmp, "send_events", return_value={"ok": True}) as send:
             qmp.key(self.root / "qmp.sock", "ret")
