@@ -164,3 +164,65 @@ def scenario_state(vm_dir: Path) -> dict:
     problems.extend(f'unregistered scenario file: {name}' for name in extra)
     return {'ok': not problems, 'count': count, 'problems': problems,
             'unregistered': extra}
+
+
+PROFILE_NAMES = ('research', 'conformance')
+ALLOWED_WORKAROUNDS = {
+    'dmclient-gui-patch', 'getkeyfile-success-patch', 'decrypt-pass-through',
+    'plaintext-update', 'applauncher-sigstub',
+}
+
+
+def validate_profile(name: str, data) -> list[str]:
+    problems: list[str] = []
+    if not isinstance(data, dict):
+        return ['profile must be a JSON object']
+    if data.get('name') != name:
+        problems.append(f"name {data.get('name')!r} does not match {name!r}")
+    description = data.get('description')
+    if not isinstance(description, str) or not description.strip():
+        problems.append('description must be a non-empty string')
+    workarounds = data.get('allowed_workarounds')
+    if not isinstance(workarounds, dict):
+        problems.append('allowed_workarounds must be an object')
+    elif set(workarounds) - ALLOWED_WORKAROUNDS:
+        problems.append('allowed_workarounds has unknown keys')
+    elif any(not isinstance(value, bool) for value in workarounds.values()):
+        problems.append('allowed_workarounds values must be boolean')
+    elif name == 'conformance' and any(workarounds.values()):
+        problems.append('conformance profile cannot permit workarounds')
+    limitations = data.get('limitations')
+    if (not isinstance(limitations, list) or not limitations
+            or any(not isinstance(item, str) or not item.strip()
+                   for item in limitations)):
+        problems.append('limitations must be a non-empty list of strings')
+    return problems
+
+
+def profile_state(vm_dir: Path) -> dict:
+    """Validate the research/conformance profiles and flag extras."""
+    vm_dir = Path(vm_dir)
+    root = vm_dir / 'profiles'
+    problems: list[str] = []
+    count = 0
+    for name in PROFILE_NAMES:
+        path = root / f'{name}.json'
+        if not path.is_file():
+            problems.append(f'{name}: missing {path.name}')
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            problems.append(f'{name}: cannot read: {exc}')
+            continue
+        count += 1
+        problems.extend(f'{name}: {problem}'
+                        for problem in validate_profile(name, data))
+    try:
+        extra = sorted(path.stem for path in root.glob('*.json')
+                       if path.stem not in PROFILE_NAMES)
+    except OSError:
+        extra = []
+    problems.extend(f'unregistered profile file: {name}' for name in extra)
+    return {'ok': not problems, 'count': count, 'problems': problems,
+            'unregistered': extra}

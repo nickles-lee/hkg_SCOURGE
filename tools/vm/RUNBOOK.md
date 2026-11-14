@@ -29,7 +29,9 @@ for the limits.
   see the SCOURGE stage-1 flow. Never commit those images.
 - `python3 -B launch.py doctor --graphics` should be green before booting;
   it also validates every scenario JSON contract (`scenarios` check),
-including boot/exit markers, fail/removal metadata and numeric bounds.
+including boot/exit markers, fail/removal metadata and numeric bounds, and
+both profiles (`profiles` check: workaround keys/booleans, conformance
+no-bypass, limitations).
 
 ## Build basics
 

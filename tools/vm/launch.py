@@ -67,7 +67,7 @@ from harness.result_schema import (check_all_bench, check_all_bench_dir,
                                    validate_bench, validate_file,
                                    validate_result)
 from harness.results import evaluate, evaluate_systemd_transition, phase_summary
-from harness.scenarios import scenario_state
+from harness.scenarios import profile_state, scenario_state
 from harness.storage import VOLUMES, cleanup_storage, create_storage, mount_script, parse_sizes
 from harness.tools import check_tools
 
@@ -1448,6 +1448,8 @@ def doctor(verify_images: bool = False, tools: Path | None = None,
     note("runs", runs_stats(VM))
     scenarios = scenario_state(VM)
     check("scenarios", scenarios["ok"], scenarios)
+    profiles = profile_state(VM)
+    check("profiles", profiles["ok"], profiles)
     result_schema = check_all_results(VM)
     check("result_schema", result_schema["ok"], {
         k: result_schema[k]
@@ -1481,6 +1483,8 @@ def doctor(verify_images: bool = False, tools: Path | None = None,
         actions.append("rebuild the tools image: sh build_tools.sh tools.$(date +%Y%m%d).img")
     if checks.get("scenarios", {}).get("ok") is False:
         actions.append("fix scenario JSON contract problems reported by doctor")
+    if checks.get("profiles", {}).get("ok") is False:
+        actions.append("fix profile JSON contract problems reported by doctor")
     if checks.get("result_schema", {}).get("ok") is False:
         actions.append("inspect invalid runs: launch.py check-run --all")
     if checks.get("bench_schema", {}).get("ok") is False:

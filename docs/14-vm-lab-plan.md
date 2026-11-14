@@ -842,5 +842,8 @@ items beyond that.
   tests; 156 VM commits.
 - **2026-11-14 — benchmark shape comparison**: cross-shape comparisons are
   flagged and optionally rejected. 354 tests; 157 VM commits.
+- **2026-11-14 — profile validation**: doctor validates profile contracts
+  and conformance no-bypass; tests cover malformed/missing/extra. 357 tests;
+  158 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

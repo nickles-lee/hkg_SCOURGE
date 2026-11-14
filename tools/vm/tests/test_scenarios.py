@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from harness.config import SCENARIO_NAMES
-from harness.scenarios import scenario_state, validate_scenario
+from harness.scenarios import (profile_state, scenario_state,
+                               validate_profile, validate_scenario)
 
 VM = Path(__file__).resolve().parents[1]
 
@@ -63,6 +65,45 @@ class ScenarioContractTests(unittest.TestCase):
                              'usb_removal.marker', 'usb_removal.device_id',
                              'settle_seconds', 'requires_visible_frame'):
                 self.assertIn(expected, joined)
+
+    def test_live_profiles_validate(self) -> None:
+        state = profile_state(VM)
+        self.assertTrue(state['ok'], state['problems'])
+        self.assertEqual(state['count'], 2)
+        self.assertEqual(state['unregistered'], [])
+
+    def test_profile_validation_reports_problems(self) -> None:
+        bad = validate_profile('conformance', {
+            'name': 'other', 'description': '',
+            'allowed_workarounds': {'unknown-bypass': True},
+            'limitations': []})
+        joined = '\n'.join(bad)
+        for expected in ('does not match', 'description', 'unknown keys',
+                         'limitations'):
+            self.assertIn(expected, joined)
+        enabled = validate_profile('conformance', {
+            'name': 'conformance', 'description': 'ok',
+            'allowed_workarounds': {'dmclient-gui-patch': True},
+            'limitations': ['one']})
+        self.assertIn('cannot permit workarounds', '\n'.join(enabled))
+        self.assertEqual(validate_profile('research', {
+            'name': 'research', 'description': 'ok',
+            'allowed_workarounds': {'dmclient-gui-patch': True},
+            'limitations': ['one']}), [])
+
+    def test_profile_state_flags_missing_and_extra(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='vm-profiles-') as tmp:
+            root = Path(tmp) / 'profiles'
+            root.mkdir()
+            (root / 'research.json').write_text(json.dumps({
+                'name': 'research', 'description': 'ok',
+                'allowed_workarounds': {}, 'limitations': ['one']}))
+            (root / 'extra.json').write_text('{}')
+            state = profile_state(Path(tmp))
+            self.assertFalse(state['ok'])
+            self.assertIn('missing conformance.json',
+                          '\n'.join(state['problems']))
+            self.assertEqual(state['unregistered'], ['extra'])
 
     def test_runbook_probe_accepts_both_layouts(self) -> None:
         with tempfile.TemporaryDirectory(prefix='vm-scenarios-') as tmp:
