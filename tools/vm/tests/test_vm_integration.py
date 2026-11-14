@@ -163,6 +163,56 @@ class VMIntegrationTests(unittest.TestCase):
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
 
+    def test_daemon_state_reset(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-reset-') as tmp:
+            root = Path(tmp)
+            state = root / 'state'
+            daemon_dir = root / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            def start(reset=False):
+                argv = ['start', '--daemon-dir', str(daemon_dir),
+                        '--state', str(state),
+                        '--ready-timeout', '120', '--lock-timeout', '120']
+                if reset:
+                    argv.append('--reset')
+                completed = cli(*argv)
+                combined = completed.stdout + completed.stderr
+                if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                    self.skipTest('VM lab is busy with another run')
+                self.assertEqual(completed.returncode, 0, combined)
+
+            try:
+                start()
+                written = cli('exec', '--daemon-dir', str(daemon_dir),
+                              '--cmd',
+                              "mkdir -p /rw_data && printf 'reset-me\\n' "
+                              "> /rw_data/reset-marker && sync && echo MARKER_WRITTEN")
+                self.assertEqual(written.returncode, 0,
+                                 written.stdout + written.stderr)
+                self.assertIn('MARKER_WRITTEN', written.stdout)
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
+                start(reset=True)
+                read_back = cli('exec', '--daemon-dir', str(daemon_dir),
+                                '--cmd',
+                                'if [ -e /rw_data/reset-marker ]; then '
+                                'echo STILL_THERE; else echo RESET_CLEAN; fi')
+                self.assertEqual(read_back.returncode, 0,
+                                 read_back.stdout + read_back.stderr)
+                self.assertIn('RESET_CLEAN', read_back.stdout)
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+            finally:
+                cli('stop', '--daemon-dir', str(daemon_dir))
+
     def test_daemon_exec_timeout_recovery(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-timeout-') as tmp:
             daemon_dir = Path(tmp) / 'daemon'

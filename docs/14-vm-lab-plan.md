@@ -671,5 +671,8 @@ items beyond that.
 - **2026-11-14 — daemon exec timeout recovery**: overlong exec fails with a
   completion-timeout diagnostic and the daemon accepts a subsequent exec.
   Real run PASS (11.1 s). 295 tests (26 skipped); 96 VM commits.
+- **2026-11-14 — daemon state reset test**: marker written to persistent
+  state is removed after `--reset`; real run PASS (17.7 s). 296 tests
+  (27 skipped); 97 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
