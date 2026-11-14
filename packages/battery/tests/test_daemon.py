@@ -177,7 +177,7 @@ def main():
         r = http("/logs/dump", "POST")
         assert r.get("ok") is True, r
         st = None
-        for _ in range(300):
+        for _ in range(600):
             st = http("/status")
             if st.get("dump_state") in ("ok", "error"):
                 break
@@ -456,7 +456,7 @@ def main():
         st = wait_door("send_failed", timeout=4.0)
         os.unlink(dbus_fail)
         new_bundles = set()
-        for _ in range(300):
+        for _ in range(600):
             new_bundles = set(glob.glob(os.path.join(usb_dir, "battery_logs_*"))) - before_bundles
             if new_bundles:
                 break

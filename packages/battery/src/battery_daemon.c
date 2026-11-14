@@ -1197,7 +1197,7 @@ static void handle_frame(const struct can_frame *f)
          * car's battery temperature cannot change instantly. */
         g_temp_b2 = f->data[2];
         g_temp_b4 = f->data[4];
-        int raw = (g_temp_byte == 4) ? g_temp_b4 : g_temp_b2;
+        int raw = (int)(int8_t)((g_temp_byte == 4) ? g_temp_b4 : g_temp_b2);
         int chosen = raw;
         const char *source = (g_temp_byte == 4) ? "0x2FC b4" : "0x2FC b2";
         if (raw == 0 && g_temp_hold_valid &&
