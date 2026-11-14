@@ -823,6 +823,21 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertEqual(stopped.returncode, 0,
                                  stopped.stdout + stopped.stderr)
 
+    def test_compat_audio_card_and_playback(self):
+        process, result = self.run_guest(
+            '--kernel', 'compat', '--audio', '--timeout', '90',
+            '--cmd',
+            "grep -q HDA /proc/asound/cards && "
+            "aplay -D hw:0,0 -d 1 -f S16_LE -r 48000 -c 2 /dev/zero && "
+            "echo AUDIO_OK")
+        self.assertEqual(process.returncode, 0,
+                         process.stdout + process.stderr)
+        self.assertEqual(result['verdict'], 'PASS')
+        self.assertTrue(result['audio'])
+        output = (Path(result['run_dir']) / 'guest-output.log').read_text()
+        self.assertIn('AUDIO_OK', output)
+        self.assert_cleaned(result)
+
     def test_daemon_control_protocol_rejects_bad_requests(self):
         import socket
         with tempfile.TemporaryDirectory(prefix='vm-daemon-badctl-') as tmp:

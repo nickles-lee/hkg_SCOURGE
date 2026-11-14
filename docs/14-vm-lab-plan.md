@@ -798,5 +798,7 @@ items beyond that.
 - **2026-11-14 — scenario metadata validation**: boot/exit markers,
   expected_fail, power-loss/USB-removal metadata and numeric bounds checked;
   25 scenarios valid. 334 tests; 138 VM commits.
+- **2026-11-14 — compat audio playback**: gated HDA-card + hw:0,0 playback
+  PASS. 335 tests; 139 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

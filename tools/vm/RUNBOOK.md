@@ -163,7 +163,8 @@ python3 -B launch.py run --kernel compat --audio \
 ```
 
 `--audio` adds `intel-hda` + `hda-duplex` with a null host backend; no host
-sound server is needed. The vendor rootfs default `dmix` slave is absent, so
+sound server is needed. An opt-in VM test asserts the HDA card is visible and
+that a one-second 48 kHz stereo `hw:0,0` playback completes. The vendor rootfs default `dmix` slave is absent, so
 use `-D hw:0,0` (or configure a simple PCM) for a test tone.
 
 ## Persistent VM daemon
