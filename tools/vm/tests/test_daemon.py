@@ -79,6 +79,19 @@ class DaemonTests(unittest.TestCase):
         self.assertEqual(listing('stopped'), {'stopped'})
         self.assertEqual(listing('error'), set())
 
+    def test_start_rejects_invalid_limits(self) -> None:
+        for flag in ('--command-log-max', '--screenshot-keep',
+                     '--exec-output-max'):
+            with tempfile.TemporaryDirectory(prefix='vm-daemon-limit-') as tmp:
+                daemon_dir = Path(tmp) / 'daemon'
+                completed = subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon',
+                     'start', '--daemon-dir', str(daemon_dir), flag, '0'],
+                    cwd=VM, capture_output=True, text=True, check=False)
+                self.assertEqual(completed.returncode, 2, completed.stderr)
+                self.assertIn(f'{flag} must be positive', completed.stderr)
+                self.assertFalse((daemon_dir / 'status.json').exists())
+
     def test_exec_rejects_invalid_timeout(self) -> None:
         for value in ('0', '-1', 'nan', 'inf'):
             completed = subprocess.run(

@@ -891,5 +891,7 @@ items beyond that.
   bytes and screenshot count. 377 tests; 178 VM commits.
 - **2026-11-14 — restart preserves caps**: exec truncation and screenshot
   retention still apply after restart. 378 tests; 179 VM commits.
+- **2026-11-14 — limit validation coverage**: zero/negative daemon limits
+  rejected before boot. 379 tests; 180 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
