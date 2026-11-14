@@ -293,7 +293,8 @@ and `dirty`) for provenance. Validate one document with
 `launch.py check-bench <bench-dir|bench.json>` or all of them with
 `check-bench --all` (JSON report, exit 0/1). Schema validation requires every row/warmup to
 name a benchmarked scenario, a declared cache/pin variant, and an iteration
-within `repeats`/`warmup`. The opt-in VM suite runs a real warmup+measured
+within `repeats`/`warmup`, with unique variant/row/warmup keys (duplicates
+are rejected). The opt-in VM suite runs a real warmup+measured
 pair and asserts warmup/row PASS, source revision and metrics; it also runs a
 compat-kernel benchmark and validates its row/metrics. `--matrix` compares
 `writeback`/`writethrough` by default; `--matrix-cache` and `--matrix-cpu`

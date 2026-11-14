@@ -302,6 +302,7 @@ def validate_bench(bench) -> list[str]:
     elif not isinstance(variants, list):
         problems.append('variants must be a list')
     else:
+        seen_variants = set()
         for index, variant in enumerate(variants):
             if not isinstance(variant, dict):
                 problems.append(f'variants[{index}] must be an object')
@@ -310,6 +311,10 @@ def validate_bench(bench) -> list[str]:
                 problems.append(f'variants[{index}].cache must be a string or null')
             if variant.get('pin_cpu') is not None and not _is_int(variant['pin_cpu']):
                 problems.append(f'variants[{index}].pin_cpu must be an integer or null')
+            key = (variant.get('cache'), variant.get('pin_cpu'))
+            if key in seen_variants:
+                problems.append(f'variants[{index}] duplicates an earlier variant')
+            seen_variants.add(key)
     scenario_names = ([item for item in scenarios if isinstance(item, str)]
                       if isinstance(scenarios, list) else [])
     declared = None
@@ -321,11 +326,17 @@ def validate_bench(bench) -> list[str]:
     if not isinstance(rows, list):
         problems.append('rows must be a list')
     else:
+        seen_rows = set()
         for index, row in enumerate(rows):
             prefix = f'rows[{index}]'
             if not isinstance(row, dict):
                 problems.append(f'{prefix} must be an object')
                 continue
+            row_key = (row.get('scenario'), row.get('iteration'),
+                       row.get('cache'), row.get('pin_cpu'))
+            if row_key in seen_rows:
+                problems.append(f'{prefix} duplicates an earlier row')
+            seen_rows.add(row_key)
             if not isinstance(row.get('scenario'), str) or not row['scenario']:
                 problems.append(f'{prefix}.scenario must be a non-empty string')
             elif scenario_names and row['scenario'] not in scenario_names:
@@ -378,10 +389,16 @@ def validate_bench(bench) -> list[str]:
     if not isinstance(warmups, list):
         problems.append('warmups must be a list')
     else:
+        seen_warmups = set()
         for index, row in enumerate(warmups):
             if not isinstance(row, dict):
                 problems.append(f'warmups[{index}] must be an object')
                 continue
+            warm_key = (row.get('scenario'), row.get('warmup'),
+                        row.get('cache'), row.get('pin_cpu'))
+            if warm_key in seen_warmups:
+                problems.append(f'warmups[{index}] duplicates an earlier warmup')
+            seen_warmups.add(warm_key)
             if not isinstance(row.get('scenario'), str):
                 problems.append(f'warmups[{index}].scenario must be a string')
             elif scenario_names and row['scenario'] not in scenario_names:

@@ -114,6 +114,20 @@ class BenchTests(unittest.TestCase):
         self.assertIn('not a declared variant',
                       '\n'.join(validate_bench(warm_variant)))
 
+    def test_bench_schema_rejects_duplicates(self) -> None:
+        row = {'scenario': 'boot', 'iteration': 1, 'cache': None,
+               'pin_cpu': None, 'verdict': 'PASS', 'rc': 0, 'log': 'x.log'}
+        warm = {'scenario': 'boot', 'warmup': 1, 'cache': None,
+                'pin_cpu': None, 'verdict': 'PASS', 'rc': 0, 'log': 'w.log'}
+        document = bench_doc(
+            variants=[{'cache': None, 'pin_cpu': None},
+                      {'cache': None, 'pin_cpu': None}],
+            rows=[row, dict(row)], warmups=[warm, dict(warm)], warmup=1)
+        joined = '\n'.join(validate_bench(document))
+        self.assertIn('duplicates an earlier variant', joined)
+        self.assertIn('duplicates an earlier row', joined)
+        self.assertIn('duplicates an earlier warmup', joined)
+
     def test_validate_child_result(self) -> None:
         self.assertEqual(validate_child(child_result(), 0), ('PASS', []))
         verdict, problems = validate_child(child_result(), 2)

@@ -873,5 +873,7 @@ items beyond that.
   match the containing directory; corpus clean. 368 tests; 169 VM commits.
 - **2026-11-14 — visual name hardening**: path-like baseline names rejected.
   369 tests; 170 VM commits.
+- **2026-11-14 — benchmark duplicate rejection**: duplicate variants/rows/
+  warmups are invalid. 370 tests; 171 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
