@@ -871,5 +871,7 @@ items beyond that.
   marker/killed/recovered evidence. 367 tests; 168 VM commits.
 - **2026-11-14 — result directory integrity**: current-schema run_dir must
   match the containing directory; corpus clean. 368 tests; 169 VM commits.
+- **2026-11-14 — visual name hardening**: path-like baseline names rejected.
+  369 tests; 170 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

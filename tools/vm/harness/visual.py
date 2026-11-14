@@ -26,10 +26,20 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def baseline_name(name: str) -> str:
+    """Normalize a baseline name and reject separators/traversal."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("baseline name must be a non-empty string")
+    value = name if name.endswith(".png") else f"{name}.png"
+    if Path(value).name != value or value in (".png", "..png") or value.startswith("."):
+        raise ValueError(f"invalid baseline name: {name!r}")
+    return value
+
+
 def baseline(source: Path, name: str, baselines: Path, run: str | None = None) -> dict:
     Image, _ = _pil()
     baselines.mkdir(parents=True, exist_ok=True)
-    name = name if name.endswith(".png") else f"{name}.png"
+    name = baseline_name(name)
     destination = baselines / name
     shutil.copy2(source, destination)
     with Image.open(destination) as image:
@@ -50,7 +60,7 @@ def compare(candidate: Path, name: str, baselines: Path,
             threshold: float = 0.01, tolerance: int = 8,
             diff_path: Path | None = None) -> dict:
     Image, ImageChops = _pil()
-    name = name if name.endswith(".png") else f"{name}.png"
+    name = baseline_name(name)
     base_path = baselines / name
     if not base_path.is_file():
         raise ValueError(f"baseline missing: {base_path}; run visual baseline first")

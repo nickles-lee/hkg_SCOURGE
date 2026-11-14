@@ -52,6 +52,20 @@ class VisualTests(unittest.TestCase):
         self.assertTrue(ok["ok"])
         self.assertTrue(Path(ok["diff"]).is_file())
 
+    def test_baseline_names_reject_paths(self) -> None:
+        self.assertEqual(visual.baseline_name('shot'), 'shot.png')
+        self.assertEqual(visual.baseline_name('shot.png'), 'shot.png')
+        for name in ('../evil', 'sub/x', '', '.hidden', '.png'):
+            with self.assertRaises(ValueError):
+                visual.baseline_name(name)
+        visual.baseline(self.base, 'shot', self.baselines)
+        for name in ('../evil', 'sub/x'):
+            with self.assertRaises(ValueError):
+                visual.compare(self.same, name, self.baselines)
+            with self.assertRaises(ValueError):
+                visual.baseline(self.base, name, self.baselines)
+        self.assertFalse((self.root / 'evil.png').exists())
+
     def test_threshold_and_tolerance_bounds(self) -> None:
         visual.baseline(self.base, "shot", self.baselines)
         for threshold, tolerance in ((-0.1, 8), (1.1, 8), (0.01, -1),

@@ -381,7 +381,8 @@ python3 -B launch.py visual compare <run-id> qmp-screenshot.png ui-smoke \
 python3 -B launch.py visual list
 ```
 
-Baselines live in `baselines/` (gitignored); `compare` validates the
+Baselines live in `baselines/` (gitignored); names must be plain filenames
+(path separators/traversal are rejected), and `compare` validates the
 threshold (0..1) and per-channel tolerance (0..255), writes a diff PNG and
 reports changed pixels/ratio. A deliberate UI change is rebaselined by
 running the `baseline` command against the reviewed frame. Baselines are
