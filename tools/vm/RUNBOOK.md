@@ -213,8 +213,9 @@ is reported by `status` instead of silently reusing it. An opt-in integration
 test (`IONIQ_RUN_VM_TESTS=1`) writes a marker through one daemon, stops it,
 restarts with the same `--state`, and verifies the marker survives. Another
 opt-in test checks `daemon-commands.log`, `daemon console` serial output,
-`daemon status` (`reachable`, `qemu_alive`, `serial_bytes`, held lock) and
-guest exit-code propagation through `exec`. A third test captures a daemon
+`daemon status` (`reachable`, `qemu_alive`, `serial_bytes`,
+`command_log_bytes`, `screenshot_count`, held lock) and guest exit-code
+propagation through `exec`. A third test captures a daemon
 screenshot, validates PNG dimensions/size/metadata, confirms the daemon-dir
 capture was unlinked after the CLI copy, and stops the daemon. Another test
 unlinks the daemon QMP socket, requires the screenshot command to fail with a

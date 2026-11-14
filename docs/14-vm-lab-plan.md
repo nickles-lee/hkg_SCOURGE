@@ -865,5 +865,7 @@ items beyond that.
   commits.
 - **2026-11-14 — provenance validation**: images/overlays/harness_sources
   structures checked; corpus clean. 366 tests; 166 VM commits.
+- **2026-11-14 — status artifact counters**: command log bytes and screenshot
+  count in daemon status; gated assertions. 366 tests; 167 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

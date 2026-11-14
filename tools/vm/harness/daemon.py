@@ -429,10 +429,17 @@ def _serve(config: dict) -> int:
                 action = message.get("action")
                 if action == "status":
                     current = read_status(daemon_dir)
-                    current.update({"reachable": True,
-                                    "qemu_alive": proc.poll() is None,
-                                    "serial_bytes": (daemon_dir / "serial.log").stat().st_size
-                                    if (daemon_dir / "serial.log").is_file() else 0})
+                    command_log = daemon_dir / "daemon-commands.log"
+                    current.update({
+                        "reachable": True,
+                        "qemu_alive": proc.poll() is None,
+                        "serial_bytes": (daemon_dir / "serial.log").stat().st_size
+                        if (daemon_dir / "serial.log").is_file() else 0,
+                        "command_log_bytes": (command_log.stat().st_size
+                                              if command_log.is_file() else 0),
+                        "screenshot_count": len(list(
+                            daemon_dir.glob("screenshot-*.png"))),
+                    })
                     response = {"ok": True, "status": current}
                 elif action == "exec":
                     cmd = message.get("cmd")

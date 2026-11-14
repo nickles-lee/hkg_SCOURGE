@@ -1776,6 +1776,9 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertTrue(captures[2].exists())
                 self.assertEqual(
                     len(list(daemon_dir.glob('screenshot-*.png'))), 2)
+                status = cli('status', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(status.returncode, 0, status.stderr)
+                self.assertEqual(json.loads(status.stdout)['screenshot_count'], 2)
             finally:
                 stopped = cli('stop', '--daemon-dir', str(daemon_dir))
                 self.assertEqual(stopped.returncode, 0,
@@ -2078,6 +2081,8 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertTrue(values['reachable'])
                 self.assertTrue(values['qemu_alive'])
                 self.assertGreater(values['serial_bytes'], 0)
+                self.assertGreater(values['command_log_bytes'], 0)
+                self.assertEqual(values['screenshot_count'], 0)
                 self.assertTrue(values['lock']['held'])
             finally:
                 stopped = cli('stop', '--daemon-dir', str(daemon_dir))
