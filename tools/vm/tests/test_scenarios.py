@@ -134,6 +134,32 @@ class ScenarioContractTests(unittest.TestCase):
         self.assertIn('unknown scenario',
                       '\n'.join(json.loads(missing.stdout)['problems']))
 
+    def test_check_profile_cli(self) -> None:
+        good = subprocess.run(
+            [sys.executable, '-B', str(VM / 'launch.py'), 'check-profile',
+             'research'], cwd=VM, capture_output=True, text=True, check=False)
+        self.assertEqual(good.returncode, 0, good.stderr)
+        self.assertTrue(json.loads(good.stdout)['ok'])
+
+        with tempfile.TemporaryDirectory(prefix='vm-check-profile-') as tmp:
+            bad = Path(tmp) / 'bad-profile.json'
+            bad.write_text(json.dumps({'description': ''}))
+            completed = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'check-profile',
+                 str(bad)], cwd=VM, capture_output=True, text=True,
+                check=False)
+            self.assertEqual(completed.returncode, 1)
+            problems = '\n'.join(json.loads(completed.stdout)['problems'])
+            self.assertIn('does not match', problems)
+
+        missing = subprocess.run(
+            [sys.executable, '-B', str(VM / 'launch.py'), 'check-profile',
+             'no-such-profile'], cwd=VM, capture_output=True, text=True,
+            check=False)
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn('unknown profile',
+                      '\n'.join(json.loads(missing.stdout)['problems']))
+
     def test_runbook_probe_accepts_both_layouts(self) -> None:
         with tempfile.TemporaryDirectory(prefix='vm-scenarios-') as tmp:
             root = Path(tmp)

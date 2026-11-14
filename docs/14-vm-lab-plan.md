@@ -858,5 +858,7 @@ items beyond that.
   tests; 162 VM commits.
 - **2026-11-14 — check-scenario**: per-contract CLI validation with JSON
   report and 0/1 exit. 363 tests; 163 VM commits.
+- **2026-11-14 — check-profile**: per-profile CLI validation with JSON
+  report and 0/1 exit. 364 tests; 164 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

@@ -67,7 +67,8 @@ from harness.result_schema import (check_all_bench, check_all_bench_dir,
                                    validate_bench, validate_file,
                                    validate_result)
 from harness.results import evaluate, evaluate_systemd_transition, phase_summary
-from harness.scenarios import (profile_state, scenario_state,
+from harness.scenarios import (PROFILE_NAMES, profile_state,
+                               scenario_state, validate_profile,
                                validate_scenario)
 from harness.storage import VOLUMES, cleanup_storage, create_storage, mount_script, parse_sizes
 from harness.tools import check_tools
@@ -1595,6 +1596,10 @@ def main() -> int:
                                     help='validate one scenario JSON contract')
     check_scenario.add_argument('scenario',
                                 help='registered scenario name or JSON path')
+    check_profile = sub.add_parser('check-profile',
+                                   help='validate one profile JSON contract')
+    check_profile.add_argument('profile',
+                               help='research|conformance or profile JSON path')
     extract = sub.add_parser('extract', help='copy an artifact out of a run')
     extract.add_argument('run')
     extract.add_argument('member')
@@ -2011,6 +2016,29 @@ def main() -> int:
             return 1
         problems = validate_scenario(name, data, VM)
         print(json.dumps({'scenario': name, 'path': str(path),
+                          'ok': not problems, 'problems': problems}, indent=2))
+        return 0 if not problems else 1
+    if args.action == 'check-profile':
+        value = args.profile
+        path = Path(value)
+        if path.is_file():
+            name = path.stem
+        elif value in PROFILE_NAMES:
+            name = value
+            path = VM / 'profiles' / f'{name}.json'
+        else:
+            print(json.dumps({'profile': value, 'ok': False,
+                              'problems': ['unknown profile or missing file']},
+                             indent=2))
+            return 1
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            print(json.dumps({'profile': name, 'path': str(path), 'ok': False,
+                              'problems': [f'cannot read: {exc}']}, indent=2))
+            return 1
+        problems = validate_profile(name, data)
+        print(json.dumps({'profile': name, 'path': str(path),
                           'ok': not problems, 'problems': problems}, indent=2))
         return 0 if not problems else 1
     if args.action == 'check-bench':
