@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from bench import (build_argv, compare_bench, result_path, source_state,
-                   summarize, validate_matrix, variants)
+                   row_verdict, summarize, validate_matrix, variants)
 from harness.result_schema import validate_bench
 from harness.config import load_scenario
 
@@ -52,6 +52,12 @@ def bench_doc(summary=None, metrics=None, **overrides):
 
 
 class BenchTests(unittest.TestCase):
+    def test_row_verdict_normalizes_rc_mismatch(self) -> None:
+        self.assertEqual(row_verdict('PASS', 0), 'PASS')
+        self.assertEqual(row_verdict('PASS', 2), 'FAIL')
+        self.assertEqual(row_verdict('BLOCKED', 77), 'BLOCKED')
+        self.assertEqual(row_verdict(None, 1), 'FAIL')
+
     def test_summarize(self) -> None:
         self.assertEqual(summarize([]), {})
         self.assertEqual(summarize([2.0, 4.0, 6.0]),

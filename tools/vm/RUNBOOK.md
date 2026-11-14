@@ -267,7 +267,8 @@ python3 -B bench.py --scenario boot --repeats 3 [--kernel vendor|compat] \
 python3 -B bench.py --scenario boot --repeats 3 --matrix --matrix-cpu 0
 ```
 
-It holds the global boot lock, runs children with `--no-lock`, writes
+A child row is recorded as `FAIL` if its result says PASS but the process rc
+is nonzero. It holds the global boot lock, runs children with `--no-lock`, writes
 `runs/bench-<id>/bench.json` with mean/median/min/max and keeps each child
 log, and exits nonzero if any run does not PASS. `--warmup N` runs N
 unrecorded boots per scenario/variant first; warmups are retained in

@@ -66,6 +66,13 @@ def variants(args) -> list[tuple[str | None, int | None]]:
     return [(cache, pin) for cache in caches for pin in pins]
 
 
+def row_verdict(verdict: str | None, rc: int) -> str:
+    """Child PASS must agree with a zero process rc; otherwise it is a FAIL."""
+    if verdict == 'PASS' and rc != 0:
+        return 'FAIL'
+    return verdict or 'FAIL'
+
+
 def validate_matrix(args) -> None:
     """Reject unsatisfiable matrix pins before the boot lock is acquired."""
     if not args.matrix:
@@ -313,7 +320,7 @@ def main() -> int:
                             'warmup': warmup_index,
                             'cache': cache,
                             'pin_cpu': pin_cpu,
-                            'verdict': detail.get('verdict', 'FAIL'),
+                            'verdict': row_verdict(detail.get('verdict'), completed.returncode),
                             'rc': completed.returncode,
                             'log': str(log),
                         })
@@ -339,7 +346,7 @@ def main() -> int:
                             'iteration': iteration,
                             'cache': cache,
                             'pin_cpu': pin_cpu,
-                            'verdict': detail.get('verdict', 'FAIL'),
+                            'verdict': row_verdict(detail.get('verdict'), completed.returncode),
                             'rc': completed.returncode,
                             'boot_seconds': detail.get('boot_seconds'),
                             'readiness_seconds': detail.get('readiness_seconds'),
