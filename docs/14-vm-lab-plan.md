@@ -699,5 +699,8 @@ items beyond that.
 - **2026-11-14 — daemon state-backing integrity**: wrong backing rejected
   before QEMU; error status has no QEMU. Real run PASS (0.3 s). 304 tests
   (35 skipped); 105 VM commits.
+- **2026-11-14 — daemon corrupt-state recovery**: corrupted overlay fails
+  before QEMU; `--reset` rebuilds and starts cleanly. Real run PASS (14.6 s).
+  305 tests (36 skipped); 106 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

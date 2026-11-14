@@ -164,6 +164,54 @@ class VMIntegrationTests(unittest.TestCase):
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
 
+    def test_daemon_recovers_from_corrupt_state(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-corrupt-') as tmp:
+            root = Path(tmp)
+            state = root / 'state'
+            daemon_dir = root / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            try:
+                started = cli('start', '--daemon-dir', str(daemon_dir),
+                              '--state', str(state),
+                              '--ready-timeout', '120', '--lock-timeout', '120')
+                combined = started.stdout + started.stderr
+                if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                    self.skipTest('VM lab is busy with another run')
+                self.assertEqual(started.returncode, 0, combined)
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
+                overlay = state / 'rootfs.qcow2'
+                self.assertTrue(overlay.is_file())
+                overlay.write_bytes(b'not a qcow2 image')
+                failed = cli('start', '--daemon-dir', str(daemon_dir),
+                             '--state', str(state),
+                             '--ready-timeout', '30', '--lock-timeout', '30')
+                self.assertNotEqual(failed.returncode, 0,
+                                    failed.stdout + failed.stderr)
+                status = json.loads((daemon_dir / 'status.json').read_text())
+                self.assertEqual(status['state'], 'error')
+                self.assertNotIn('qemu_pid', status)
+
+                reset = cli('start', '--daemon-dir', str(daemon_dir),
+                            '--state', str(state), '--reset',
+                            '--ready-timeout', '120', '--lock-timeout', '120')
+                self.assertEqual(reset.returncode, 0,
+                                 reset.stdout + reset.stderr)
+                alive = cli('exec', '--daemon-dir', str(daemon_dir),
+                            '--cmd', 'echo CORRUPT_STATE_RECOVERED')
+                self.assertEqual(alive.returncode, 0,
+                                 alive.stdout + alive.stderr)
+                self.assertIn('CORRUPT_STATE_RECOVERED', alive.stdout)
+            finally:
+                cli('stop', '--daemon-dir', str(daemon_dir))
+
     def test_daemon_rejects_state_backing_mismatch(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-mismatch-') as tmp:
             root = Path(tmp)
