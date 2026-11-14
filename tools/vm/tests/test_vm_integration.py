@@ -1182,6 +1182,12 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertTrue(rows[0]['qemu_alive'])
                 self.assertFalse(rows[0]['stale'])
                 self.assertEqual(rows[0]['kernel'], 'vendor')
+                ready = cli('list', '--root', str(root), '--json',
+                            '--state', 'ready')
+                self.assertEqual(len(json.loads(ready.stdout)), 1)
+                stopped_filter = cli('list', '--root', str(root), '--json',
+                                     '--state', 'stopped')
+                self.assertEqual(json.loads(stopped_filter.stdout), [])
             finally:
                 stopped = cli('stop', '--daemon-dir', str(daemon_dir))
                 self.assertEqual(stopped.returncode, 0,
@@ -1190,6 +1196,12 @@ class VMIntegrationTests(unittest.TestCase):
             rows = json.loads(listing.stdout)
             self.assertEqual(rows[0]['state'], 'stopped')
             self.assertFalse(rows[0]['qemu_alive'])
+            stopped_filter = cli('list', '--root', str(root), '--json',
+                                 '--state', 'stopped')
+            self.assertEqual(len(json.loads(stopped_filter.stdout)), 1)
+            ready_filter = cli('list', '--root', str(root), '--json',
+                               '--state', 'ready')
+            self.assertEqual(json.loads(ready_filter.stdout), [])
 
     def test_daemon_restart_edge_cases(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-restart-edge-') as tmp:

@@ -919,5 +919,7 @@ items beyond that.
   stop. 390 tests; 192 VM commits.
 - **2026-11-14 — restart preserves log cap/pin**: config+status assertions.
   390 tests; 193 VM commits.
+- **2026-11-14 — gated list filters**: ready/stopped filters against a live
+  daemon. 390 tests; 194 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
