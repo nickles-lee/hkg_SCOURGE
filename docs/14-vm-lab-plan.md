@@ -665,5 +665,8 @@ items beyond that.
   restart; real run PASS (14.3 s). 293 tests (24 skipped); 94 VM commits.
   Available OpenCode session token evidence is recorded in NOTES (15.06M
   non-cache; 806M including cache reads at last query).
+- **2026-11-14 — persistent state across daemon SIGKILL**: write marker,
+  SIGKILL daemon/QEMU, restart same `--state`, verify marker and lock
+  release. Real run PASS (14.1 s). 294 tests (25 skipped); 95 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

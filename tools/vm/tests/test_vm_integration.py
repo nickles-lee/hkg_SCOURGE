@@ -163,6 +163,58 @@ class VMIntegrationTests(unittest.TestCase):
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
 
+    def test_daemon_state_survives_sigkill(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-state-kill-') as tmp:
+            root = Path(tmp)
+            state = root / 'state'
+            daemon_dir = root / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--state', str(state),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            first = json.loads(started.stdout)
+            daemon_pid = first['daemon_pid']
+            qemu_pid = first['qemu_pid']
+            try:
+                written = cli('exec', '--daemon-dir', str(daemon_dir),
+                              '--cmd',
+                              "mkdir -p /rw_data && printf 'state-survives-sigkill\\n' "
+                              "> /rw_data/sigkill-marker && sync && echo MARKER_WRITTEN")
+                self.assertEqual(written.returncode, 0,
+                                 written.stdout + written.stderr)
+                self.assertIn('MARKER_WRITTEN', written.stdout)
+
+                os.kill(daemon_pid, signal.SIGKILL)
+                for pid in (daemon_pid, qemu_pid):
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline and Path(f'/proc/{pid}').exists():
+                        time.sleep(0.1)
+                    self.assertFalse(Path(f'/proc/{pid}').exists())
+
+                restarted = cli('start', '--daemon-dir', str(daemon_dir),
+                                '--state', str(state),
+                                '--ready-timeout', '120', '--lock-timeout', '120')
+                self.assertEqual(restarted.returncode, 0,
+                                 restarted.stdout + restarted.stderr)
+                read_back = cli('exec', '--daemon-dir', str(daemon_dir),
+                                '--cmd', 'cat /rw_data/sigkill-marker')
+                self.assertEqual(read_back.returncode, 0,
+                                 read_back.stdout + read_back.stderr)
+                self.assertIn('state-survives-sigkill', read_back.stdout)
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_daemon_sigkill_recovery(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-sigkill-') as tmp:
             daemon_dir = Path(tmp) / 'daemon'
