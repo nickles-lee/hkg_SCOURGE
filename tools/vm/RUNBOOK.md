@@ -184,7 +184,9 @@ status/error shown by the CLI. State
 overlays survive `stop` and are reused by the next `daemon start`; the
 default daemon directory is `runs/daemon` (`--daemon-dir` overrides it).
 Stop flushes the guest with `sync` before killing QEMU. A stale/dead daemon
-is reported by `status` instead of silently reusing it.
+is reported by `status` instead of silently reusing it. An opt-in integration
+test (`IONIQ_RUN_VM_TESTS=1`) writes a marker through one daemon, stops it,
+restarts with the same `--state`, and verifies the marker survives.
 
 `--cache` selects the non-persistent qcow2 mode (`writeback` default;
 `directsync` is pathological on this host). Persistent state always forces

@@ -161,6 +161,53 @@ class VMIntegrationTests(unittest.TestCase):
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
 
+    def test_daemon_state_survives_restart(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-state-') as tmp:
+            root = Path(tmp)
+            state = root / 'state'
+            daemon_one = root / 'daemon-1'
+            daemon_two = root / 'daemon-2'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            def start(directory):
+                completed = cli('start', '--kernel', 'vendor',
+                                '--state', str(state),
+                                '--daemon-dir', str(directory),
+                                '--ready-timeout', '120', '--lock-timeout', '120')
+                combined = completed.stdout + completed.stderr
+                if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                    self.skipTest('VM lab is busy with another run')
+                self.assertEqual(completed.returncode, 0, combined)
+
+            try:
+                start(daemon_one)
+                written = cli('exec', '--daemon-dir', str(daemon_one),
+                              '--cmd',
+                              "mkdir -p /rw_data && printf 'daemon-state-survives\\n' "
+                              "> /rw_data/daemon-marker && sync && echo MARKER_WRITTEN")
+                self.assertEqual(written.returncode, 0, written.stderr)
+                self.assertIn('MARKER_WRITTEN', written.stdout)
+                stopped = cli('stop', '--daemon-dir', str(daemon_one))
+                self.assertEqual(stopped.returncode, 0, stopped.stdout + stopped.stderr)
+
+                start(daemon_two)
+                read_back = cli('exec', '--daemon-dir', str(daemon_two),
+                                '--cmd', 'cat /rw_data/daemon-marker')
+                self.assertEqual(read_back.returncode, 0, read_back.stderr)
+                self.assertIn('daemon-state-survives', read_back.stdout)
+                stopped = cli('stop', '--daemon-dir', str(daemon_two))
+                self.assertEqual(stopped.returncode, 0, stopped.stdout + stopped.stderr)
+            finally:
+                for directory in (daemon_one, daemon_two):
+                    subprocess.run(
+                        [sys.executable, '-B', str(VM / 'launch.py'), 'daemon',
+                         'stop', '--daemon-dir', str(directory)],
+                        cwd=VM, capture_output=True, text=True, timeout=60)
+
     def test_launcher_sigterm_cleans_owned_qemu(self):
         process = subprocess.Popen([sys.executable, '-B', str(VM / 'launch.py'), 'run',
                                     '--lock-timeout', '100',

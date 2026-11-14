@@ -619,5 +619,9 @@ items beyond that.
   `list`; `check-run --all` and doctor report bulk schema health (current
   corpus: 1181 valid, 159 legacy, 0 invalid, 66 result-less); real run
   validates with schema 3 and zero problems. 279 tests.
+- **2026-11-14 — daemon state-survival test**: gated two-boot integration
+  test writes a marker through one daemon, stops it, restarts on the same
+  `--state`, and verifies the marker survives; real run PASS (52.6 s).
+  280 tests (14 skipped).
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
