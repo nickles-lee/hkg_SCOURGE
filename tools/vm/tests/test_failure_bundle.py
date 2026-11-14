@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -46,6 +47,25 @@ class FailureBundleTests(unittest.TestCase):
         self.assertIn("synthetic failure", summary)
         self.assertIn("HARNESS_FAIL example", summary)
         self.assertEqual(result["failure_bundle"]["path"], str(bundle))
+
+    def test_deadline_bounds_wedged_shell(self) -> None:
+        calls = []
+
+        def slow_execute(ser, command, timeout):
+            calls.append(timeout)
+            time.sleep(timeout)
+            return "token", "late output", 0, timeout
+
+        result = {"run_dir": str(self.root), "verdict": "FAIL", "rc": 1}
+        with patch.object(launch, "execute_guest", slow_execute):
+            metadata = failures.collect_failure_bundle(
+                object(), self.root, result, timeout=0.05, deadline_seconds=0.12)
+        self.assertTrue(metadata["deadline_exceeded"])
+        self.assertLess(len(calls), len(failures.SECTIONS))
+        self.assertIn("skipped", next(
+            value for value in metadata["sections"].values() if "skipped" in value))
+        self.assertTrue((self.root / "failure" / "summary.md").is_file())
+        self.assertLess(metadata["elapsed_seconds"], 0.5)
 
     def test_dead_shell_still_produces_bundle(self) -> None:
         def broken_execute(ser, command, timeout):

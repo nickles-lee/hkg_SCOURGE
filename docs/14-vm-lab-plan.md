@@ -611,5 +611,8 @@ items beyond that.
   validates all 25 scenario contracts (checks, requirements, modes,
   blockers, storage, probes, transitions) and doctor reports a `scenarios`
   check. 272 tests.
+- **2026-11-14 — bounded failure bundles**: failure-bundle collection has a
+  45 s total deadline; wedged sections are skipped while serial tails and
+  summary still land. 273 tests.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

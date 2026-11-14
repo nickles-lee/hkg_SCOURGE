@@ -11,6 +11,7 @@ the run directory. Nothing here writes to the guest.
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 
 MAX_SECTION_BYTES = 256 * 1024
@@ -50,19 +51,36 @@ def _clip(text: str) -> str:
     return text.encode()[:MAX_SECTION_BYTES].decode(errors="replace") + "\n<clipped>\n"
 
 
-def collect_failure_bundle(ser, run_dir: Path, result: dict, timeout: float = 20) -> dict:
-    """Collect a bundle; return metadata and store it in `result`."""
+def collect_failure_bundle(ser, run_dir: Path, result: dict, timeout: float = 20,
+                           deadline_seconds: float = 45) -> dict:
+    """Collect a bundle; return metadata and store it in `result`.
+
+    `deadline_seconds` bounds the whole bundle, so a wedged shell cannot add
+    8 x timeout seconds to an already failed run. Serial tails are always
+    written after the deadline check.
+    """
     from launch import execute_guest  # local import avoids a module cycle
 
     run_dir = Path(run_dir)
     bundle = run_dir / "failure"
     bundle.mkdir(exist_ok=True)
     sections: dict[str, dict] = {}
+    started = time.monotonic()
+    deadline_exceeded = False
 
     for name, command in SECTIONS:
         path = bundle / f"{name}.log"
+        remaining = deadline_seconds - (time.monotonic() - started)
+        if remaining <= 0:
+            deadline_exceeded = True
+            text = "collection skipped: failure-bundle deadline exceeded\n"
+            path.write_text(text)
+            sections[name] = {"path": str(path), "skipped": "deadline",
+                              "bytes": len(text.encode())}
+            continue
         try:
-            _, output, rc, seconds = execute_guest(ser, command, timeout)
+            _, output, rc, seconds = execute_guest(
+                ser, command, min(timeout, remaining))
             text = _clip(output + ("\n" if output and not output.endswith("\n") else ""))
             path.write_text(text)
             sections[name] = {"path": str(path), "rc": rc, "seconds": seconds,
@@ -115,6 +133,9 @@ def collect_failure_bundle(ser, run_dir: Path, result: dict, timeout: float = 20
         "summary": str(summary),
         "sections": sections,
         "excerpts": len(excerpts),
+        "deadline_seconds": deadline_seconds,
+        "deadline_exceeded": deadline_exceeded,
+        "elapsed_seconds": round(time.monotonic() - started, 3),
     }
     result["failure_bundle"] = metadata
     return metadata
