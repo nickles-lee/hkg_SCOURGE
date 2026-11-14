@@ -230,6 +230,29 @@ class BenchTests(unittest.TestCase):
             self.assertEqual(missing.returncode, 1)
             self.assertIn('cannot read', missing.stdout)
 
+            all_root = root / 'all-root'
+            (all_root / 'bench-good').mkdir(parents=True)
+            (all_root / 'bench-good' / 'bench.json').write_text(
+                json.dumps(bench_doc()))
+            every = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'check-bench',
+                 '--all', '--root', str(all_root)],
+                capture_output=True, text=True, check=False)
+            report = json.loads(every.stdout)
+            self.assertEqual(report['checked'], 1)
+            self.assertEqual(report['valid'], 1)
+            self.assertEqual(every.returncode, 0)
+            (all_root / 'bench-bad').mkdir()
+            (all_root / 'bench-bad' / 'bench.json').write_text('{bad')
+            every = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'check-bench',
+                 '--all', '--root', str(all_root)],
+                capture_output=True, text=True, check=False)
+            report = json.loads(every.stdout)
+            self.assertEqual(report['checked'], 2)
+            self.assertEqual(report['invalid'], 1)
+            self.assertEqual(every.returncode, 1)
+
     def test_compare_cli_accepts_bench_directory(self) -> None:
         with tempfile.TemporaryDirectory(prefix='vm-bench-dir-') as tmp:
             root = Path(tmp)

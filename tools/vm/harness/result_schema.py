@@ -158,8 +158,13 @@ def check_all_results(vm_dir: Path) -> dict:
 
 
 def check_all_bench(vm_dir: Path) -> dict:
-    """Bulk-validate every bench.json under runs/."""
-    root = Path(vm_dir) / 'runs'
+    """Bulk-validate every bench.json under a VM's runs/ directory."""
+    return check_all_bench_dir(Path(vm_dir) / 'runs')
+
+
+def check_all_bench_dir(root: Path) -> dict:
+    """Bulk-validate every */bench.json under `root`."""
+    root = Path(root)
     checked = valid = invalid = 0
     problems: list[dict] = []
     try:

@@ -62,8 +62,9 @@ from harness.state import StateBusy, create_state_overlays
 from harness.visual import baseline as visual_baseline
 from harness.visual import compare as visual_compare
 from harness.visual import list_baselines
-from harness.result_schema import (check_all_bench, check_all_results,
-                                   schema_state, validate_bench, validate_file,
+from harness.result_schema import (check_all_bench, check_all_bench_dir,
+                                   check_all_results, schema_state,
+                                   validate_bench, validate_file,
                                    validate_result)
 from harness.results import evaluate, evaluate_systemd_transition, phase_summary
 from harness.scenarios import scenario_state
@@ -1579,7 +1580,11 @@ def main() -> int:
                        help='validate every run result under runs/')
     check_bench = sub.add_parser('check-bench',
                                  help='validate a bench directory or bench.json')
-    check_bench.add_argument('path', type=Path)
+    check_bench.add_argument('path', type=Path, nargs='?')
+    check_bench.add_argument('--all', action='store_true',
+                             help='validate every runs/bench-*/bench.json')
+    check_bench.add_argument('--root', type=Path, default=None,
+                             help='bench root for --all (default: runs/)')
     extract = sub.add_parser('extract', help='copy an artifact out of a run')
     extract.add_argument('run')
     extract.add_argument('member')
@@ -1971,6 +1976,15 @@ def main() -> int:
         }, indent=2))
         return 0 if not problems else 1
     if args.action == 'check-bench':
+        if args.all and args.path:
+            ap.error('check-bench accepts a path or --all, not both')
+        if args.all:
+            root = args.root or (VM / 'runs')
+            report = check_all_bench_dir(root)
+            print(json.dumps(report, indent=2))
+            return 0 if report['ok'] else 1
+        if not args.path:
+            ap.error('check-bench requires a path or --all')
         path = args.path
         if path.is_dir():
             path = path / 'bench.json'

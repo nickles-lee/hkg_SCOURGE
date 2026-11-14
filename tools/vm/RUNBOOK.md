@@ -276,7 +276,8 @@ log, and exits nonzero if any run does not PASS. `--warmup N` runs N
 unrecorded boots per scenario/variant first; warmups are retained in
 `bench.json` and must PASS. `bench.json` also records `source` (`git_head`
 and `dirty`) for provenance. Validate one document with
-`launch.py check-bench <bench-dir|bench.json>` (JSON report, exit 0/1). Schema validation requires every row/warmup to
+`launch.py check-bench <bench-dir|bench.json>` or all of them with
+`check-bench --all` (JSON report, exit 0/1). Schema validation requires every row/warmup to
 name a benchmarked scenario, a declared cache/pin variant, and an iteration
 within `repeats`/`warmup`. The opt-in VM suite runs a real warmup+measured
 pair and asserts warmup/row PASS, source revision and metrics; it also runs a

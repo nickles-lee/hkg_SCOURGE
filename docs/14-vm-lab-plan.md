@@ -838,5 +838,7 @@ items beyond that.
   bench dirs or JSON paths. 352 tests; 154 VM commits.
 - **2026-11-14 — check-bench**: per-document benchmark schema validation
   CLI with JSON report and 0/1 exit. 353 tests; 155 VM commits.
+- **2026-11-14 — check-bench --all**: bulk benchmark validation CLI; 353
+  tests; 156 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
