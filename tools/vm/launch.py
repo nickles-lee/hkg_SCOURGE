@@ -2044,6 +2044,8 @@ def main() -> int:
         print(json.dumps(result, indent=2))
         return 0
     if args.action == 'list':
+        if args.limit < 0:
+            ap.error('--limit must be non-negative')
         runs = filter_runs(collect_runs(VM), args.label, args.scenario,
                            args.verdict)
         if args.schema:

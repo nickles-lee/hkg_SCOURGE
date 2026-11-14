@@ -925,5 +925,7 @@ items beyond that.
   validated. 391 tests; 195 VM commits.
 - **2026-11-14 — list caps**: daemon list reports stored resource caps.
   391 tests; 196 VM commits.
+- **2026-11-14 — list limit validation**: negative limits rejected; zero
+  returns empty. 392 tests; 197 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

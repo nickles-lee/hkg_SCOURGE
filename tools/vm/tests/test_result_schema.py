@@ -210,6 +210,20 @@ class ResultSchemaTests(unittest.TestCase):
             self.assertEqual(report['bench_only'], 1)
             self.assertEqual(report['problems'][0]['run'], 'invalid')
 
+    def test_list_limit_validation(self) -> None:
+        invalid = subprocess.run(
+            [sys.executable, '-B', str(VM / 'launch.py'), 'list',
+             '--limit', '-1'], cwd=VM, capture_output=True, text=True,
+            check=False)
+        self.assertEqual(invalid.returncode, 2)
+        self.assertIn('--limit must be non-negative', invalid.stderr)
+        empty = subprocess.run(
+            [sys.executable, '-B', str(VM / 'launch.py'), 'list',
+             '--limit', '0', '--json'], cwd=VM, capture_output=True, text=True,
+            check=False)
+        self.assertEqual(empty.returncode, 0, empty.stderr)
+        self.assertEqual(json.loads(empty.stdout), [])
+
     def test_list_schema_filter(self) -> None:
         suffix = f'{os.getpid()}-filter'
         legacy_id = f'schema-legacy-{suffix}'
