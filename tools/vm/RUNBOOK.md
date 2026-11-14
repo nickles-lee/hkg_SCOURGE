@@ -222,7 +222,10 @@ python3 -B bench.py --compare runs/bench-<base>/bench.json \
 ```
 
 `compare` prints per-key `SAME`/`IMPROVED`/`REGRESSED`/`MISSING` rows and
-exits 1 for a regression or a missing key. `bench.json` records `metrics` for
+exits 1 for a regression or a missing key; malformed benchmark documents are
+rejected with exit 2 and per-document problems. New `bench.json` files carry
+`schema_version: 1` and are validated before comparison and after writing.
+`bench.json` records `metrics` for
 `boot`, `readiness` and `scenario`; select one with `--metric boot|readiness|
 scenario` (default boot). A single-run comparison is noise; use `--repeats`
 for decisions.

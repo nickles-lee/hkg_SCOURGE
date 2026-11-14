@@ -21,6 +21,7 @@ from pathlib import Path
 
 from harness.config import load_scenario
 from harness.governor import LockTimeout, run_lock
+from harness.result_schema import validate_bench
 from harness.storage import parse_sizes
 
 VM = Path(__file__).resolve().parent
@@ -222,6 +223,16 @@ def main() -> int:
             current = json.loads(args.compare[1].read_text())
         except (OSError, json.JSONDecodeError) as exc:
             parser.error(f'cannot read bench summary: {exc}')
+        baseline_problems = validate_bench(baseline)
+        current_problems = validate_bench(current)
+        if baseline_problems or current_problems:
+            print(json.dumps({
+                'ok': False,
+                'error': 'invalid benchmark document',
+                'baseline_problems': baseline_problems,
+                'current_problems': current_problems,
+            }, indent=2))
+            return 2
         metric = {'boot': 'boot_seconds', 'readiness': 'readiness_seconds',
                   'scenario': 'scenario_seconds'}[args.metric]
         report = compare_bench(baseline, current, args.threshold, metric)
@@ -326,6 +337,7 @@ def main() -> int:
                     metrics[key] = entry
             summary = {key: values['boot_seconds'] for key, values in metrics.items()}
             bench = {
+                'schema_version': 1,
                 'run': directory.name,
                 'source': source_state(),
                 'ok': (all(row['verdict'] == 'PASS' for row in rows)
@@ -341,9 +353,14 @@ def main() -> int:
                 'warmups': warmups,
                 'rows': rows,
             }
+            schema_problems = validate_bench(bench)
             (directory / 'bench.json').write_text(json.dumps(bench, indent=2) + '\n')
             print(f"bench: {directory / 'bench.json'}")
             print(json.dumps(summary, indent=2))
+            if schema_problems:
+                print('ERROR: generated bench.json failed schema:\n'
+                      + '\n'.join(schema_problems), file=sys.stderr)
+                return 1
             return 0 if bench['ok'] else 1
     except LockTimeout as exc:
         print(f'ERROR: {exc}', file=sys.stderr)

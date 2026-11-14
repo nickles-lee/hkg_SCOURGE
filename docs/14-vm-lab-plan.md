@@ -627,5 +627,9 @@ items beyond that.
   captures a real QMP frame, baselines it, verifies zero-diff, then perturbs
   a copy and requires a failure. Real run PASS (20.7 s). 281 tests
   (15 skipped).
+- **2026-11-14 — bench schema validation**: `validate_bench` covers the
+  generated benchmark document and legacy compatibility; `bench.py` writes
+  `schema_version: 1`, validates after writing, and rejects malformed
+  comparisons with rc=2. 283 tests.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

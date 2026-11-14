@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 from bench import (build_argv, compare_bench, result_path, source_state,
                    summarize, variants)
+from harness.result_schema import validate_bench
 from harness.config import load_scenario
 
 VM = Path(__file__).resolve().parents[1]
@@ -30,6 +31,23 @@ def args(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def bench_doc(summary=None, metrics=None, **overrides):
+    data = {
+        'schema_version': 1,
+        'run': 'test',
+        'ok': True,
+        'repeats': 1,
+        'warmup': 0,
+        'scenarios': ['boot'],
+        'variants': [{'cache': None, 'pin_cpu': None}],
+        'rows': [],
+        'summary': summary or {},
+        'metrics': metrics or {},
+    }
+    data.update(overrides)
+    return data
 
 
 class BenchTests(unittest.TestCase):
@@ -108,6 +126,7 @@ class BenchTests(unittest.TestCase):
         bench_path = Path(line[7:])
         try:
             bench = json.loads(bench_path.read_text())
+            self.assertEqual(validate_bench(bench), [])
             self.assertEqual(bench["warmup"], 1)
             self.assertEqual(len(bench["warmups"]), 1)
             self.assertEqual(len(bench["rows"]), 1)
@@ -168,9 +187,41 @@ class BenchTests(unittest.TestCase):
         self.assertEqual([row['status'] for row in report['rows']],
                          ['MISSING', 'MISSING'])
 
+    def test_bench_schema_modern_and_legacy(self) -> None:
+        self.assertEqual(validate_bench(bench_doc()), [])
+        legacy = {'ok': True, 'repeats': 1, 'scenarios': ['boot'],
+                  'rows': [], 'summary': {}}
+        self.assertEqual(validate_bench(legacy), [])
+        self.assertIn('run must be a non-empty string',
+                      '\n'.join(validate_bench(bench_doc(run=''))))
+        bad = bench_doc()
+        bad['rows'] = [{'scenario': 'boot', 'iteration': 0, 'verdict': 'PASS',
+                        'rc': 0, 'log': ''}]
+        self.assertIn('rows[0].iteration', '\n'.join(validate_bench(bad)))
+        bad = bench_doc(summary={'k': {'count': 1, 'mean': 'fast'}})
+        self.assertIn('summary', '\n'.join(validate_bench(bad)))
+
+    def test_compare_cli_rejects_malformed_documents(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='vm-bench-bad-') as tmp:
+            left = Path(tmp) / 'base.json'
+            right = Path(tmp) / 'current.json'
+            left.write_text(json.dumps({'summary': {}}))
+            right.write_text(json.dumps(bench_doc()))
+            completed = subprocess.run(
+                [sys.executable, '-B', str(VM / 'bench.py'), '--compare',
+                 str(left), str(right)], capture_output=True, text=True, check=False)
+            self.assertEqual(completed.returncode, 2, completed.stderr)
+            report = json.loads(completed.stdout)
+            self.assertFalse(report['ok'])
+            self.assertTrue(report['baseline_problems'])
+
     def test_compare_cli_exit_codes(self) -> None:
-        baseline = {'summary': {'boot cache=default pin=none': {'mean': 10.0}}}
-        current = {'summary': {'boot cache=default pin=none': {'mean': 10.2}}}
+        baseline = bench_doc({'boot cache=default pin=none': {'count': 1, 'mean': 10.0,
+                                                              'median': 10.0, 'min': 10.0,
+                                                              'max': 10.0}})
+        current = bench_doc({'boot cache=default pin=none': {'count': 1, 'mean': 10.2,
+                                                             'median': 10.2, 'min': 10.2,
+                                                             'max': 10.2}})
         with tempfile.TemporaryDirectory(prefix='vm-bench-compare-') as tmp:
             left = Path(tmp) / 'base.json'
             right = Path(tmp) / 'current.json'
@@ -206,6 +257,7 @@ class BenchTests(unittest.TestCase):
         bench_path = Path(line[7:])
         try:
             bench = json.loads(bench_path.read_text())
+            self.assertEqual(validate_bench(bench), [])
             self.assertFalse(bench["ok"])
             self.assertEqual(bench["rows"][0]["verdict"], "BLOCKED")
             self.assertEqual(bench["rows"][0]["rc"], 77)
