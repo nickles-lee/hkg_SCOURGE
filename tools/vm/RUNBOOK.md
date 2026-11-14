@@ -107,7 +107,9 @@ python3 -B launch.py run --kernel compat --profile research \
 ```sh
 python3 -B launch.py list --limit 10
 python3 -B launch.py list --label battery
-python3 -B launch.py show <run-id>
+python3 -B launch.py show <run-id>              # prints a schema: line to stderr
+python3 -B launch.py show <run-id> --strict     # exit 1 on schema problems
+python3 -B launch.py check-run <run-id>         # JSON schema report, exit 0/1
 python3 -B launch.py extract <run-id> qmp-screenshot.png /tmp/shot.png
 python3 -B launch.py prune --keep 800        # dry-run
 python3 -B launch.py gc --apply              # destructive, explicit
@@ -117,6 +119,12 @@ python3 -B launch.py gc --apply --allow-no-result   # also regression/interrupte
 `prune`/`gc` never delete `runs/daemon` (a live daemon owns sockets and
 overlays there) and, by default, skip any directory without `result.json`
 (regression bundles, interrupted runs). `--allow-no-result` opts those in.
+
+`check-run` validates the result core schema (`schema_version`, verdict, rc,
+timings, images/overlays, checks, lock/pin and related fields). `list --json`
+includes `schema_state`/`schema_ok`/`schema_problems`; current-schema
+invalid results get a `!schema` marker in text output, while older schema
+versions are reported as `legacy`.
 
 State reuse:
 

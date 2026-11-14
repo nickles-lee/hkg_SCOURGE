@@ -62,6 +62,7 @@ from harness.state import StateBusy, create_state_overlays
 from harness.visual import baseline as visual_baseline
 from harness.visual import compare as visual_compare
 from harness.visual import list_baselines
+from harness.result_schema import schema_state, validate_file, validate_result
 from harness.results import evaluate, evaluate_systemd_transition, phase_summary
 from harness.scenarios import scenario_state
 from harness.storage import VOLUMES, cleanup_storage, create_storage, mount_script, parse_sizes
@@ -1504,6 +1505,10 @@ def main() -> int:
     lst.add_argument('--json', action='store_true')
     show = sub.add_parser('show', help='print a run result')
     show.add_argument('run')
+    show.add_argument('--strict', action='store_true',
+                      help='exit 1 when the result schema has problems')
+    check = sub.add_parser('check-run', help='validate a run result against the schema')
+    check.add_argument('run')
     extract = sub.add_parser('extract', help='copy an artifact out of a run')
     extract.add_argument('run')
     extract.add_argument('member')
@@ -1807,15 +1812,40 @@ def main() -> int:
         else:
             for item in runs:
                 label = f" [{item['label']}]" if item['label'] else ''
+                marker = ' !schema' if item['schema_state'] == 'invalid' else ''
                 print(f"{item['run']} {item['verdict']:8} {item['mode']:6} "
-                      f"{item['scenario'] or 'custom':20} {label}")
+                      f"{item['scenario'] or 'custom':20} {label}{marker}")
         return 0
+    if args.action == 'check-run':
+        run_path = VM / 'runs' / args.run / 'result.json'
+        data, problems = validate_file(run_path)
+        print(json.dumps({
+            'run': args.run,
+            'ok': not problems,
+            'schema_state': schema_state(data, problems),
+            'schema_version': (data or {}).get('schema_version'),
+            'problems': problems,
+        }, indent=2))
+        return 0 if not problems else 1
     if args.action in ('show', 'extract'):
         run_path = VM / 'runs' / args.run / 'result.json'
         if args.action == 'show':
             if not run_path.is_file():
                 ap.error(f'run result not found: {run_path}')
-            print(run_path.read_text())
+            raw = run_path.read_text()
+            print(raw, end='' if raw.endswith('\n') else '\n')
+            try:
+                data = json.loads(raw)
+                problems = validate_result(data)
+                state = schema_state(data, problems)
+            except json.JSONDecodeError as exc:
+                problems = [f'invalid JSON: {exc}']
+                state = 'invalid'
+            print(f"schema: {state}"
+                  + (f" ({len(problems)} problem(s))" if problems else ''),
+                  file=sys.stderr)
+            if args.strict and problems:
+                return 1
             return 0
         try:
             print(json.dumps(extract_run(VM, args.run, args.member,

@@ -8,6 +8,8 @@ import json
 import shutil
 from pathlib import Path
 
+from .result_schema import schema_state, validate_result
+
 
 def _result(path: Path) -> dict:
     try:
@@ -25,22 +27,30 @@ def collect_runs(vm_dir: Path) -> list[dict]:
     except OSError:
         return runs
     for path in entries:
-        result = _result(path)
-        scenario = result.get("scenario") or {}
+        result_file = path / "result.json"
+        result = _result(path) if result_file.is_file() else None
+        data = result or {}
+        problems = (validate_result(result) if result_file.is_file()
+                    else ["missing result.json"])
+        scenario = data.get("scenario") or {}
         runs.append({
             "run": path.name,
             "path": str(path),
             "mtime": path.stat().st_mtime if path.exists() else 0,
-            "label": result.get("label") or "",
-            "mode": result.get("mode") or "vendor",
+            "label": data.get("label") or "",
+            "mode": data.get("mode") or "vendor",
             "scenario": scenario.get("name") if isinstance(scenario, dict) else None,
-            "verdict": result.get("verdict") or "UNKNOWN",
-            "rc": result.get("rc"),
-            "known_failure": bool(result.get("known_failure")),
-            "keep_overlay": bool(result.get("keep_overlay")),
-            "overlays_retained": bool(result.get("overlays_retained")),
-            "screenshot": (result.get("screenshot") or {}),
-            "result": str(path / "result.json") if (path / "result.json").is_file() else None,
+            "verdict": data.get("verdict") or "UNKNOWN",
+            "rc": data.get("rc"),
+            "known_failure": bool(data.get("known_failure")),
+            "keep_overlay": bool(data.get("keep_overlay")),
+            "overlays_retained": bool(data.get("overlays_retained")),
+            "screenshot": (data.get("screenshot") or {}),
+            "schema_state": schema_state(result, problems),
+            "schema_ok": not problems,
+            "schema_problem_count": len(problems),
+            "schema_problems": problems[:8],
+            "result": str(result_file) if result_file.is_file() else None,
         })
     runs.sort(key=lambda item: item["mtime"], reverse=True)
     return runs
