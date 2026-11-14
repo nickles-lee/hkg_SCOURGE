@@ -473,6 +473,7 @@ def console(daemon_dir: Path, lines: int = 200, follow: bool = False) -> int:
     path = Path(daemon_dir) / "serial.log"
     if not path.is_file():
         raise RuntimeError(f"serial log missing: {path}")
+    lines = max(1, int(lines))
     data = path.read_text(errors="replace")
     print("\n".join(data.splitlines()[-lines:]))
     if not follow:

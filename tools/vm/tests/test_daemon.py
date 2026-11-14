@@ -30,6 +30,15 @@ class DaemonTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
+    def test_console_clamps_line_count(self) -> None:
+        (self.root / 'serial.log').write_text('one\ntwo\nthree\n')
+        for lines, expected in ((0, 'three'), (-5, 'three'),
+                                (2, 'two\nthree'), (200, 'one\ntwo\nthree')):
+            buffer = StringIO()
+            with redirect_stdout(buffer):
+                self.assertEqual(daemon.console(self.root, lines), 0)
+            self.assertEqual(buffer.getvalue().strip(), expected)
+
     def test_restart_argv_preserves_config(self) -> None:
         config = {
             'kernel_target': 'compat', 'state': '/tmp/state',
