@@ -909,5 +909,7 @@ items beyond that.
   recompute. 387 tests; 187 VM commits.
 - **2026-11-14 — order-insensitive bench shape**: no false mismatch on
   reordered scenarios/variants. 388 tests; 188 VM commits.
+- **2026-11-14 — capped output logging**: capped exec text is stored/rotated
+  within the log cap. 389 tests; 189 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

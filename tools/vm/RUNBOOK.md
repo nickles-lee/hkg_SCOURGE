@@ -196,8 +196,9 @@ The daemon keeps the QEMU process, serial reader, QMP socket and state lock
 alive; `exec`/`screenshot` use a control socket in `runs/daemon/`.
 `daemon start` rejects zero/negative `--command-log-max`,
 `--screenshot-keep` and `--exec-output-max` before boot. `daemon exec` caps
-returned output at `--exec-output-max` bytes (default 1 MiB), keeping the tail and printing a truncation warning; the command log
-stores the capped text. `daemon screenshot` keeps at most
+returned output at `--exec-output-max` bytes (default 1 MiB), keeping the tail
+and printing a truncation warning; the command log stores exactly the capped
+text and rotates at `--command-log-max`. `daemon screenshot` keeps at most
 `--screenshot-keep N` (default 10) newest
 `screenshot-*.png` captures in the daemon directory; older captures are
 pruned and reported in the response `pruned` list. `daemon list --root runs
