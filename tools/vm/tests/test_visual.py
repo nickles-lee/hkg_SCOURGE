@@ -52,6 +52,18 @@ class VisualTests(unittest.TestCase):
         self.assertTrue(ok["ok"])
         self.assertTrue(Path(ok["diff"]).is_file())
 
+    def test_threshold_and_tolerance_bounds(self) -> None:
+        visual.baseline(self.base, "shot", self.baselines)
+        for threshold, tolerance in ((-0.1, 8), (1.1, 8), (0.01, -1),
+                                     (0.01, 256)):
+            with self.assertRaises(ValueError):
+                visual.compare(self.same, "shot", self.baselines,
+                               threshold=threshold, tolerance=tolerance)
+        self.assertTrue(visual.compare(self.same, "shot", self.baselines,
+                                       tolerance=0)["ok"])
+        self.assertTrue(visual.compare(self.same, "shot", self.baselines,
+                                       tolerance=255)["ok"])
+
     def test_size_mismatch_and_missing_baseline(self) -> None:
         visual.baseline(self.base, "shot", self.baselines)
         big = self.root / "big.png"

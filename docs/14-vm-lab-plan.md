@@ -830,5 +830,7 @@ items beyond that.
   tests; 150 VM commits.
 - **2026-11-14 — bulk benchmark schema health**: doctor validates every
   bench.json; unit coverage. 348 tests; 151 VM commits.
+- **2026-11-14 — visual tolerance bounds**: tolerance restricted to 0..255;
+  unit coverage. 349 tests; 152 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

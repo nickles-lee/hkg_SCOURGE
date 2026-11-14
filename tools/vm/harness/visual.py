@@ -56,6 +56,8 @@ def compare(candidate: Path, name: str, baselines: Path,
         raise ValueError(f"baseline missing: {base_path}; run visual baseline first")
     if not 0 <= threshold <= 1:
         raise ValueError("threshold must be in [0, 1]")
+    if not 0 <= tolerance <= 255:
+        raise ValueError("tolerance must be in [0, 255]")
     with Image.open(base_path) as image:
         base = image.convert("RGB")
     with Image.open(candidate) as image:
