@@ -924,6 +924,57 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertEqual(stopped.returncode, 0,
                                  stopped.stdout + stopped.stderr)
 
+    def test_daemon_restart_preserves_caps(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-restart-caps-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--exec-output-max', '1000', '--screenshot-keep', '2',
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                restarted = cli('restart', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(restarted.returncode, 0,
+                                 restarted.stdout + restarted.stderr)
+                config = json.loads((daemon_dir / 'config.json').read_text())
+                self.assertEqual(config['exec_output_max'], 1000)
+                self.assertEqual(config['screenshot_keep'], 2)
+
+                executed = cli(
+                    'exec', '--daemon-dir', str(daemon_dir), '--cmd',
+                    "printf 'START_MARKER\\n'; "
+                    "yes OUTPUT_LINE | head -c 4000; "
+                    "printf '\\nEND_MARKER\\n'")
+                self.assertEqual(executed.returncode, 0,
+                                 executed.stdout + executed.stderr)
+                self.assertIn('END_MARKER', executed.stdout)
+                self.assertNotIn('START_MARKER', executed.stdout)
+                self.assertIn('truncated', executed.stderr.lower())
+
+                captures = []
+                for _ in range(3):
+                    shot = cli('screenshot', '--daemon-dir', str(daemon_dir))
+                    self.assertEqual(shot.returncode, 0,
+                                     shot.stdout + shot.stderr)
+                    captures.append(Path(json.loads(shot.stdout)['screenshot']['path']))
+                self.assertEqual(
+                    len(list(daemon_dir.glob('screenshot-*.png'))), 2)
+                self.assertFalse(captures[0].exists())
+                status = cli('status', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(json.loads(status.stdout)['screenshot_count'], 2)
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_daemon_restart_reset(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-restart-reset-') as tmp:
             root = Path(tmp)
