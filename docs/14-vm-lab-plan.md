@@ -936,6 +936,6 @@ items beyond that.
 - **2026-11-14 — manifest/pin schema**: tools-manifest and compat-pin
   evidence validated. 396 tests; 201 VM commits.
 - **2026-11-14 — runtime provenance schema**: QEMU/runtime/options/state/
-  share blocks validated. 397 tests; 202 VM commits.
+  share blocks validated. 397 tests; 203 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
