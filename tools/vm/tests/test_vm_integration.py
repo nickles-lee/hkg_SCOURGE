@@ -873,6 +873,74 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertEqual(stopped.returncode, 0,
                                  stopped.stdout + stopped.stderr)
 
+    def test_daemon_restart_reset(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-restart-reset-') as tmp:
+            root = Path(tmp)
+            state = root / 'state'
+            daemon_dir = root / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--state', str(state),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                written = cli('exec', '--daemon-dir', str(daemon_dir),
+                              '--cmd',
+                              "mkdir -p /rw_data && printf 'restart-reset\\n' "
+                              "> /rw_data/restart-reset-marker && sync")
+                self.assertEqual(written.returncode, 0,
+                                 written.stdout + written.stderr)
+                reset = cli('restart', '--daemon-dir', str(daemon_dir),
+                            '--reset')
+                self.assertEqual(reset.returncode, 0,
+                                 reset.stdout + reset.stderr)
+                read_back = cli('exec', '--daemon-dir', str(daemon_dir),
+                                '--cmd',
+                                'if [ -e /rw_data/restart-reset-marker ]; '
+                                'then echo STILL_THERE; else echo RESET_CLEAN; fi')
+                self.assertEqual(read_back.returncode, 0,
+                                 read_back.stdout + read_back.stderr)
+                self.assertIn('RESET_CLEAN', read_back.stdout)
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
+    def test_daemon_restart_reset_without_state_rejected(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-reset-nostate-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                rejected = cli('restart', '--daemon-dir', str(daemon_dir),
+                               '--reset')
+                self.assertNotEqual(rejected.returncode, 0,
+                                    rejected.stdout + rejected.stderr)
+                self.assertIn('--reset requires a daemon started with --state',
+                              rejected.stdout + rejected.stderr)
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_daemon_control_protocol_rejects_bad_requests(self):
         import socket
         with tempfile.TemporaryDirectory(prefix='vm-daemon-badctl-') as tmp:

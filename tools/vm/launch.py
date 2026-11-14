@@ -1601,6 +1601,8 @@ def main() -> int:
     dserve.add_argument('--config', type=Path, required=True)
     drestart = dsub.add_parser('restart', help='stop and start with the stored config')
     drestart.add_argument('--daemon-dir', type=Path, default=VM / 'runs' / 'daemon')
+    drestart.add_argument('--reset', action='store_true',
+                          help='discard persistent state overlays on restart')
     for name in ('status', 'stop', 'screenshot', 'console', 'exec'):
         p = dsub.add_parser(name)
         p.add_argument('--daemon-dir', type=Path, default=VM / 'runs' / 'daemon')
@@ -1784,10 +1786,16 @@ def main() -> int:
             if not isinstance(config, dict):
                 print('ERROR: daemon config is not an object', file=sys.stderr)
                 return 1
+            if args.reset and not config.get('state'):
+                print('ERROR: --reset requires a daemon started with --state',
+                      file=sys.stderr)
+                return 1
             daemon_mod.stop(daemon_dir)
             argv = [sys.executable, '-B', str(VM / 'launch.py'), 'daemon',
                     'start', '--daemon-dir', str(daemon_dir),
                     '--kernel', config.get('kernel_target', 'vendor')]
+            if args.reset:
+                argv.append('--reset')
             mapping = (
                 ('state', '--state'), ('tools', '--tools'), ('usb', '--usb'),
                 ('payload', '--payload'), ('share', '--share'),

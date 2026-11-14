@@ -186,7 +186,9 @@ python3 -B launch.py daemon stop
 The daemon keeps the QEMU process, serial reader, QMP socket and state lock
 alive; `exec`/`screenshot` use a control socket in `runs/daemon/`.
 `daemon restart` stops and starts again from the stored `config.json`
-(kernel, state, devices, cache, lock and pin settings). A failed
+(kernel, state, devices, cache, lock and pin settings). Add `--reset` to
+discard persistent state overlays; it requires a daemon started with
+`--state`. A failed
 `daemon start` includes the last serial lines and QEMU return code in the
 status/error shown by the CLI. Unknown control actions and malformed JSON
 requests return an error without disturbing the daemon. State

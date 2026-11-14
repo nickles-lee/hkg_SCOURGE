@@ -802,5 +802,8 @@ items beyond that.
   PASS. 335 tests; 139 VM commits.
 - **2026-11-14 — daemon restart command**: restart reuses config.json and
   produces a new QEMU PID with working exec. 336 tests; 140 VM commits.
+- **2026-11-14 — daemon restart --reset**: discards state on restart and is
+  rejected without `--state`; marker and error gated tests PASS. 338 tests;
+  141 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
