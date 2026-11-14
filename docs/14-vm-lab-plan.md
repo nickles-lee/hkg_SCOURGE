@@ -905,5 +905,7 @@ items beyond that.
   follow. 383 tests; 185 VM commits.
 - **2026-11-14 — CLI argument validation coverage**: bench threshold and
   regress repeat/timeout/storage guards tested. 386 tests; 186 VM commits.
+- **2026-11-14 — counters across restart**: status counters reset and
+  recompute. 387 tests; 187 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

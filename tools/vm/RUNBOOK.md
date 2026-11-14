@@ -206,8 +206,10 @@ recorded state, daemon/QEMU PID liveness, kernel/state config and artifact
 counters (`command_log_bytes`, `screenshot_count`) without contacting the
 sockets; a ready/starting record whose daemon process is gone
 is marked `STALE` (JSON `stale: true`), and `--fail-stale` makes the
-command exit 1 when any entry is stale (useful in scripts/doctor-like checks). `daemon restart` stops and starts again from the
-stored `config.json` (kernel, state, devices, cache, lock, pin,
+command exit 1 when any entry is stale (useful in scripts/doctor-like checks).
+`daemon status` counters are recomputed from the daemon directory on each
+call; a restart starts them at zero. `daemon restart` stops and starts again
+from the stored `config.json` (kernel, state, devices, cache, lock, pin,
 `exec-output-max` and `screenshot-keep` settings); those caps still apply
 after restart. Add `--reset` to
 discard persistent state overlays; it requires a daemon started with
