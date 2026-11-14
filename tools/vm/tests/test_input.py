@@ -35,6 +35,14 @@ class InputTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             qmp.click(self.root / "qmp.sock", 1280, 10, 1280, 720)
 
+    def test_click_rejects_invalid_button(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid button"):
+            qmp.click(self.root / "qmp.sock", 10, 10, button="bogus")
+        with patch.object(qmp, "send_events", return_value={"ok": True}):
+            result = qmp.click(self.root / "qmp.sock", 10, 10,
+                               button="middle")
+        self.assertEqual(result["button"], "middle")
+
     def test_key_sends_down_and_up(self) -> None:
         with patch.object(qmp, "send_events", return_value={"ok": True}) as send:
             qmp.key(self.root / "qmp.sock", "ret")

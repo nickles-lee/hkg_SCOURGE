@@ -90,6 +90,8 @@ def click(socket_path: Path, x: int, y: int, width: int = 1280, height: int = 72
     """Absolute tablet click in video-pixel coordinates."""
     if width <= 0 or height <= 0:
         raise ValueError("width and height must be positive")
+    if button not in ("left", "middle", "right"):
+        raise ValueError(f"invalid button: {button!r}")
     if not (0 <= x < width and 0 <= y < height):
         raise ValueError(f"click outside {width}x{height}: {x},{y}")
     ax = round(x * 32767 / max(1, width - 1))
