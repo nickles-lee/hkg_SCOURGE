@@ -116,6 +116,38 @@ class ResultSchemaTests(unittest.TestCase):
             self.assertEqual(report['missing'], 1)
             self.assertEqual(report['problems'][0]['run'], 'invalid')
 
+    def test_list_schema_filter(self) -> None:
+        suffix = f'{os.getpid()}-filter'
+        legacy_id = f'schema-legacy-{suffix}'
+        invalid_id = f'schema-invalid-{suffix}'
+        legacy_dir = VM / 'runs' / legacy_id
+        invalid_dir = VM / 'runs' / invalid_id
+        legacy_dir.mkdir(parents=True)
+        invalid_dir.mkdir(parents=True)
+        try:
+            (legacy_dir / 'result.json').write_text(
+                json.dumps(valid_result(schema_version=2)))
+            (invalid_dir / 'result.json').write_text(
+                json.dumps(valid_result(verdict='BAD')))
+            legacy = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'list',
+                 '--schema', 'legacy', '--json', '--limit', '200'],
+                cwd=VM, capture_output=True, text=True, check=True)
+            rows = json.loads(legacy.stdout)
+            self.assertIn(legacy_id, [row['run'] for row in rows])
+            self.assertTrue(all(row['schema_state'] == 'legacy' for row in rows))
+            invalid = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'list',
+                 '--schema', 'invalid', '--json', '--limit', '200'],
+                cwd=VM, capture_output=True, text=True, check=True)
+            rows = json.loads(invalid.stdout)
+            self.assertIn(invalid_id, [row['run'] for row in rows])
+            self.assertTrue(all(row['schema_state'] == 'invalid' for row in rows))
+        finally:
+            import shutil
+            shutil.rmtree(legacy_dir, ignore_errors=True)
+            shutil.rmtree(invalid_dir, ignore_errors=True)
+
     def test_check_run_cli_and_show_strict(self) -> None:
         run_id = f'schema-test-{os.getpid()}'
         run_dir = VM / 'runs' / run_id

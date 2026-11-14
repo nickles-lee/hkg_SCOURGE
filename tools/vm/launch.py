@@ -1523,6 +1523,8 @@ def main() -> int:
     lst.add_argument('--label', default=None)
     lst.add_argument('--scenario', default=None)
     lst.add_argument('--verdict', default=None)
+    lst.add_argument('--schema', choices=('ok', 'legacy', 'invalid', 'missing'),
+                     default=None, help='filter by result schema state')
     lst.add_argument('--limit', type=int, default=20)
     lst.add_argument('--json', action='store_true')
     show = sub.add_parser('show', help='print a run result')
@@ -1845,7 +1847,10 @@ def main() -> int:
         return 0
     if args.action == 'list':
         runs = filter_runs(collect_runs(VM), args.label, args.scenario,
-                           args.verdict)[:args.limit]
+                           args.verdict)
+        if args.schema:
+            runs = [item for item in runs if item['schema_state'] == args.schema]
+        runs = runs[:args.limit]
         if args.json:
             print(json.dumps(runs, indent=2))
         else:

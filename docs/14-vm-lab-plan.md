@@ -790,5 +790,7 @@ items beyond that.
 - **2026-11-14 — clean daemon CLI errors**: exec/screenshot failures print
   `ERROR:` and exit 1 (no usage dump); gated failure paths re-verified. 332
   tests; 135 VM commits.
+- **2026-11-14 — list schema filter**: `list --schema` filters by
+  ok/legacy/invalid/missing. 333 tests; 136 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
