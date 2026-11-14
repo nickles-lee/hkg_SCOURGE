@@ -421,6 +421,15 @@ class BenchTests(unittest.TestCase):
         self.assertIn('not available', completed.stderr)
         self.assertEqual(set((VM / 'runs').glob('bench-*')), before)
 
+    def test_compare_cli_rejects_invalid_threshold(self) -> None:
+        for value in ('-1', 'nan', 'inf'):
+            completed = subprocess.run(
+                [sys.executable, '-B', str(VM / 'bench.py'), '--compare',
+                 'a.json', 'b.json', '--threshold', value],
+                cwd=VM, capture_output=True, text=True, check=False)
+            self.assertEqual(completed.returncode, 2, completed.stderr)
+            self.assertIn('threshold', completed.stderr)
+
     def test_compare_cli_rejects_malformed_documents(self) -> None:
         with tempfile.TemporaryDirectory(prefix='vm-bench-bad-') as tmp:
             left = Path(tmp) / 'base.json'
