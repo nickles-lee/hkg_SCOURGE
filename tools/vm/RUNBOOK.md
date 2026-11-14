@@ -210,8 +210,10 @@ is marked `STALE` (JSON `stale: true`), and `--fail-stale` makes the
 command exit 1 when any entry is stale (useful in scripts/doctor-like checks).
 `daemon status` includes the active `command_log_max`, `screenshot_keep` and
 `exec_output_max` caps; artifact counters are recomputed from the daemon
-directory on each call, and a restart starts them at zero. `daemon restart` stops and starts again
-from the stored `config.json` (kernel, state, devices, cache, lock, pin,
+directory on each call, and a restart starts them at zero. `daemon restart` validates the stored config (kernel/display/device/cache,
+compat-only options, positive timeouts/limits, available pin CPU) before
+stopping the daemon, so an incompatible config does not kill a healthy
+daemon. It then stops and starts again from the stored `config.json` (kernel, state, devices, cache, lock, pin,
 `exec-output-max` and `screenshot-keep` settings); those caps still apply
 after restart. Add `--reset` to
 discard persistent state overlays; it requires a daemon started with

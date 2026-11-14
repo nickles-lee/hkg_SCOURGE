@@ -118,6 +118,46 @@ def validate_pin_cpu(cpu: int | None) -> int | None:
     return cpu
 
 
+DAEMON_KERNELS = ('vendor', 'compat')
+DAEMON_DISPLAYS = ('none', 'gtk', 'vnc', 'egl-headless')
+DAEMON_DISPLAY_DEVICES = ('none', 'std', 'virtio-vga', 'virtio-vga-gl')
+DAEMON_CACHES = ('writeback', 'writethrough', 'directsync', 'unsafe', 'none')
+
+
+def restart_config_problem(config) -> str | None:
+    """Return why a stored daemon config cannot be restarted, if anything."""
+    if not isinstance(config, dict):
+        return 'config must be an object'
+    kernel = config.get('kernel_target', 'vendor')
+    if kernel not in DAEMON_KERNELS:
+        return f'unsupported kernel_target: {kernel!r}'
+    display = config.get('display', 'none')
+    if display not in DAEMON_DISPLAYS:
+        return f'unsupported display: {display!r}'
+    device = config.get('display_device', 'none')
+    if device not in DAEMON_DISPLAY_DEVICES:
+        return f'unsupported display_device: {device!r}'
+    cache = config.get('cache', 'writeback')
+    if cache not in DAEMON_CACHES:
+        return f'unsupported cache: {cache!r}'
+    if kernel != 'compat' and (config.get('share') or config.get('network')
+                               or config.get('audio') or config.get('usb_host')):
+        return 'share/network/audio/usb_host require the compat kernel'
+    for key in ('ready_timeout', 'lock_timeout'):
+        value = config.get(key)
+        if value is not None:
+            if (not isinstance(value, (int, float))
+                    or isinstance(value, bool) or not math.isfinite(value)
+                    or value <= 0):
+                return f'{key} must be a finite positive number'
+    for key in ('command_log_max', 'screenshot_keep', 'exec_output_max'):
+        value = config.get(key)
+        if value is not None and (not isinstance(value, int)
+                                  or isinstance(value, bool) or value <= 0):
+            return f'{key} must be a positive integer'
+    return None
+
+
 def daemon_restart_argv(config: dict, daemon_dir: Path,
                         reset: bool = False) -> list[str]:
     """Build `daemon start` arguments from a stored daemon config."""
@@ -1904,8 +1944,14 @@ def main() -> int:
             except (OSError, json.JSONDecodeError) as exc:
                 print(f'ERROR: cannot read daemon config: {exc}', file=sys.stderr)
                 return 1
-            if not isinstance(config, dict):
-                print('ERROR: daemon config is not an object', file=sys.stderr)
+            problem = restart_config_problem(config)
+            if problem:
+                print(f'ERROR: cannot restart: {problem}', file=sys.stderr)
+                return 1
+            try:
+                validate_pin_cpu(config.get('pin_cpu'))
+            except ValueError as exc:
+                print(f'ERROR: cannot restart: {exc}', file=sys.stderr)
                 return 1
             if args.reset and not config.get('state'):
                 print('ERROR: --reset requires a daemon started with --state',

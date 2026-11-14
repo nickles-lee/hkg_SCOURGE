@@ -913,5 +913,7 @@ items beyond that.
   within the log cap. 389 tests; 189 VM commits.
 - **2026-11-14 — status caps**: active log/screenshot/exec caps visible in
   status. 389 tests; 190 VM commits.
+- **2026-11-14 — restart config guard**: invalid stored config fails before
+  stopping a healthy daemon. 390 tests; 191 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

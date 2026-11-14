@@ -1215,6 +1215,18 @@ class VMIntegrationTests(unittest.TestCase):
                                  alive.stdout + alive.stderr)
                 self.assertIn('RESTART_WHILE_STOPPED_OK', alive.stdout)
 
+                config_file = daemon_dir / 'config.json'
+                bad = json.loads(config_file.read_text())
+                bad['kernel_target'] = 'bogus'
+                config_file.write_text(json.dumps(bad))
+                rejected = cli('restart', '--daemon-dir', str(daemon_dir))
+                self.assertNotEqual(rejected.returncode, 0,
+                                    rejected.stdout + rejected.stderr)
+                self.assertIn('unsupported kernel_target',
+                              rejected.stdout + rejected.stderr)
+                still = cli('status', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(json.loads(still.stdout)['state'], 'ready')
+
                 broken_dir.mkdir()
                 (broken_dir / 'config.json').write_text('{not json')
                 broken = cli('restart', '--daemon-dir', str(broken_dir))

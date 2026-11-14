@@ -149,6 +149,32 @@ class DaemonTests(unittest.TestCase):
                 self.assertEqual(daemon.console(self.root, lines), 0)
             self.assertEqual(buffer.getvalue().strip(), expected)
 
+    def test_restart_config_problem(self) -> None:
+        good = {'kernel_target': 'compat', 'display': 'gtk',
+                'display_device': 'virtio-vga', 'cache': 'writeback',
+                'share': '/tmp/share', 'network': True, 'usb_host': ['1:2'],
+                'ready_timeout': 30, 'lock_timeout': 30,
+                'command_log_max': 100, 'screenshot_keep': 1,
+                'exec_output_max': 100}
+        self.assertIsNone(launch.restart_config_problem(good))
+        cases = [
+            ({'kernel_target': 'bogus'}, 'unsupported kernel_target'),
+            ({'kernel_target': 'vendor', 'share': '/tmp/x'},
+             'require the compat kernel'),
+            ({'display': 'bogus'}, 'unsupported display'),
+            ({'display_device': 'bogus'}, 'unsupported display_device'),
+            ({'cache': 'bogus'}, 'unsupported cache'),
+            ({'ready_timeout': -1}, 'finite positive'),
+            ({'lock_timeout': float('nan')}, 'finite positive'),
+            ({'command_log_max': 0}, 'positive integer'),
+            ({'screenshot_keep': 0}, 'positive integer'),
+            ({'exec_output_max': 0}, 'positive integer'),
+        ]
+        for config, expected in cases:
+            self.assertIn(expected, launch.restart_config_problem(config))
+        self.assertEqual(launch.restart_config_problem([]),
+                         'config must be an object')
+
     def test_restart_argv_preserves_config(self) -> None:
         config = {
             'kernel_target': 'compat', 'state': '/tmp/state',
