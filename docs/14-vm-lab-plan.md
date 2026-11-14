@@ -616,6 +616,8 @@ items beyond that.
   summary still land. 273 tests.
 - **2026-11-14 — result schema validation**: `harness/result_schema.py`,
   `launch.py check-run`, `show --strict`, and schema fields/markers in
-  `list`; real run validates with schema 3 and zero problems. 278 tests.
+  `list`; `check-run --all` and doctor report bulk schema health (current
+  corpus: 1181 valid, 159 legacy, 0 invalid, 66 result-less); real run
+  validates with schema 3 and zero problems. 279 tests.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

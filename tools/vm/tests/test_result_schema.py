@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 
 from harness import runs
-from harness.result_schema import schema_state, validate_result
+from harness.result_schema import check_all_results, schema_state, validate_result
 
 VM = Path(__file__).resolve().parents[1]
 
@@ -78,6 +78,28 @@ class ResultSchemaTests(unittest.TestCase):
             self.assertTrue(rows['valid']['schema_ok'])
             self.assertEqual(rows['missing']['schema_state'], 'missing')
             self.assertFalse(rows['missing']['schema_ok'])
+
+    def test_bulk_check_counts_and_invalid_gate(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='vm-schema-all-') as tmp:
+            root = Path(tmp)
+            runs_root = root / 'runs'
+            runs_root.mkdir()
+            for name, data in (
+                    ('valid', valid_result()),
+                    ('legacy', valid_result(schema_version=2)),
+                    ('invalid', valid_result(verdict='BAD'))):
+                path = runs_root / name
+                path.mkdir()
+                (path / 'result.json').write_text(json.dumps(data))
+            (runs_root / 'missing').mkdir()
+            report = check_all_results(root)
+            self.assertFalse(report['ok'])
+            self.assertEqual(report['checked'], 3)
+            self.assertEqual(report['valid'], 1)
+            self.assertEqual(report['legacy'], 1)
+            self.assertEqual(report['invalid'], 1)
+            self.assertEqual(report['missing'], 1)
+            self.assertEqual(report['problems'][0]['run'], 'invalid')
 
     def test_check_run_cli_and_show_strict(self) -> None:
         run_id = f'schema-test-{os.getpid()}'

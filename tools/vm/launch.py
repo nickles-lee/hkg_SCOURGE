@@ -62,7 +62,8 @@ from harness.state import StateBusy, create_state_overlays
 from harness.visual import baseline as visual_baseline
 from harness.visual import compare as visual_compare
 from harness.visual import list_baselines
-from harness.result_schema import schema_state, validate_file, validate_result
+from harness.result_schema import (check_all_results, schema_state,
+                                   validate_file, validate_result)
 from harness.results import evaluate, evaluate_systemd_transition, phase_summary
 from harness.scenarios import scenario_state
 from harness.storage import VOLUMES, cleanup_storage, create_storage, mount_script, parse_sizes
@@ -1396,6 +1397,11 @@ def doctor(verify_images: bool = False, tools: Path | None = None,
     note("runs", runs_stats(VM))
     scenarios = scenario_state(VM)
     check("scenarios", scenarios["ok"], scenarios)
+    result_schema = check_all_results(VM)
+    check("result_schema", result_schema["ok"], {
+        k: result_schema[k]
+        for k in ("checked", "valid", "legacy", "invalid", "missing")
+    })
 
     state = compat_state(VM)
     if graphics:
@@ -1420,6 +1426,8 @@ def doctor(verify_images: bool = False, tools: Path | None = None,
         actions.append("rebuild the tools image: sh build_tools.sh tools.$(date +%Y%m%d).img")
     if checks.get("scenarios", {}).get("ok") is False:
         actions.append("fix scenario JSON contract problems reported by doctor")
+    if checks.get("result_schema", {}).get("ok") is False:
+        actions.append("inspect invalid runs: launch.py check-run --all")
     if graphics:
         if checks.get("compat_initramfs", {}).get("ok") is False:
             actions.append("build the compat initramfs: sh compat/build-initramfs.sh")
@@ -1508,7 +1516,9 @@ def main() -> int:
     show.add_argument('--strict', action='store_true',
                       help='exit 1 when the result schema has problems')
     check = sub.add_parser('check-run', help='validate a run result against the schema')
-    check.add_argument('run')
+    check.add_argument('run', nargs='?')
+    check.add_argument('--all', action='store_true',
+                       help='validate every run result under runs/')
     extract = sub.add_parser('extract', help='copy an artifact out of a run')
     extract.add_argument('run')
     extract.add_argument('member')
@@ -1817,6 +1827,14 @@ def main() -> int:
                       f"{item['scenario'] or 'custom':20} {label}{marker}")
         return 0
     if args.action == 'check-run':
+        if args.all and args.run:
+            ap.error('check-run accepts a run id or --all, not both')
+        if args.all:
+            report = check_all_results(VM)
+            print(json.dumps(report, indent=2))
+            return 0 if report['ok'] else 1
+        if not args.run:
+            ap.error('check-run requires a run id or --all')
         run_path = VM / 'runs' / args.run / 'result.json'
         data, problems = validate_file(run_path)
         print(json.dumps({
