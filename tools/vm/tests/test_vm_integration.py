@@ -229,6 +229,16 @@ class VMIntegrationTests(unittest.TestCase):
             self.assertIn('RESET_CLEAN',
                           (Path(reset['run_dir']) / 'guest-output.log').read_text())
 
+    def test_failure_bundle_disabled(self):
+        process, result = self.run_guest(
+            '--cmd', 'echo NO_BUNDLE_MARKER; exit 7',
+            '--no-failure-bundle', '--timeout', '60')
+        self.assertEqual(process.returncode, 7)
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertEqual(result['guest_rc'], 7)
+        self.assertIsNone(result.get('failure_bundle'))
+        self.assert_cleaned(result)
+
     def test_failure_bundle_real_fail(self):
         process, result = self.run_guest(
             '--cmd', 'echo BUNDLE_MARKER; exit 7', '--timeout', '60')

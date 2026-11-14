@@ -733,5 +733,8 @@ items beyond that.
 - **2026-11-14 — screenshot copy-failure restart**: failed copy leaves the
   daemon healthy; stop/restart/exec in the same dir succeeds. Real run PASS
   (14.5 s). 314 tests (44 skipped); 116 VM commits.
+- **2026-11-14 — failure-bundle opt-out**: exit-7 run with
+  `--no-failure-bundle` fails/cleans up without bundle metadata. Real run
+  PASS (5.6 s). 315 tests (45 skipped); 117 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
