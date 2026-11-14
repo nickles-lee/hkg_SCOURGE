@@ -324,8 +324,9 @@ and decodes two lab-defined canids into a deterministic state:
 The lab-only `org.scourge.vehicle.State` interface at `/Vehicle` exposes
 `GetState`/`Reset`; the last `SetCANMicomRecv` payload is retained as
 `bulk=<hex>`. The probe asserts decoded values, one clamp marker per
-out-of-range write, bulk retention, reset defaults and a hostile
-`startbit=INT_MAX`/boundary range guard (ignored and logged, never written).
+out-of-range write, bulk retention, reset defaults, a hostile
+`startbit=INT_MAX`/boundary range guard (ignored and logged, never written)
+and fail-closed rejection of an unknown D-Bus method (`UnknownMethod`).
 Rebuild the payload with `sh build_research_tools.sh` after changing the
 simulator. The frame
 mapping is lab-defined: it is not a vendor DBC and does not claim stock

@@ -155,6 +155,14 @@ case "$STATE" in
 esac
 echo 'HARNESS_CHECK vehicle-range-guard PASS'
 
+# Fail closed: an unknown method must return a D-Bus error, never succeed.
+if /usr/bin/dbus-send --system --print-reply --reply-timeout=8000 \
+    --dest=com.lge.car.micom /Vehicle     org.scourge.vehicle.State.Bogus >/tmp/vehicle-unknown.out 2>&1; then
+    fail 'vehicle-unknown-method-accepted'
+fi
+grep -q 'UnknownMethod' /tmp/vehicle-unknown.out || fail 'vehicle-unknown-method'
+echo 'HARNESS_CHECK vehicle-unknown-method PASS'
+
 /usr/bin/dbus-send --system --print-reply --reply-timeout=8000 \
     --dest=com.lge.car.micom /Can com.lge.car.micom.can.SetCANMicomRecv \
     array:byte:0x06,0x3f >/tmp/vehicle-bulk.out 2>&1 || fail 'vehicle-bulk-dbus'

@@ -15,8 +15,9 @@ class VehicleStateTests(unittest.TestCase):
         self.assertEqual(scenario['requires'], ['payload'])
         self.assertEqual(set(scenario['checks']),
                          {'vehicle-ready', 'vehicle-decode', 'vehicle-clamp',
-                          'vehicle-range-guard', 'vehicle-bulk',
-                          'vehicle-reset', 'vehicle-state-smoke'})
+                          'vehicle-range-guard', 'vehicle-unknown-method',
+                          'vehicle-bulk', 'vehicle-reset',
+                          'vehicle-state-smoke'})
         self.assertNotIn('requires_mode', scenario)
 
     def test_command_asserts_state_and_lab_interface(self) -> None:
@@ -28,6 +29,8 @@ class VehicleStateTests(unittest.TestCase):
                      'TWEAKS_VEHICLE_STATE', 'TWEAKS_VEHICLE_CLAMP',
                      'TWEAKS_VEHICLE_RESET', 'TWEAKS_VEHICLE_BULK',
                      'TWEAKS_VEHICLE_WRITE_IGNORED',
+                     'org.scourge.vehicle.State.Bogus',
+                     'UnknownMethod',
                      'speed=42 gear=3 ignition=2',
                      'climate=22.0 outside=-3'):
             self.assertIn(text, command)
