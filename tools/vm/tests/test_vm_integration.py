@@ -72,6 +72,19 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertEqual(alive.returncode, 0,
                                  alive.stdout + alive.stderr)
                 self.assertIn('COPY_FAILURE_SAFE', alive.stdout)
+
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+                restarted = cli('start', '--daemon-dir', str(daemon_dir),
+                                '--ready-timeout', '120', '--lock-timeout', '120')
+                self.assertEqual(restarted.returncode, 0,
+                                 restarted.stdout + restarted.stderr)
+                again = cli('exec', '--daemon-dir', str(daemon_dir),
+                            '--cmd', 'echo RESTART_AFTER_COPY_FAIL')
+                self.assertEqual(again.returncode, 0,
+                                 again.stdout + again.stderr)
+                self.assertIn('RESTART_AFTER_COPY_FAIL', again.stdout)
             finally:
                 stopped = cli('stop', '--daemon-dir', str(daemon_dir))
                 self.assertEqual(stopped.returncode, 0,
