@@ -381,6 +381,53 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertEqual(stopped.returncode, 0,
                                  stopped.stdout + stopped.stderr)
 
+    def test_daemon_concurrent_exec(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-concurrent-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                slow = subprocess.Popen(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', 'exec',
+                     '--daemon-dir', str(daemon_dir), '--cmd',
+                     'sleep 1; echo CONCURRENT_SLOW', '--timeout', '30'],
+                    cwd=VM, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True)
+                fast = subprocess.Popen(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', 'exec',
+                     '--daemon-dir', str(daemon_dir), '--cmd',
+                     'echo CONCURRENT_FAST', '--timeout', '30'],
+                    cwd=VM, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True)
+                slow_out, _ = slow.communicate(timeout=40)
+                fast_out, _ = fast.communicate(timeout=40)
+                self.assertEqual(slow.returncode, 0, slow_out)
+                self.assertEqual(fast.returncode, 0, fast_out)
+                self.assertIn('CONCURRENT_SLOW', slow_out)
+                self.assertNotIn('CONCURRENT_FAST', slow_out)
+                self.assertIn('CONCURRENT_FAST', fast_out)
+                self.assertNotIn('CONCURRENT_SLOW', fast_out)
+
+                status = cli('status', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(status.returncode, 0, status.stderr)
+                values = json.loads(status.stdout)
+                self.assertEqual(values['state'], 'ready')
+                self.assertTrue(values['qemu_alive'])
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_daemon_stop_during_inflight_exec(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-inflight-') as tmp:
             daemon_dir = Path(tmp) / 'daemon'

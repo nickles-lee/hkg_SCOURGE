@@ -706,5 +706,8 @@ items beyond that.
   bundle with summary/dmesg/serial tail and cleanup; summary now includes a
   guest-output tail. Real run PASS (9.8 s). 306 tests (37 skipped); 107 VM
   commits.
+- **2026-11-14 — daemon concurrent exec**: two simultaneous execs are
+  serialized; both succeed with isolated output and the daemon stays ready.
+  Real run PASS (8.6 s). 307 tests (38 skipped); 108 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
