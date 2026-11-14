@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -87,6 +88,13 @@ class DaemonTests(unittest.TestCase):
         self.assertFalse(daemon.daemon_pid_matches(os.getpid()))
         self.assertFalse(daemon.daemon_pid_matches(99999999))
         self.assertFalse(daemon.daemon_pid_matches(None))
+
+    def test_missing_control_socket_fails_fast_when_ready(self) -> None:
+        daemon.write_status(self.root, {"state": "ready", "daemon_pid": os.getpid()})
+        started = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, "control socket missing"):
+            daemon.request(self.root, {"action": "status"}, timeout=2)
+        self.assertLess(time.monotonic() - started, 1.5)
 
     def test_control_request_round_trip(self) -> None:
         path = self.root / "control.sock"

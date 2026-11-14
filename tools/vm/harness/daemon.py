@@ -101,9 +101,20 @@ def daemon_pid_matches(pid: int | None, daemon_dir: Path | None = None) -> bool:
 def request(daemon_dir: Path, payload: dict, timeout: float = 15.0) -> dict:
     path = Path(daemon_dir) / "control.sock"
     deadline = time.monotonic() + timeout
+    missing_since = None
     while not path.exists():
         if time.monotonic() > deadline:
             raise TimeoutError(f"daemon control socket missing: {path}")
+        state = read_status(daemon_dir).get("state")
+        if state in ("ready", "error", "stopped"):
+            # The socket is normally created just after the ready status.
+            # A missing socket after a short grace is a stale/broken daemon.
+            if missing_since is None:
+                missing_since = time.monotonic()
+            elif time.monotonic() - missing_since > 0.5:
+                raise RuntimeError(f"daemon control socket missing: {path}")
+        else:
+            missing_since = None
         time.sleep(0.05)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(max(0.1, deadline - time.monotonic()))

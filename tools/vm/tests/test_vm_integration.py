@@ -163,6 +163,62 @@ class VMIntegrationTests(unittest.TestCase):
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
 
+    def test_daemon_stale_control_socket_recovery(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-stale-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            first = json.loads(started.stdout)
+            daemon_pid = first['daemon_pid']
+            qemu_pid = first['qemu_pid']
+            try:
+                control = daemon_dir / 'control.sock'
+                self.assertTrue(control.exists())
+                control.unlink()
+
+                status = cli('status', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(status.returncode, 0, status.stderr)
+                values = json.loads(status.stdout)
+                self.assertEqual(values['state'], 'ready')
+                self.assertFalse(values['reachable'])
+                self.assertIn('control socket', values['reachable_error'])
+
+                failed = cli('exec', '--daemon-dir', str(daemon_dir),
+                             '--cmd', 'echo SHOULD_NOT_RUN')
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertIn('control socket', failed.stderr + failed.stdout)
+
+                os.kill(daemon_pid, signal.SIGTERM)
+                for pid in (daemon_pid, qemu_pid):
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline and Path(f'/proc/{pid}').exists():
+                        time.sleep(0.1)
+                    self.assertFalse(Path(f'/proc/{pid}').exists())
+
+                restarted = cli('start', '--daemon-dir', str(daemon_dir),
+                                '--ready-timeout', '120', '--lock-timeout', '120')
+                self.assertEqual(restarted.returncode, 0,
+                                 restarted.stdout + restarted.stderr)
+                alive = cli('exec', '--daemon-dir', str(daemon_dir),
+                            '--cmd', 'echo RESTARTED_AFTER_STALE_CONTROL')
+                self.assertEqual(alive.returncode, 0,
+                                 alive.stdout + alive.stderr)
+                self.assertIn('RESTARTED_AFTER_STALE_CONTROL', alive.stdout)
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_daemon_dead_qemu_recovery(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-dead-') as tmp:
             daemon_dir = Path(tmp) / 'daemon'

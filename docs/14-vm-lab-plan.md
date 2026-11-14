@@ -656,5 +656,9 @@ items beyond that.
   status, wait for process cleanup, restart in the same directory and verify
   exec. Real run PASS (14.0 s). Cumulative 92 VM commits; 290 tests
   (22 skipped).
+- **2026-11-14 — stale control-socket recovery**: request fails fast for a
+  missing socket after ready, with a ~0.5 s grace; gated test verifies status
+  diagnostics, exec failure, stale-daemon termination and clean restart. Real
+  run PASS (26.0 s). Cumulative 93 VM commits; 292 tests (23 skipped).
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
