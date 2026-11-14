@@ -883,5 +883,7 @@ items beyond that.
   `--reset`; unit + gated coverage. 373 tests; 174 VM commits.
 - **2026-11-14 — check-scenario --all**: bulk scenario validation CLI;
   374 tests; 175 VM commits.
+- **2026-11-14 — check-profile --all**: bulk profile validation CLI; 375
+  tests; 176 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

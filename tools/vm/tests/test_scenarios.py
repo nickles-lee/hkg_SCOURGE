@@ -150,6 +150,22 @@ class ScenarioContractTests(unittest.TestCase):
         self.assertIn('unknown scenario',
                       '\n'.join(json.loads(missing.stdout)['problems']))
 
+    def test_check_profile_all_cli(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, '-B', str(VM / 'launch.py'), 'check-profile',
+             '--all'], cwd=VM, capture_output=True, text=True, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertTrue(report['ok'])
+        self.assertEqual(report['count'], 2)
+        self.assertEqual(report['problems'], [])
+        conflict = subprocess.run(
+            [sys.executable, '-B', str(VM / 'launch.py'), 'check-profile',
+             'research', '--all'], cwd=VM, capture_output=True, text=True,
+            check=False)
+        self.assertEqual(conflict.returncode, 2)
+        self.assertIn('not both', conflict.stderr)
+
     def test_check_profile_cli(self) -> None:
         good = subprocess.run(
             [sys.executable, '-B', str(VM / 'launch.py'), 'check-profile',

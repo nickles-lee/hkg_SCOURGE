@@ -1601,9 +1601,11 @@ def main() -> int:
     check_scenario.add_argument('--all', action='store_true',
                                 help='validate every registered scenario')
     check_profile = sub.add_parser('check-profile',
-                                   help='validate one profile JSON contract')
-    check_profile.add_argument('profile',
+                                   help='validate profile JSON contracts')
+    check_profile.add_argument('profile', nargs='?',
                                help='research|conformance or profile JSON path')
+    check_profile.add_argument('--all', action='store_true',
+                               help='validate every registered profile')
     extract = sub.add_parser('extract', help='copy an artifact out of a run')
     extract.add_argument('run')
     extract.add_argument('member')
@@ -2038,6 +2040,14 @@ def main() -> int:
                           'ok': not problems, 'problems': problems}, indent=2))
         return 0 if not problems else 1
     if args.action == 'check-profile':
+        if args.all and args.profile:
+            ap.error('check-profile accepts a profile or --all, not both')
+        if args.all:
+            report = profile_state(VM)
+            print(json.dumps(report, indent=2))
+            return 0 if report['ok'] else 1
+        if not args.profile:
+            ap.error('check-profile requires a profile or --all')
         value = args.profile
         path = Path(value)
         if path.is_file():
