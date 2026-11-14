@@ -639,13 +639,18 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         label: str = "", state: Path | None = None, reset: bool = False,
         network: bool = False, audio: bool = False,
         usb_host: list[str] | None = None, cache: str = "writeback",
-        pin_cpu: int | None = None, lock_info: dict | None = None) -> int:
+        pin_cpu: int | None = None, dry_run: bool = False,
+        lock_info: dict | None = None) -> int:
     profile = load_profile(profile_name)
     scenario = load_scenario(scenario_name) if scenario_name else None
     if profile_name == 'conformance' and (scenario is None or interactive):
         raise ValueError('conformance requires a managed --scenario; arbitrary commands are research only')
     if interactive and screenshot:
         raise ValueError('--screenshot requires noninteractive execution')
+    if dry_run and interactive:
+        raise ValueError('--dry-run cannot be interactive')
+    if dry_run and (screenshot or qmp_screenshot):
+        raise ValueError('--dry-run cannot capture screenshots')
     if display_device not in ('none', 'std', 'virtio-vga', 'virtio-vga-gl'):
         raise ValueError(f'unknown display device: {display_device}')
     if qmp_screenshot and display_device == 'none':
@@ -893,6 +898,11 @@ def run(cmd: str | None, interactive: bool, timeout: float,
                          share, display, vnc_display, network, audio,
                          usb_host, cache)
         (run_dir / 'command.json').write_text(json.dumps(argv, indent=2) + '\n')
+        if dry_run:
+            result.update(verdict='DRY-RUN', rc=0, dry_run=True)
+            print(f"[vm] dry-run: {run_dir / 'command.json'}", flush=True)
+            print(json.dumps(argv, indent=2))
+            return 0
         if kernel_target == 'compat':
             result['kernel_mode'] = 'compat'
         else:
@@ -1632,6 +1642,8 @@ def main() -> int:
                    help="vendor (exact 4.1.27-abl) or compat (pinned/host kernel + initramfs); legacy auto/bzimage/vmlinux select vendor sub-modes")
     r.add_argument("--payload", type=Path, default=None,
                    help="directory (built to ext4) or image for a third USB stick")
+    r.add_argument('--dry-run', action='store_true',
+                   help='build command.json and exit without starting QEMU')
     r.add_argument('--no-lock', action='store_true',
                    help='do not serialize this boot against other VM runs (unsafe)')
     r.add_argument('--lock-timeout', type=float, default=600,
@@ -1844,7 +1856,7 @@ def main() -> int:
         kernel_target, vendor_mode = 'vendor', args.kernel
     if args.pin_cpu is not None:
         validate_pin_cpu(args.pin_cpu)
-    lock = (nullcontext({'held': False}) if args.no_lock
+    lock = (nullcontext({'held': False}) if args.no_lock or args.dry_run
             else run_lock(VM, args.lock_timeout))
     try:
         with lock as lock_info:
@@ -1857,7 +1869,8 @@ def main() -> int:
                        args.failure_bundle, kernel_target, args.allow_kernel_mismatch,
                        args.share, args.display, args.vnc_display, args.label,
                        args.state, args.reset, args.network, args.audio, args.usb_host,
-                       args.cache, pin_cpu=args.pin_cpu, lock_info=lock_info)
+                       args.cache, pin_cpu=args.pin_cpu,
+                       dry_run=args.dry_run, lock_info=lock_info)
     except LockTimeout as exc:
         print(f'ERROR: {exc}', file=sys.stderr)
         return 1

@@ -97,6 +97,37 @@ class BenchTests(unittest.TestCase):
         self.assertFalse(report['ok'])
         self.assertEqual(report['rows'][1]['pct'], 10.0)
 
+    def test_compare_metric_readiness(self) -> None:
+        base = {'metrics': {'k': {'boot_seconds': {'mean': 10.0},
+                                  'readiness_seconds': {'mean': 20.0}}}}
+        current = {'metrics': {'k': {'boot_seconds': {'mean': 10.0},
+                                     'readiness_seconds': {'mean': 21.2}}}}
+        report = compare_bench(base, current, threshold=0.05,
+                               metric='readiness_seconds')
+        self.assertEqual(report['metric'], 'readiness_seconds')
+        self.assertEqual(report['rows'][0]['status'], 'REGRESSED')
+        self.assertAlmostEqual(report['rows'][0]['pct'], 6.0)
+        self.assertFalse(report['ok'])
+
+    def test_compare_metric_missing_from_legacy_docs(self) -> None:
+        report = compare_bench({'summary': {'k': {'mean': 10.0}}},
+                               {'summary': {'k': {'mean': 10.0}}},
+                               metric='readiness_seconds')
+        self.assertEqual(report['rows'], [])
+        self.assertEqual(report['error'], 'no comparable metrics')
+        self.assertFalse(report['ok'])
+
+    def test_compare_metric_legacy_rows_fallback(self) -> None:
+        base = {'rows': [{'scenario': 'boot', 'cache': None, 'pin_cpu': None,
+                          'readiness_seconds': 4.0}]}
+        current = {'rows': [{'scenario': 'boot', 'cache': None, 'pin_cpu': None,
+                             'readiness_seconds': 4.4}]}
+        report = compare_bench(base, current, threshold=0.05,
+                               metric='readiness_seconds')
+        self.assertEqual(report['rows'][0]['key'],
+                         'boot cache=default pin=none')
+        self.assertEqual(report['rows'][0]['status'], 'REGRESSED')
+
     def test_compare_reports_missing_keys(self) -> None:
         report = compare_bench({'summary': {'a': {'mean': 1.0}}},
                                {'summary': {'b': {'mean': 1.0}}})
@@ -156,6 +187,7 @@ class BenchTests(unittest.TestCase):
         self.assertIn('--matrix', completed.stdout)
         self.assertIn('--kernel', completed.stdout)
         self.assertIn('--compare', completed.stdout)
+        self.assertIn('--metric', completed.stdout)
 
 
 if __name__ == '__main__':

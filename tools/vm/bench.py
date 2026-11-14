@@ -80,11 +80,38 @@ def build_argv(args, scenario: dict, cache: str | None = None,
     return argv
 
 
+METRICS = ('boot_seconds', 'readiness_seconds', 'scenario_seconds')
+
+
+def row_key(row: dict) -> str:
+    cache = row.get('cache') or 'default'
+    pin = row.get('pin_cpu')
+    return f"{row.get('scenario')} cache={cache} pin={pin if pin is not None else 'none'}"
+
+
+def metric_summary(document: dict, metric: str) -> dict:
+    """Per-key metric summaries, with legacy summary/row fallbacks."""
+    metrics = document.get('metrics')
+    if metrics:
+        return {key: (values.get(metric) or {}) for key, values in metrics.items()}
+    grouped: dict[str, list[float]] = {}
+    for row in document.get('rows') or []:
+        value = row.get(metric)
+        if isinstance(value, (int, float)):
+            grouped.setdefault(row_key(row), []).append(value)
+    if grouped:
+        return {key: summarize(values) for key, values in grouped.items()}
+    if metric == 'boot_seconds':
+        return document.get('summary') or {}
+    return {}
+
+
 def compare_bench(baseline: dict, current: dict,
-                  threshold: float = 0.05) -> dict:
-    """Compare two bench.json summaries; regression is relative mean growth."""
-    left = baseline.get('summary') or {}
-    right = current.get('summary') or {}
+                  threshold: float = 0.05,
+                  metric: str = 'boot_seconds') -> dict:
+    """Compare two bench.json documents; regression is relative mean growth."""
+    left = metric_summary(baseline, metric)
+    right = metric_summary(current, metric)
     rows = []
     for key in sorted(set(left) | set(right)):
         old = left.get(key) or {}
@@ -109,13 +136,18 @@ def compare_bench(baseline: dict, current: dict,
                 status = 'SAME'
             row['status'] = status
         rows.append(row)
-    return {
-        'ok': all(row['status'] not in ('REGRESSED', 'MISSING') for row in rows),
+    report = {
+        'ok': bool(rows) and all(
+            row['status'] not in ('REGRESSED', 'MISSING') for row in rows),
         'threshold': threshold,
+        'metric': metric,
         'baseline': baseline.get('run') or baseline.get('bench_id'),
         'current': current.get('run') or current.get('bench_id'),
         'rows': rows,
     }
+    if not rows:
+        report['error'] = 'no comparable metrics'
+    return report
 
 
 def result_path(log_path: Path) -> Path | None:
@@ -131,6 +163,9 @@ def main() -> int:
                         help='compare two bench.json summaries and exit')
     parser.add_argument('--threshold', type=float, default=0.05,
                         help='relative mean regression threshold for --compare (default 0.05)')
+    parser.add_argument('--metric', choices=('boot', 'readiness', 'scenario'),
+                        default='boot',
+                        help='metric for --compare (default boot)')
     parser.add_argument('--scenario', action='append', default=[],
                         help='scenario to benchmark (repeatable; default boot)')
     parser.add_argument('--profile', choices=('research', 'conformance'),
@@ -169,7 +204,9 @@ def main() -> int:
             current = json.loads(args.compare[1].read_text())
         except (OSError, json.JSONDecodeError) as exc:
             parser.error(f'cannot read bench summary: {exc}')
-        report = compare_bench(baseline, current, args.threshold)
+        metric = {'boot': 'boot_seconds', 'readiness': 'readiness_seconds',
+                  'scenario': 'scenario_seconds'}[args.metric]
+        report = compare_bench(baseline, current, args.threshold, metric)
         report['baseline'] = report['baseline'] or str(args.compare[0])
         report['current'] = report['current'] or str(args.compare[1])
         print(json.dumps(report, indent=2))
@@ -219,22 +256,27 @@ def main() -> int:
                             'rc': completed.returncode,
                             'boot_seconds': detail.get('boot_seconds'),
                             'readiness_seconds': detail.get('readiness_seconds'),
+                            'scenario_seconds': detail.get('scenario_seconds'),
                             'result': str(path) if path is not None else None,
                             'log': str(log),
                         })
                         print(f"{scenario['name']} [{suffix}] {iteration}/{args.repeats}: "
                               f"{rows[-1]['verdict']} rc={completed.returncode} "
                               f"boot={rows[-1]['boot_seconds']}", flush=True)
-            summary = {}
+            metrics = {}
             for scenario in scenarios:
                 for cache, pin_cpu in variants(args):
                     key = (f"{scenario['name']} cache={cache or 'default'} "
                            f"pin={pin_cpu if pin_cpu is not None else 'none'}")
-                    values = [row['boot_seconds'] for row in rows
-                              if row['scenario'] == scenario['name']
-                              and row['cache'] == cache and row['pin_cpu'] == pin_cpu
-                              and isinstance(row['boot_seconds'], (int, float))]
-                    summary[key] = summarize(values)
+                    entry = {}
+                    for metric in METRICS:
+                        values = [row[metric] for row in rows
+                                  if row['scenario'] == scenario['name']
+                                  and row['cache'] == cache and row['pin_cpu'] == pin_cpu
+                                  and isinstance(row[metric], (int, float))]
+                        entry[metric] = summarize(values)
+                    metrics[key] = entry
+            summary = {key: values['boot_seconds'] for key, values in metrics.items()}
             bench = {
                 'run': directory.name,
                 'ok': all(row['verdict'] == 'PASS' for row in rows),
@@ -244,6 +286,7 @@ def main() -> int:
                 'variants': [{'cache': cache, 'pin_cpu': pin}
                              for cache, pin in variants(args)],
                 'summary': summary,
+                'metrics': metrics,
                 'rows': rows,
             }
             (directory / 'bench.json').write_text(json.dumps(bench, indent=2) + '\n')

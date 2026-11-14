@@ -205,8 +205,10 @@ python3 -B bench.py --compare runs/bench-<base>/bench.json \
 ```
 
 `compare` prints per-key `SAME`/`IMPROVED`/`REGRESSED`/`MISSING` rows and
-exits 1 for a regression or a missing key. A single-run comparison is noise;
-use `--repeats` for decisions.
+exits 1 for a regression or a missing key. `bench.json` records `metrics` for
+`boot`, `readiness` and `scenario`; select one with `--metric boot|readiness|
+scenario` (default boot). A single-run comparison is noise; use `--repeats`
+for decisions.
 
 ## CAN/micom smoke
 
@@ -261,6 +263,16 @@ Baselines live in `baselines/` (gitignored); `compare` writes a diff PNG and
 reports changed pixels/ratio. A deliberate UI change is rebaselined by
 running the `baseline` command against the reviewed frame. Baselines are
 workspace-local, so each agent can choose the frames it guards.
+
+## Dry run
+
+```sh
+python3 -B launch.py run --dry-run --scenario boot
+```
+
+Builds the run metadata, overlays and `command.json`, prints the full QEMU
+argv, and exits with verdict `DRY-RUN` without taking the boot lock or
+starting QEMU. Useful for inspecting device/cache/scenario arguments.
 
 ## Parallel runs and suites
 

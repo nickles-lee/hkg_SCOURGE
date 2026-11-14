@@ -602,5 +602,10 @@ items beyond that.
   failure-path test that still writes `bench.json`/exits 1. `--compare`
   flags relative mean regressions (demo +7.15% → REGRESSED, rc=1).
   Four-cell smoke PASS. 260 tests.
+- **2026-11-14 — benchmark metrics + dry-run**: bench.json records boot,
+  readiness and scenario metrics; `--compare --metric` selects one, with
+  legacy fallbacks and an empty-comparison failure. `launch.py run --dry-run`
+  prints the QEMU argv and records `DRY-RUN` without booting or locking.
+  266 tests.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

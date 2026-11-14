@@ -86,7 +86,9 @@ python3 -B bench.py --compare runs/bench-<base>/bench.json \
   runs/bench-<new>/bench.json --threshold 0.05
 ```
 
-The comparison marks relative mean growth as `REGRESSED` and exits 1. `--matrix` compares cache
+The comparison marks relative mean growth as `REGRESSED` and exits 1.
+`bench.json` also records `metrics` for boot, readiness and scenario time;
+pass `--metric readiness` or `--metric scenario` to compare those. `--matrix` compares cache
 modes and optional pinned CPUs; its `summary` keys are grouped by scenario,
 cache and pin. A four-cell matrix smoke (one run each) passed at
 5.223/5.404/5.465/5.376 s; that is a smoke result, not a performance

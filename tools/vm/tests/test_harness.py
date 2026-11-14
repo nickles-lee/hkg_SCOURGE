@@ -338,6 +338,37 @@ class LauncherTests(TemporaryTest):
             target = VM / probe
             self.assertTrue(target.is_file(), f'{name}: missing probe {probe}')
 
+    def test_run_help_exposes_dry_run(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, "-B", str(VM / "launch.py"), "run", "--help"],
+            capture_output=True, text=True, check=True)
+        self.assertIn("--dry-run", completed.stdout)
+
+    def test_dry_run_guards(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cannot be interactive"):
+            launch.run("true", True, 5, profile_name="research", dry_run=True)
+        with self.assertRaisesRegex(ValueError, "cannot capture screenshots"):
+            launch.run(None, False, 5, profile_name="conformance",
+                       scenario_name="boot", dry_run=True, screenshot=True)
+
+    @unittest.skipUnless((VM / "rootfs.img").is_file()
+                         and (VM / "bzImage").is_file(),
+                         "VM images unavailable (public mirror)")
+    def test_dry_run_builds_command_without_qemu(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, "-B", str(VM / "launch.py"), "run",
+             "--dry-run", "--no-lock", "--scenario", "boot", "--timeout", "30"],
+            cwd=VM, capture_output=True, text=True, timeout=60)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("dry-run", completed.stdout)
+        run_dir = next(Path(line[5:].strip()) for line in completed.stdout.splitlines()
+                       if line.startswith("run: "))
+        result = json.loads((run_dir / "result.json").read_text())
+        self.assertEqual(result["verdict"], "DRY-RUN")
+        self.assertTrue(result["dry_run"])
+        self.assertIsNone(result.get("qemu_pid"))
+        self.assertTrue((run_dir / "command.json").is_file())
+
     def test_boot_panic_fails_fast(self):
         read_fd, write_fd = os.pipe()
         stream = os.fdopen(read_fd, "rb", buffering=0)
