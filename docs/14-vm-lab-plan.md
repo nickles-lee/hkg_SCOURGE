@@ -863,5 +863,7 @@ items beyond that.
 - **2026-11-14 — benchmark Mode C wiring**: mode/share/visible-frame
   requirements honored; real ui-smoke compat bench PASS. 365 tests; 165 VM
   commits.
+- **2026-11-14 — provenance validation**: images/overlays/harness_sources
+  structures checked; corpus clean. 366 tests; 166 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

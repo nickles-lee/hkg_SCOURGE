@@ -31,6 +31,58 @@ def _check_dict(value, name: str, problems: list[str]) -> None:
         problems.append(f'{name} must be an object')
 
 
+def _check_images(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('images must be an object')
+        return
+    for name, entry in value.items():
+        prefix = f'images.{name}'
+        if not isinstance(entry, dict):
+            problems.append(f'{prefix} must be an object')
+            continue
+        if not isinstance(entry.get('path'), str) or not entry['path']:
+            problems.append(f'{prefix}.path must be a non-empty string')
+        if not _is_int(entry.get('size')) or entry['size'] < 0:
+            problems.append(f'{prefix}.size must be a non-negative integer')
+        for key in ('mtime_ns', 'ctime_ns'):
+            if not _is_int(entry.get(key)):
+                problems.append(f'{prefix}.{key} must be an integer')
+        if entry.get('sha256') is not None and not isinstance(entry['sha256'], str):
+            problems.append(f'{prefix}.sha256 must be a string or null')
+        for key in ('fresh_digest', 'trusted_reference_verified'):
+            if not isinstance(entry.get(key), bool):
+                problems.append(f'{prefix}.{key} must be boolean')
+
+
+def _check_overlays(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('overlays must be an object')
+        return
+    for name, entry in value.items():
+        prefix = f'overlays.{name}'
+        if not isinstance(entry, dict):
+            problems.append(f'{prefix} must be an object')
+            continue
+        for key in ('path', 'backing'):
+            if not isinstance(entry.get(key), str) or not entry[key]:
+                problems.append(f'{prefix}.{key} must be a non-empty string')
+        if 'persistent' in entry and not isinstance(entry['persistent'], bool):
+            problems.append(f'{prefix}.persistent must be boolean')
+        if 'state_dir' in entry and not isinstance(entry['state_dir'], str):
+            problems.append(f'{prefix}.state_dir must be a string')
+
+
+def _check_sources(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('harness_sources must be an object')
+        return
+    for name, digest in value.items():
+        if not isinstance(name, str) or not name:
+            problems.append('harness_sources keys must be non-empty strings')
+        if not isinstance(digest, str) or not digest:
+            problems.append(f'harness_sources.{name} must be a non-empty string')
+
+
 def validate_result(result) -> list[str]:
     """Return contract problems; an empty list means the core schema is valid."""
     problems: list[str] = []
@@ -74,8 +126,10 @@ def validate_result(result) -> list[str]:
         value = result.get(name)
         if value is not None and not _is_number(value):
             problems.append(f'{name} must be a finite number or null')
-    _check_dict(result.get('images'), 'images', problems)
-    _check_dict(result.get('overlays'), 'overlays', problems)
+    _check_images(result.get('images'), problems)
+    _check_overlays(result.get('overlays'), problems)
+    if 'harness_sources' in result:
+        _check_sources(result['harness_sources'], problems)
     profile = result.get('profile')
     if not isinstance(profile, dict) or not isinstance(profile.get('name'), str):
         problems.append('profile.name must be a string')

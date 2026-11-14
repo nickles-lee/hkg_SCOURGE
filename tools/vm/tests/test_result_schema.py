@@ -60,6 +60,38 @@ class ResultSchemaTests(unittest.TestCase):
                          'dry_run', 'pin_cpu', 'lock', 'failure_bundle'):
             self.assertIn(expected, problems)
 
+    def test_provenance_structures(self) -> None:
+        good = valid_result(
+            images={'rootfs': {'path': '/x', 'size': 1, 'mtime_ns': 1,
+                               'ctime_ns': 2, 'sha256': None,
+                               'fresh_digest': False,
+                               'trusted_reference_verified': False}},
+            overlays={'rootfs': {'path': '/o', 'backing': '/b',
+                                 'persistent': True, 'state_dir': '/s'}},
+            harness_sources={'launch.py': 'a' * 64})
+        self.assertEqual(validate_result(good), [])
+
+        bad = valid_result(
+            images={'bad': 'str',
+                    'worse': {'path': '', 'size': -1, 'mtime_ns': 'n',
+                              'ctime_ns': 1, 'sha256': 1,
+                              'fresh_digest': 'no',
+                              'trusted_reference_verified': 1}},
+            overlays={'bad': {'path': '', 'backing': '',
+                              'persistent': 'yes', 'state_dir': 1}},
+            harness_sources={'a': 1})
+        joined = '\n'.join(validate_result(bad))
+        for expected in ('images.bad must be an object',
+                         'images.worse.path',
+                         'images.worse.size',
+                         'images.worse.mtime_ns',
+                         'images.worse.sha256',
+                         'images.worse.fresh_digest',
+                         'overlays.bad.path',
+                         'overlays.bad.persistent',
+                         'harness_sources.a'):
+            self.assertIn(expected, joined)
+
     def test_verdict_rc_consistency(self) -> None:
         cases = [
             (valid_result(verdict='PASS', rc=1), 'PASS requires rc == 0'),
