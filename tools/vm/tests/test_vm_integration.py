@@ -481,6 +481,16 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertIn('outside daemon dir', response['error'])
                 self.assertFalse(outside.exists())
 
+                sneaky = daemon_dir / 'sneaky.png'
+                sneaky.symlink_to(outside)
+                linked = daemon_mod.request(
+                    daemon_dir, {'action': 'screenshot', 'output': str(sneaky)},
+                    timeout=5)
+                self.assertFalse(linked['ok'])
+                self.assertIn('outside daemon dir', linked['error'])
+                self.assertFalse(outside.exists())
+                sneaky.unlink()
+
                 alive = cli('exec', '--daemon-dir', str(daemon_dir),
                             '--cmd', 'echo OUTSIDE_REJECT_SAFE')
                 self.assertEqual(alive.returncode, 0,

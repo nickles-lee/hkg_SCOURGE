@@ -736,5 +736,8 @@ items beyond that.
 - **2026-11-14 — failure-bundle opt-out**: exit-7 run with
   `--no-failure-bundle` fails/cleans up without bundle metadata. Real run
   PASS (5.6 s). 315 tests (45 skipped); 117 VM commits.
+- **2026-11-14 — screenshot symlink escape check**: in-tree symlink to an
+  outside path is rejected with no artifact; daemon healthy. Real run PASS
+  (7.7 s). 315 tests (45 skipped); 118 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

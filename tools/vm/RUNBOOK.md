@@ -212,7 +212,8 @@ both QMP key (`a`) and absolute tablet click input without disturbing the
 guest. A duplicate `daemon start` must fail with "daemon already running"
 without disturbing the active daemon. A direct screenshot request with an
 output path outside the daemon directory is rejected and leaves the VM
-healthy. Two simultaneous `exec` requests are serialized by the guest lock;
+healthy; a symlink inside the directory that resolves outside is rejected
+too. Two simultaneous `exec` requests are serialized by the guest lock;
 both return their own output with no cross-talk. Out-of-bounds clicks and
 invalid QMP qcodes fail with diagnostics and leave the daemon healthy.
 Corrupting `status.json` does not crash the daemon: status reports
