@@ -652,5 +652,9 @@ items beyond that.
   socket, require a QMP diagnostic/no artifact while the daemon remains
   healthy, then stop and verify QEMU is gone. Real run PASS (23.0 s).
   Cumulative 91 VM commits; 289 tests (21 skipped).
+- **2026-11-14 — daemon dead-QEMU recovery test**: kill QEMU, detect dead
+  status, wait for process cleanup, restart in the same directory and verify
+  exec. Real run PASS (14.0 s). Cumulative 92 VM commits; 290 tests
+  (22 skipped).
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

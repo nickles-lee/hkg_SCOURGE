@@ -194,6 +194,9 @@ screenshot, validates PNG dimensions/size/metadata, confirms the daemon-dir
 capture was unlinked after the CLI copy, and stops the daemon. Another test
 unlinks the daemon QMP socket, requires the screenshot command to fail with a
 QMP diagnostic and no artifact, then stops the daemon and checks QEMU is gone.
+Another starts a daemon, kills its QEMU, requires the status/daemon death to
+be detected, then starts a fresh daemon in the same directory and exercises
+an `exec` before stopping it.
 
 `--cache` selects the non-persistent qcow2 mode (`writeback` default;
 `directsync` is pathological on this host). Persistent state always forces
