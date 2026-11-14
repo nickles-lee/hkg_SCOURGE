@@ -351,10 +351,16 @@ def _serve(config: dict) -> int:
                         with guest_lock:
                             token, output, rc, seconds = launch.execute_guest(
                                 ser, cmd, float(message.get("timeout", 300)))
-                        with (daemon_dir / "daemon-commands.log").open("a") as log:
-                            log.write(f"=== {time.time()} rc={rc} ===\n{output}\n")
+                        log_error = None
+                        try:
+                            with (daemon_dir / "daemon-commands.log").open("a") as log:
+                                log.write(f"=== {time.time()} rc={rc} ===\n{output}\n")
+                        except OSError as exc:
+                            log_error = f"{type(exc).__name__}: {exc}"
                         response = {"ok": True, "output": output, "rc": rc,
                                     "seconds": seconds}
+                        if log_error:
+                            response["log_error"] = log_error
                 elif action == "screenshot":
                     output = Path(message.get("output", daemon_dir / "screenshot.png"))
                     output = output.resolve()

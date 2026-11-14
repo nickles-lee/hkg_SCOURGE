@@ -766,5 +766,9 @@ items beyond that.
 - **2026-11-14 — daemon missing-status recovery**: deleted status.json does
   not block status/exec/stop/restart. Real run PASS (15.7 s). 324 tests
   (54 skipped); 127 VM commits.
+- **2026-11-14 — daemon command-log corruption**: log failures no longer
+  discard exec results; response records `log_error`; test uses a directory
+  in place of the log. Real run PASS (6.9 s). 325 tests (55 skipped); 128 VM
+  commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

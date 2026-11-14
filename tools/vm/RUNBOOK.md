@@ -225,7 +225,8 @@ fails with a clear error, removes the daemon-dir capture, and leaves the
 daemon healthy; a subsequent stop/restart in the same directory succeeds. Deleting `serial.log`
 makes `daemon console` fail with "serial log missing" while exec/status
 remain usable. Deleting `config.json` does not block stop; restart recreates
-it and exec works. A persistent overlay whose backing does not match the expected
+it and exec works. A corrupt/unwritable command log no longer discards a
+successful exec result; the response records `log_error`. A persistent overlay whose backing does not match the expected
 image is rejected as a "backing mismatch" before QEMU starts. A corrupted
 overlay fails cleanly without QEMU, and `--reset` rebuilds it for a clean
 start/exec/stop. A stale control socket is detected in about
