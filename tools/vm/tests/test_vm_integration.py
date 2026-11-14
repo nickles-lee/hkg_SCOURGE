@@ -1345,6 +1345,39 @@ class VMIntegrationTests(unittest.TestCase):
         finally:
             shutil.rmtree(path.parent, ignore_errors=True)
 
+    def test_benchmark_matrix_warmup(self):
+        cpu = sorted(os.sched_getaffinity(0))[0]
+        completed = subprocess.run(
+            [sys.executable, '-B', str(VM / 'bench.py'),
+             '--scenario', 'boot', '--repeats', '1', '--warmup', '1',
+             '--matrix', '--matrix-cache', 'writeback',
+             '--matrix-cpu', str(cpu), '--timeout', '120',
+             '--lock-timeout', '100'],
+            cwd=VM, capture_output=True, text=True, timeout=300)
+        combined = completed.stdout + completed.stderr
+        if 'another VM boot holds' in combined or 'lock timeout' in combined:
+            self.skipTest('VM lab is busy with another run')
+        self.assertEqual(completed.returncode, 0, combined)
+        path = next(Path(line[7:]) for line in completed.stdout.splitlines()
+                    if line.startswith('bench: '))
+        try:
+            from harness.result_schema import validate_bench
+            data = json.loads(path.read_text())
+            self.assertEqual(validate_bench(data), [])
+            expected = {'writeback': [None, cpu]}
+            variants = {(item['cache'], item['pin_cpu'])
+                        for item in data['variants']}
+            self.assertEqual(variants, {(cache, pin) for cache in expected
+                                        for pin in expected[cache]})
+            self.assertEqual(len(data['warmups']), 2)
+            self.assertEqual(len(data['rows']), 2)
+            self.assertTrue(all(row['verdict'] == 'PASS'
+                                for row in data['warmups'] + data['rows']))
+            self.assertEqual(len(data['summary']), 2)
+            self.assertEqual(len(data['metrics']), 2)
+        finally:
+            shutil.rmtree(path.parent, ignore_errors=True)
+
     def test_benchmark_warmup_and_provenance(self):
         completed = subprocess.run(
             [sys.executable, '-B', str(VM / 'bench.py'),
