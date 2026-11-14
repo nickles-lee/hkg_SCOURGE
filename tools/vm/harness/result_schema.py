@@ -138,6 +138,41 @@ def _check_usb_removal(value, problems: list[str]) -> None:
         problems.append('usb_removal.error must be a string')
 
 
+def _check_tools_manifest(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('tools_manifest must be an object')
+        return
+    if 'ok' in value and not isinstance(value['ok'], bool):
+        problems.append('tools_manifest.ok must be boolean')
+    for key in ('changed', 'stale'):
+        if key in value and not isinstance(value[key], (bool, list)):
+            problems.append(f'tools_manifest.{key} must be boolean or a list')
+    for key in ('state', 'image', 'expected_build_id', 'detail', 'build_id'):
+        if key in value and not isinstance(value[key], str):
+            problems.append(f'tools_manifest.{key} must be a string')
+    for key in ('only_in_image', 'only_in_tree'):
+        if key in value:
+            items = value[key]
+            if (not isinstance(items, list)
+                    or any(not isinstance(item, str) for item in items)):
+                problems.append(f'tools_manifest.{key} must be a list of strings')
+
+
+def _check_compat_pin(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('compat_pin must be an object')
+        return
+    if 'ok' in value and not isinstance(value['ok'], bool):
+        problems.append('compat_pin.ok must be boolean')
+    problems_list = value.get('problems')
+    if (not isinstance(problems_list, list)
+            or any(not isinstance(item, str) for item in problems_list)):
+        problems.append('compat_pin.problems must be a list of strings')
+    for key in ('kernel', 'initramfs', 'version', 'state'):
+        if key in value and not isinstance(value[key], str):
+            problems.append(f'compat_pin.{key} must be a string')
+
+
 def _check_lock(value, problems: list[str]) -> None:
     if not isinstance(value, dict):
         problems.append('lock must be an object')
@@ -369,6 +404,10 @@ def validate_result(result) -> list[str]:
         _check_phase(result['phase'], problems)
     if result.get('audit') is not None:
         _check_audit(result['audit'], problems)
+    if result.get('tools_manifest') is not None:
+        _check_tools_manifest(result['tools_manifest'], problems)
+    if result.get('compat_pin') is not None:
+        _check_compat_pin(result['compat_pin'], problems)
     profile = result.get('profile')
     if not isinstance(profile, dict) or not isinstance(profile.get('name'), str):
         problems.append('profile.name must be a string')

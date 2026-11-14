@@ -227,6 +227,38 @@ class ResultSchemaTests(unittest.TestCase):
                          'failure_bundle.deadline_exceeded'):
             self.assertIn(expected, joined)
 
+    def test_tools_manifest_and_compat_pin(self) -> None:
+        good = valid_result(
+            tools_manifest={'ok': True, 'state': 'manifest',
+                            'image': 'tools.img', 'expected_build_id': 'x',
+                            'detail': 'd', 'build_id': 'b',
+                            'only_in_image': ['a'], 'only_in_tree': [],
+                            'changed': [], 'stale': []},
+            compat_pin={'ok': True, 'problems': [], 'kernel': 'k',
+                        'initramfs': 'i', 'version': 'v', 'state': 'ok'})
+        self.assertEqual(validate_result(good), [])
+
+        bad = valid_result(
+            tools_manifest={'ok': 'yes', 'state': 1, 'image': 1,
+                            'expected_build_id': 1, 'detail': 1,
+                            'build_id': 1, 'only_in_image': 'x',
+                            'only_in_tree': [1], 'changed': 1,
+                            'stale': {}},
+            compat_pin={'ok': 'yes', 'problems': 'x', 'kernel': 1,
+                        'initramfs': 1, 'version': 1, 'state': 1})
+        joined = '\n'.join(validate_result(bad))
+        for expected in ('tools_manifest.ok', 'tools_manifest.state',
+                         'tools_manifest.image',
+                         'tools_manifest.expected_build_id',
+                         'tools_manifest.detail', 'tools_manifest.build_id',
+                         'tools_manifest.only_in_image',
+                         'tools_manifest.only_in_tree',
+                         'tools_manifest.changed', 'tools_manifest.stale',
+                         'compat_pin.ok', 'compat_pin.problems',
+                         'compat_pin.kernel', 'compat_pin.initramfs',
+                         'compat_pin.version', 'compat_pin.state'):
+            self.assertIn(expected, joined)
+
     def test_verdict_rc_consistency(self) -> None:
         cases = [
             (valid_result(verdict='PASS', rc=1), 'PASS requires rc == 0'),
