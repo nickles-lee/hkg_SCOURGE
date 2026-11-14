@@ -40,6 +40,23 @@ class VMIntegrationTests(unittest.TestCase):
         if result.get('qemu_pid'):
             self.assertFalse(Path(f"/proc/{result['qemu_pid']}").exists())
 
+    def test_failure_bundle_real_fail(self):
+        process, result = self.run_guest(
+            '--cmd', 'echo BUNDLE_MARKER; exit 7', '--timeout', '60')
+        self.assertEqual(process.returncode, 7)
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertEqual(result['guest_rc'], 7)
+        bundle = result.get('failure_bundle') or {}
+        self.assertTrue(bundle.get('path'))
+        root = Path(bundle['path'])
+        self.assertTrue((root / 'summary.md').is_file())
+        self.assertTrue((root / 'serial-tail.log').is_file())
+        self.assertIn('dmesg', bundle.get('sections', {}))
+        summary = (root / 'summary.md').read_text()
+        self.assertIn('Failure bundle', summary)
+        self.assertIn('BUNDLE_MARKER', summary)
+        self.assert_cleaned(result)
+
     def test_guest_exit_7_propagates(self):
         process, result = self.run_guest('--cmd', 'exit 7', '--timeout', '60')
         self.assertEqual(process.returncode, 7)

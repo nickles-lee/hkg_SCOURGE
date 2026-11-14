@@ -503,7 +503,7 @@ equivalence.
 | `gdbstub connect failed after N attempts` | the stub never serviced `runs/<id>/gdb.sock`; inspect the QEMU process/serial log and retry |
 | `guest kernel panic while waiting for ...` | boot readiness fails fast; inspect `serial.log` rather than waiting for the run timeout |
 | QMP screendump failure | result is FAIL with `screenshot.qmp_error`; QEMU/overlays are cleaned and the CLI exit code follows the final verdict |
-| failed run bundle seems slow | bundle collection is capped at 45 s total; serial tails are written even if the shell is wedged |
+| failed run bundle seems slow | bundle collection is capped at 45 s total; guest-output and serial tails are written even if the shell is wedged |
 | flat `entropy-ready` FAIL | known issue; run with `--storage split` or read `known_issue` |
 | `updater-launch` timeout | use `--timeout 540` or `600`; the scenario waits for a log line |
 | `update-graphics` FAIL | known Qt shutdown hang; see the scenario `known_issue` |

@@ -702,5 +702,9 @@ items beyond that.
 - **2026-11-14 — daemon corrupt-state recovery**: corrupted overlay fails
   before QEMU; `--reset` rebuilds and starts cleanly. Real run PASS (14.6 s).
   305 tests (36 skipped); 106 VM commits.
+- **2026-11-14 — real failure-bundle integration**: guest exit 7 produces a
+  bundle with summary/dmesg/serial tail and cleanup; summary now includes a
+  guest-output tail. Real run PASS (9.8 s). 306 tests (37 skipped); 107 VM
+  commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

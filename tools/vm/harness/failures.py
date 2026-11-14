@@ -124,7 +124,10 @@ def collect_failure_bundle(ser, run_dir: Path, result: dict, timeout: float = 20
         + "\n"
         + "\n## Failure-word excerpts\n\n"
         + ("\n".join(f"- {line}" for line in excerpts) if excerpts else "- none")
-        + "\n\n## Serial tail\n\n```\n"
+        + "\n\n## Guest output tail\n\n```\n"
+        + _tail(run_dir / "guest-output.log", 80)
+        + "```\n"
+        + "\n## Serial tail\n\n```\n"
         + _tail(run_dir / "serial.log", 160)
         + "```\n"
     )
