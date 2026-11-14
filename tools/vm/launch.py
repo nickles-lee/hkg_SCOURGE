@@ -63,6 +63,7 @@ from harness.visual import baseline as visual_baseline
 from harness.visual import compare as visual_compare
 from harness.visual import list_baselines
 from harness.results import evaluate, evaluate_systemd_transition, phase_summary
+from harness.scenarios import scenario_state
 from harness.storage import VOLUMES, cleanup_storage, create_storage, mount_script, parse_sizes
 from harness.tools import check_tools
 
@@ -1392,6 +1393,8 @@ def doctor(verify_images: bool = False, tools: Path | None = None,
     check("free_disk_gb", usage.free > 10 * 1024 ** 3,
           round(usage.free / 1024 ** 3, 1))
     note("runs", runs_stats(VM))
+    scenarios = scenario_state(VM)
+    check("scenarios", scenarios["ok"], scenarios)
 
     state = compat_state(VM)
     if graphics:
@@ -1414,6 +1417,8 @@ def doctor(verify_images: bool = False, tools: Path | None = None,
         actions.append("stop the running vm-lab QEMU processes before a managed run")
     if checks.get("tools_manifest", {}).get("ok") is False:
         actions.append("rebuild the tools image: sh build_tools.sh tools.$(date +%Y%m%d).img")
+    if checks.get("scenarios", {}).get("ok") is False:
+        actions.append("fix scenario JSON contract problems reported by doctor")
     if graphics:
         if checks.get("compat_initramfs", {}).get("ok") is False:
             actions.append("build the compat initramfs: sh compat/build-initramfs.sh")

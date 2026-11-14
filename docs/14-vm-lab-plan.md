@@ -607,5 +607,9 @@ items beyond that.
   legacy fallbacks and an empty-comparison failure. `launch.py run --dry-run`
   prints the QEMU argv and records `DRY-RUN` without booting or locking.
   Bench adds `--warmup N` and `source` provenance. 268 tests.
+- **2026-11-14 — scenario-contract validation**: `harness/scenarios.py`
+  validates all 25 scenario contracts (checks, requirements, modes,
+  blockers, storage, probes, transitions) and doctor reports a `scenarios`
+  check. 272 tests.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

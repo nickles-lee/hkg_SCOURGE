@@ -27,7 +27,8 @@ for the limits.
 - `fakeroot`, `mkfs.ext4`, `e2fsck` for image/tools/storage builds.
 - Your own decrypted rootfs at `rootfs.img` and the vendor `bzImage` symlink;
   see the SCOURGE stage-1 flow. Never commit those images.
-- `python3 -B launch.py doctor --graphics` should be green before booting.
+- `python3 -B launch.py doctor --graphics` should be green before booting;
+  it also validates every scenario JSON contract (`scenarios` check).
 
 ## Build basics
 
