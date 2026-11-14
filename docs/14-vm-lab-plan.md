@@ -631,5 +631,9 @@ items beyond that.
   generated benchmark document and legacy compatibility; `bench.py` writes
   `schema_version: 1`, validates after writing, and rejects malformed
   comparisons with rc=2. 283 tests.
+- **2026-11-14 — end-to-end benchmark comparison test**: two real boots,
+  self/permissive comparisons at rc=0 and a mean-doubled candidate at
+  rc=1/REGRESSED; mutates summary+metrics and cleans bench dirs. Real run
+  PASS (12.4 s). 284 tests (16 skipped).
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

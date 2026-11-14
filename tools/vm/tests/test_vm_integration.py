@@ -162,6 +162,60 @@ class VMIntegrationTests(unittest.TestCase):
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
 
+    def test_benchmark_comparison_end_to_end(self):
+        def bench():
+            completed = subprocess.run(
+                [sys.executable, '-B', str(VM / 'bench.py'),
+                 '--scenario', 'boot', '--repeats', '1',
+                 '--timeout', '120', '--lock-timeout', '100'],
+                cwd=VM, capture_output=True, text=True, timeout=240)
+            combined = completed.stdout + completed.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(completed.returncode, 0, combined)
+            path = next(Path(line[7:]) for line in completed.stdout.splitlines()
+                        if line.startswith('bench: '))
+            self.assertTrue(path.is_file())
+            return path
+
+        def compare(left, right, threshold):
+            completed = subprocess.run(
+                [sys.executable, '-B', str(VM / 'bench.py'), '--compare',
+                 str(left), str(right), '--threshold', str(threshold)],
+                cwd=VM, capture_output=True, text=True, timeout=60)
+            self.assertIn(completed.returncode, (0, 1), completed.stderr)
+            return completed.returncode, json.loads(completed.stdout)
+
+        first = bench()
+        second = bench()
+        mutated = second.with_name('mutated-bench.json')
+        try:
+            rc, report = compare(first, first, 0.0)
+            self.assertEqual(rc, 0)
+            self.assertTrue(report['ok'])
+            self.assertTrue(all(row['status'] == 'SAME' for row in report['rows']))
+
+            rc, report = compare(first, second, 10.0)
+            self.assertEqual(rc, 0)
+            self.assertTrue(report['ok'])
+
+            data = json.loads(second.read_text())
+            for summary in data['summary'].values():
+                summary['mean'] = round(summary['mean'] * 2, 3)
+            for metrics in (data.get('metrics') or {}).values():
+                for summary in metrics.values():
+                    summary['mean'] = round(summary['mean'] * 2, 3)
+            mutated.write_text(json.dumps(data, indent=2) + '\n')
+            rc, report = compare(first, mutated, 0.05)
+            self.assertEqual(rc, 1)
+            self.assertFalse(report['ok'])
+            self.assertTrue(any(row['status'] == 'REGRESSED'
+                                for row in report['rows']))
+        finally:
+            mutated.unlink(missing_ok=True)
+            for path in (first, second):
+                shutil.rmtree(path.parent, ignore_errors=True)
+
     def test_qmp_screenshot_visual_regression(self):
         try:
             from PIL import Image

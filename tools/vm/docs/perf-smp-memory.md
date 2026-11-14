@@ -89,7 +89,9 @@ python3 -B bench.py --compare runs/bench-<base>/bench.json \
 ```
 
 The comparison marks relative mean growth as `REGRESSED` and exits 1, and
-rejects malformed benchmark documents with exit 2. New `bench.json` files
+rejects malformed benchmark documents with exit 2. The opt-in VM suite also
+runs two real boot benchmarks and exercises self/permissive/forced-regression
+comparisons end to end. New `bench.json` files
 carry `schema_version: 1` and are schema-validated. `bench.json` also records
 `metrics` for boot, readiness and scenario time;
 pass `--metric readiness` or `--metric scenario` to compare those. `--matrix` compares cache
