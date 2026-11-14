@@ -77,8 +77,10 @@ python3 -B bench.py --scenario boot --repeats 3 --kernel compat
 ```
 
 It serializes on the global boot lock, writes
-`runs/bench-<id>/bench.json` (`run`, `mean`, `median`, `min`, `max`), retains
-each child log, and exits nonzero if any run fails. Compare a baseline and a
+`runs/bench-<id>/bench.json` (`run`, `source`, `mean`, `median`, `min`, `max`),
+retains each child log, and exits nonzero if any run fails. `--warmup N`
+discards N unrecorded boots per scenario/variant first; warmup verdicts are
+retained and must PASS. Compare a baseline and a
 candidate with:
 
 ```sh

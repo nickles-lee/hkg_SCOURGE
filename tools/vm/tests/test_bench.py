@@ -12,7 +12,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from bench import build_argv, compare_bench, result_path, summarize, variants
+from bench import (build_argv, compare_bench, result_path, source_state,
+                   summarize, variants)
 from harness.config import load_scenario
 
 VM = Path(__file__).resolve().parents[1]
@@ -84,6 +85,38 @@ class BenchTests(unittest.TestCase):
             self.assertEqual(result_path(log), Path('/tmp/example-run/result.json'))
             log.write_text('no result\n')
             self.assertIsNone(result_path(log))
+
+    def test_source_state_has_revision(self) -> None:
+        state = source_state()
+        self.assertIsInstance(state['git_head'], str)
+        self.assertTrue(state['git_head'])
+        self.assertIsInstance(state['dirty'], bool)
+
+    def test_warmup_is_recorded_but_not_measured(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, "-B", str(VM / "bench.py"),
+             "--scenario", "stock-update-stage", "--repeats", "1",
+             "--warmup", "1", "--usb", "/dev/null", "--tools", "/dev/null",
+             "--lock-timeout", "10"],
+            cwd=VM, capture_output=True, text=True, timeout=60)
+        combined = completed.stdout + completed.stderr
+        if "another VM boot holds" in combined or "lock timeout" in combined:
+            self.skipTest("VM lab is busy with another run")
+        self.assertEqual(completed.returncode, 1, combined)
+        line = next(line for line in completed.stdout.splitlines()
+                    if line.startswith("bench: "))
+        bench_path = Path(line[7:])
+        try:
+            bench = json.loads(bench_path.read_text())
+            self.assertEqual(bench["warmup"], 1)
+            self.assertEqual(len(bench["warmups"]), 1)
+            self.assertEqual(len(bench["rows"]), 1)
+            self.assertEqual(bench["warmups"][0]["verdict"], "BLOCKED")
+            self.assertEqual(bench["rows"][0]["verdict"], "BLOCKED")
+            self.assertFalse(bench["ok"])
+            self.assertIn("source", bench)
+        finally:
+            shutil.rmtree(bench_path.parent, ignore_errors=True)
 
     def test_compare_bench_statuses(self) -> None:
         base = {'summary': {'a': {'mean': 10.0}, 'b': {'mean': 20.0},
@@ -188,6 +221,7 @@ class BenchTests(unittest.TestCase):
         self.assertIn('--kernel', completed.stdout)
         self.assertIn('--compare', completed.stdout)
         self.assertIn('--metric', completed.stdout)
+        self.assertIn('--warmup', completed.stdout)
 
 
 if __name__ == '__main__':

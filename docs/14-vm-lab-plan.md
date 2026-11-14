@@ -606,6 +606,6 @@ items beyond that.
   readiness and scenario metrics; `--compare --metric` selects one, with
   legacy fallbacks and an empty-comparison failure. `launch.py run --dry-run`
   prints the QEMU argv and records `DRY-RUN` without booting or locking.
-  266 tests.
+  Bench adds `--warmup N` and `source` provenance. 268 tests.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

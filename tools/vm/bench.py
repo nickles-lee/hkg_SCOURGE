@@ -38,6 +38,20 @@ def summarize(values: list[float]) -> dict:
     }
 
 
+def source_state(root: Path = VM) -> dict:
+    """Record the harness revision/dirty state for benchmark provenance."""
+    try:
+        head = subprocess.run(
+            ['git', '-C', str(root), 'rev-parse', 'HEAD'],
+            capture_output=True, text=True, check=True).stdout.strip()
+        status = subprocess.run(
+            ['git', '-C', str(root), 'status', '--porcelain', '--', '.'],
+            capture_output=True, text=True, check=True).stdout
+        return {'git_head': head, 'dirty': bool(status.strip())}
+    except (OSError, subprocess.CalledProcessError):
+        return {'git_head': None, 'dirty': None}
+
+
 def variants(args) -> list[tuple[str | None, int | None]]:
     """Cache/pinning combinations for one benchmark invocation."""
     if not args.matrix:
@@ -143,6 +157,8 @@ def compare_bench(baseline: dict, current: dict,
         'metric': metric,
         'baseline': baseline.get('run') or baseline.get('bench_id'),
         'current': current.get('run') or current.get('bench_id'),
+        'baseline_source': baseline.get('source'),
+        'current_source': current.get('source'),
         'rows': rows,
     }
     if not rows:
@@ -173,6 +189,8 @@ def main() -> int:
     parser.add_argument('--kernel', choices=('vendor', 'compat'),
                         default='vendor')
     parser.add_argument('--repeats', type=int, default=3)
+    parser.add_argument('--warmup', type=int, default=0,
+                        help='unrecorded warmup runs per scenario/variant')
     parser.add_argument('--timeout', type=float, default=120)
     parser.add_argument('--lock-timeout', type=float, default=600)
     parser.add_argument('--storage', choices=('flat', 'split'), default='flat')
@@ -213,6 +231,8 @@ def main() -> int:
         return 0 if report['ok'] else 1
     if args.repeats <= 0 or not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error('--repeats and --timeout must be finite and positive')
+    if args.warmup < 0:
+        parser.error('--warmup must be non-negative')
     if (args.matrix_cache or args.matrix_cpu) and not args.matrix:
         parser.error('--matrix-cache/--matrix-cpu require --matrix')
     if args.matrix and (args.cache is not None or args.pin_cpu is not None):
@@ -232,8 +252,36 @@ def main() -> int:
             directory = VM / 'runs' / f'bench-{time.time_ns()}'
             directory.mkdir(parents=True)
             rows = []
+            warmups = []
             for scenario in scenarios:
                 for cache, pin_cpu in variants(args):
+                    for warmup_index in range(1, args.warmup + 1):
+                        suffix = cache or 'default'
+                        if pin_cpu is not None:
+                            suffix += f'-cpu{pin_cpu}'
+                        log = directory / (f"{scenario['name']}-{suffix}-"
+                                           f"warmup{warmup_index}.log")
+                        with log.open('w') as output:
+                            completed = subprocess.run(
+                                build_argv(args, scenario, cache=cache,
+                                           pin_cpu=pin_cpu),
+                                stdout=output, stderr=subprocess.STDOUT)
+                        path = result_path(log)
+                        detail = (json.loads(path.read_text())
+                                  if path is not None and path.is_file() else {})
+                        warmups.append({
+                            'scenario': scenario['name'],
+                            'warmup': warmup_index,
+                            'cache': cache,
+                            'pin_cpu': pin_cpu,
+                            'verdict': detail.get('verdict', 'FAIL'),
+                            'rc': completed.returncode,
+                            'log': str(log),
+                        })
+                        print(f"{scenario['name']} [{suffix}] warmup "
+                              f"{warmup_index}/{args.warmup}: "
+                              f"{warmups[-1]['verdict']} rc={completed.returncode}",
+                              flush=True)
                     for iteration in range(1, args.repeats + 1):
                         suffix = cache or 'default'
                         if pin_cpu is not None:
@@ -279,7 +327,10 @@ def main() -> int:
             summary = {key: values['boot_seconds'] for key, values in metrics.items()}
             bench = {
                 'run': directory.name,
-                'ok': all(row['verdict'] == 'PASS' for row in rows),
+                'source': source_state(),
+                'ok': (all(row['verdict'] == 'PASS' for row in rows)
+                       and all(row['verdict'] == 'PASS' for row in warmups)),
+                'warmup': args.warmup,
                 'lock': lock_info,
                 'repeats': args.repeats,
                 'scenarios': names,
@@ -287,6 +338,7 @@ def main() -> int:
                              for cache, pin in variants(args)],
                 'summary': summary,
                 'metrics': metrics,
+                'warmups': warmups,
                 'rows': rows,
             }
             (directory / 'bench.json').write_text(json.dumps(bench, indent=2) + '\n')
