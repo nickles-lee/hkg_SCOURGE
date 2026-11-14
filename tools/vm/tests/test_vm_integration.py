@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -161,6 +162,47 @@ class VMIntegrationTests(unittest.TestCase):
                     [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', 'stop',
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
+
+    def test_daemon_screenshot_artifact(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-shot-') as tmp:
+            root = Path(tmp)
+            daemon_dir = root / 'daemon'
+            output = root / 'daemon-shot.png'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=180)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                captured = cli('screenshot', '--daemon-dir', str(daemon_dir),
+                               '--output', str(output))
+                self.assertEqual(captured.returncode, 0,
+                                 captured.stdout + captured.stderr)
+                response = json.loads(captured.stdout)
+                self.assertTrue(response['ok'])
+                meta = response['screenshot']
+                self.assertGreater(meta['width'], 0)
+                self.assertGreater(meta['height'], 0)
+                self.assertGreater(meta['size'], 0)
+                self.assertEqual(Path(response['copied_to']), output)
+                data = output.read_bytes()
+                self.assertEqual(data[:8], b'\x89PNG\r\n\x1a\n')
+                width, height = struct.unpack('>II', data[16:24])
+                self.assertEqual((width, height), (meta['width'], meta['height']))
+                self.assertEqual(len(data), meta['size'])
+                self.assertFalse(Path(meta['path']).exists())
+                self.assertEqual(list(daemon_dir.glob('screenshot-*.png')), [])
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
 
     def test_qmp_screendump_failure_diagnostics(self):
         process = subprocess.Popen(

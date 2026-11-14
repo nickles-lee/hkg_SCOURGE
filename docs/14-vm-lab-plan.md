@@ -645,5 +645,8 @@ items beyond that.
   unlinks the QMP socket before capture, requiring FAIL/qmp_error/cleanup.
   Fixed `run()` to return the rc after `finally` updates, so CLI exit codes
   now match result.json. 287 tests (19 skipped).
+- **2026-11-14 — daemon screenshot artifact test**: capture through the
+  daemon, validate PNG metadata/dimensions/size and copy cleanup; real run
+  PASS (9.3 s). Cumulative 90 VM commits; 288 tests (20 skipped).
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
