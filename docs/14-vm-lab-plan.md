@@ -718,5 +718,8 @@ items beyond that.
 - **2026-11-14 — one-shot state persistence/reset**: marker survives two
   runs and disappears after `--reset`. Real run PASS (18.8 s). 310 tests
   (41 skipped); 111 VM commits.
+- **2026-11-14 — one-shot state-lock contention**: held state.lock fails a
+  run before QEMU; release allows clean run. Real run PASS (6.2 s). 311 tests
+  (42 skipped); 112 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

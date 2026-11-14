@@ -40,6 +40,52 @@ class VMIntegrationTests(unittest.TestCase):
         if result.get('qemu_pid'):
             self.assertFalse(Path(f"/proc/{result['qemu_pid']}").exists())
 
+    def test_run_state_lock_contention(self):
+        with tempfile.TemporaryDirectory(prefix='vm-run-state-lock-') as tmp:
+            state = Path(tmp) / 'state'
+            state.mkdir()
+            holder = open(state / 'state.lock', 'w')
+            fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def run(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'run',
+                     '--state', str(state), '--timeout', '60', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=180)
+
+            try:
+                blocked = run('--cmd', 'true')
+                combined = blocked.stdout + blocked.stderr
+                self.assertNotEqual(blocked.returncode, 0, combined)
+                self.assertIn('state is already in use', combined)
+                directory = next(Path(line[5:].strip())
+                                 for line in blocked.stdout.splitlines()
+                                 if line.startswith('run: '))
+                result = json.loads((directory / 'result.json').read_text())
+                self.assertEqual(result['verdict'], 'FAIL')
+                self.assertIn('state is already in use', result.get('error') or '')
+                self.assertNotIn('qemu_pid', result)
+
+                fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+                holder.close()
+
+                clean = run('--cmd', 'echo STATE_LOCK_RUN_OK')
+                combined = clean.stdout + clean.stderr
+                if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                    self.skipTest('VM lab is busy with another run')
+                self.assertEqual(clean.returncode, 0, combined)
+                directory = next(Path(line[5:].strip())
+                                 for line in clean.stdout.splitlines()
+                                 if line.startswith('run: '))
+                self.assertIn('STATE_LOCK_RUN_OK',
+                              (directory / 'guest-output.log').read_text())
+            finally:
+                try:
+                    fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+                except (OSError, ValueError):
+                    pass
+                holder.close()
+
     def test_run_state_persistence_and_reset(self):
         with tempfile.TemporaryDirectory(prefix='vm-run-state-') as tmp:
             state = Path(tmp) / 'state'
