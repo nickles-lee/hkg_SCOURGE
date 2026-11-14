@@ -155,6 +155,27 @@ case "$STATE" in
 esac
 echo 'HARNESS_CHECK vehicle-range-guard PASS'
 
+# The simulator retains at most 16 distinct canids. Fill the table, then
+# require the overflow write to be dropped (logged) without erroring.
+i=0
+while [ "$i" -le 15 ]; do
+    byte=$(printf '%02x' "$i")
+    fixed /tmp/vehicle-limit.out array:byte:0x02,0x"$byte" int32:0 int32:8 int32:1 \
+        || fail 'vehicle-frame-limit-write'
+    i=$((i + 1))
+done
+grep -q 'TWEAKS_VEHICLE_WRITE_IGNORED reason=frame-limit' /tmp/can-sim.log \
+    || fail 'vehicle-frame-limit'
+STATE=$(state_line frame-limit) || fail 'vehicle-frame-limit-state-read'
+case "$STATE" in
+    *'speed=300 gear=3 ignition=2 battery=100'*) ;;
+    *)
+        echo "unexpected state after frame limit: $STATE"
+        exit 1
+        ;;
+esac
+echo 'HARNESS_CHECK vehicle-frame-limit PASS'
+
 # Fail closed: an unknown method must return a D-Bus error, never succeed.
 if /usr/bin/dbus-send --system --print-reply --reply-timeout=8000 \
     --dest=com.lge.car.micom /Vehicle     org.scourge.vehicle.State.Bogus >/tmp/vehicle-unknown.out 2>&1; then
