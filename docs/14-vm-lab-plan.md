@@ -785,5 +785,7 @@ items beyond that.
 - **2026-11-14 — vehicle-state fail-closed**: unknown D-Bus method must
   return `UnknownMethod`; real scenario PASS on eight checks; 332 tests;
   133 VM commits.
+- **2026-11-14 — can-smoke fail-closed**: unknown CAN method must return
+  `UnknownMethod`; real run PASS on five checks; 332 tests; 134 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

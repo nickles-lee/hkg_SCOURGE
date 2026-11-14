@@ -71,6 +71,17 @@ grep -q 'TWEAKS_CAN_SIM_ACK member=SetCANMicomRecv' /tmp/can-sim.log || fail 'ca
 echo 'HARNESS_CHECK can-ready PASS'
 echo 'HARNESS_CHECK can-fixed PASS'
 echo 'HARNESS_CHECK can-bulk PASS'
+
+# Fail closed: unknown CAN methods must return a D-Bus error, never success.
+UNKNOWN_OUT=/tmp/can-unknown.out
+if /usr/bin/dbus-send --system --print-reply --reply-timeout=8000 \
+    --dest=com.lge.car.micom /Can com.lge.car.micom.can.Bogus \
+    >"$UNKNOWN_OUT" 2>&1; then
+    fail 'can-unknown-method-accepted'
+fi
+grep -q 'UnknownMethod' "$UNKNOWN_OUT" || fail 'can-unknown-method'
+echo 'HARNESS_CHECK can-unknown-method PASS'
+
 echo '=== CAN SIM LOG ==='
 tail -80 /tmp/can-sim.log
 echo 'HARNESS_CHECK can-smoke PASS'

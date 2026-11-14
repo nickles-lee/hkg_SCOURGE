@@ -14,7 +14,8 @@ class CanSmokeTests(unittest.TestCase):
         scenario = load_scenario('can-smoke')
         self.assertEqual(scenario['requires'], ['payload'])
         self.assertEqual(set(scenario['checks']),
-                         {'can-ready', 'can-fixed', 'can-bulk', 'can-smoke'})
+                         {'can-ready', 'can-fixed', 'can-bulk',
+                          'can-unknown-method', 'can-smoke'})
         self.assertNotIn('requires_mode', scenario)
 
     def test_command_calls_both_methods_and_asserts_markers(self) -> None:
@@ -23,12 +24,15 @@ class CanSmokeTests(unittest.TestCase):
         self.assertIn('SetCANFixedMicomRecv', command)
         self.assertIn('SetCANMicomRecv', command)
         self.assertIn('TWEAKS_CAN_SIM_ACK', command)
+        self.assertIn('com.lge.car.micom.can.Bogus', command)
+        self.assertIn('can-unknown-method', command)
 
     def test_checks(self) -> None:
         scenario = load_scenario('can-smoke')
         text = ('HARNESS_CHECK can-ready PASS\n'
                 'HARNESS_CHECK can-fixed PASS\n'
                 'HARNESS_CHECK can-bulk PASS\n'
+                'HARNESS_CHECK can-unknown-method PASS\n'
                 'HARNESS_CHECK can-smoke PASS\n')
         self.assertEqual(evaluate(text, 0, scenario)['verdict'], 'PASS')
         self.assertEqual(evaluate(text.replace('can-bulk PASS', 'can-bulk FAIL'),

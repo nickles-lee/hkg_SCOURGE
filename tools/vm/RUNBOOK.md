@@ -302,8 +302,9 @@ python3 -B launch.py run --profile research --scenario can-smoke \
 Starts the system bus and the synthetic `tweaks-micom-can-sim`, then calls
 `SetCANFixedMicomRecv` (canid 06 3f, start 26, size 2, data 2) and
 `SetCANMicomRecv` (06 3f). Pass requires READY, both CALL/ACK markers and
-method returns. It is an interface/contract test, not real CAN timing or
-vehicle-state fidelity.
+method returns, and requires an unknown CAN method (`Bogus`) to fail with a
+D-Bus `UnknownMethod` error. It is an interface/contract test, not real CAN
+timing or vehicle-state fidelity.
 
 ## Vehicle-state model (lab-defined)
 

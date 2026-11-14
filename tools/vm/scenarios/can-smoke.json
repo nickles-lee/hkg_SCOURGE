@@ -1,1 +1,1 @@
-{"name":"can-smoke","description":"Synthetic micom CAN interface: simulator READY/CALL/ACK for fixed and bulk calls; not real CAN timing or vehicle-state fidelity.","requires":["payload"],"checks":["can-ready","can-fixed","can-bulk","can-smoke"],"blockers":{}}
+{"name":"can-smoke","description":"Synthetic micom CAN interface: simulator READY/CALL/ACK for fixed and bulk calls; not real CAN timing or vehicle-state fidelity.","requires":["payload"],"checks":["can-ready","can-fixed","can-bulk","can-unknown-method","can-smoke"],"blockers":{}}
