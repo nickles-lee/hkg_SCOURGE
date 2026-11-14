@@ -927,5 +927,7 @@ items beyond that.
   391 tests; 196 VM commits.
 - **2026-11-14 — list limit validation**: negative limits rejected; zero
   returns empty. 392 tests; 197 VM commits.
+- **2026-11-14 — screenshot schema**: screenshot/artifact/QMP evidence
+  validated. 393 tests; 198 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

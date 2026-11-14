@@ -135,6 +135,36 @@ class ResultSchemaTests(unittest.TestCase):
                          'usb_removal.qmp', 'usb_removal.error'):
             self.assertIn(expected, joined)
 
+    def test_screenshot_evidence(self) -> None:
+        good = valid_result(screenshot={
+            'requested': True, 'ok': True,
+            'artifacts': [{'name': 'x.png', 'path': '/x.png', 'size': 1,
+                           'sha256': 'a' * 64}],
+            'qmp': {'path': '/q.png', 'size': 2, 'sha256': 'b' * 64,
+                    'width': 10, 'height': 20},
+            'qmp_error': None, 'qmp_socket': '/q.sock',
+            'qmp_pixels': {'count': 1, 'bbox': [0, 0, 1, 1],
+                           'width': 10, 'height': 20}})
+        self.assertEqual(validate_result(good), [])
+
+        bad = valid_result(screenshot={
+            'requested': 'yes', 'ok': 1, 'artifacts': [{'name': '',
+            'path': '', 'size': -1, 'sha256': 1}],
+            'qmp': {'path': '', 'size': -1, 'sha256': 1,
+                    'width': 0, 'height': 'x'},
+            'qmp_error': 1, 'qmp_socket': 1,
+            'qmp_pixels': {'count': -1, 'bbox': [0, 0], 'width': 0,
+                           'height': 'x'}})
+        joined = '\n'.join(validate_result(bad))
+        for expected in ('screenshot.requested', 'screenshot.ok',
+                         'screenshot.artifacts[0].name',
+                         'screenshot.artifacts[0].size',
+                         'screenshot.qmp.path', 'screenshot.qmp.size',
+                         'screenshot.qmp.width', 'screenshot.qmp_error',
+                         'screenshot.qmp_socket', 'screenshot.qmp_pixels.count',
+                         'screenshot.qmp_pixels.bbox'):
+            self.assertIn(expected, joined)
+
     def test_verdict_rc_consistency(self) -> None:
         cases = [
             (valid_result(verdict='PASS', rc=1), 'PASS requires rc == 0'),

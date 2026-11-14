@@ -138,6 +138,64 @@ def _check_usb_removal(value, problems: list[str]) -> None:
         problems.append('usb_removal.error must be a string')
 
 
+def _check_screenshot(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('screenshot must be an object')
+        return
+    if 'requested' in value and not isinstance(value['requested'], bool):
+        problems.append('screenshot.requested must be boolean')
+    if 'ok' in value and value['ok'] is not None and not isinstance(value['ok'], bool):
+        problems.append('screenshot.ok must be boolean or null')
+    artifacts = value.get('artifacts', [])
+    if not isinstance(artifacts, list):
+        problems.append('screenshot.artifacts must be a list')
+    else:
+        for index, artifact in enumerate(artifacts):
+            prefix = f'screenshot.artifacts[{index}]'
+            if not isinstance(artifact, dict):
+                problems.append(f'{prefix} must be an object')
+                continue
+            for key in ('name', 'path', 'sha256'):
+                if not isinstance(artifact.get(key), str) or not artifact[key]:
+                    problems.append(f'{prefix}.{key} must be a non-empty string')
+            if not _is_int(artifact.get('size')) or artifact['size'] < 0:
+                problems.append(f'{prefix}.size must be a non-negative integer')
+    qmp = value.get('qmp')
+    if qmp is not None:
+        if not isinstance(qmp, dict):
+            problems.append('screenshot.qmp must be an object or null')
+        else:
+            for key in ('path', 'sha256'):
+                if not isinstance(qmp.get(key), str) or not qmp[key]:
+                    problems.append(f'screenshot.qmp.{key} must be a non-empty string')
+            if not _is_int(qmp.get('size')) or qmp['size'] < 0:
+                problems.append('screenshot.qmp.size must be a non-negative integer')
+            for key in ('width', 'height'):
+                if not _is_int(qmp.get(key)) or qmp[key] <= 0:
+                    problems.append(f'screenshot.qmp.{key} must be a positive integer')
+    for key in ('qmp_error', 'error'):
+        if key in value and value[key] is not None and not isinstance(value[key], str):
+            problems.append(f'screenshot.{key} must be a string or null')
+    for key in ('qmp_socket', 'serial'):
+        if key in value and not isinstance(value[key], str):
+            problems.append(f'screenshot.{key} must be a string')
+    pixels = value.get('qmp_pixels')
+    if pixels is not None:
+        if not isinstance(pixels, dict):
+            problems.append('screenshot.qmp_pixels must be an object or null')
+        else:
+            if not _is_int(pixels.get('count')) or pixels['count'] < 0:
+                problems.append('screenshot.qmp_pixels.count must be a non-negative integer')
+            bbox = pixels.get('bbox')
+            if bbox is not None and (
+                    not isinstance(bbox, list) or len(bbox) != 4
+                    or any(not _is_int(item) for item in bbox)):
+                problems.append('screenshot.qmp_pixels.bbox must be four integers or null')
+            for key in ('width', 'height'):
+                if not _is_int(pixels.get(key)) or pixels[key] <= 0:
+                    problems.append(f'screenshot.qmp_pixels.{key} must be positive')
+
+
 def _check_sources(value, problems: list[str]) -> None:
     if not isinstance(value, dict):
         problems.append('harness_sources must be an object')
@@ -202,6 +260,8 @@ def validate_result(result) -> list[str]:
         _check_power_loss(result['power_loss'], problems)
     if result.get('usb_removal') is not None:
         _check_usb_removal(result['usb_removal'], problems)
+    if result.get('screenshot') is not None:
+        _check_screenshot(result['screenshot'], problems)
     profile = result.get('profile')
     if not isinstance(profile, dict) or not isinstance(profile.get('name'), str):
         problems.append('profile.name must be a string')
