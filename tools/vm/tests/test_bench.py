@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -13,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from bench import (build_argv, compare_bench, result_path, source_state,
-                   summarize, variants)
+                   summarize, validate_matrix, variants)
 from harness.result_schema import validate_bench
 from harness.config import load_scenario
 
@@ -82,6 +83,23 @@ class BenchTests(unittest.TestCase):
             [('directsync', None), ('directsync', 0), ('directsync', 1)])
         self.assertEqual(variants(args(cache='unsafe', pin_cpu=2)),
                          [('unsafe', 2)])
+
+    def test_validate_matrix_rejects_unavailable_cpu(self) -> None:
+        allowed = os.sched_getaffinity(0)
+        missing = max(allowed) + 1
+        while missing in allowed:
+            missing += 1
+        with self.assertRaisesRegex(ValueError, 'matrix cpu .* not available'):
+            validate_matrix(args(matrix=True, matrix_cpu=[missing]))
+        validate_matrix(args(matrix=True, matrix_cpu=[sorted(allowed)[0]]))
+        validate_matrix(args())
+
+    def test_variants_deduplicate_caches(self) -> None:
+        self.assertEqual(
+            variants(args(matrix=True,
+                          matrix_cache=['writeback', 'writeback'],
+                          matrix_cpu=[0, 0])),
+            [('writeback', None), ('writeback', 0)])
 
     def test_build_argv_cache_pin_override(self) -> None:
         scenario = load_scenario('boot')
@@ -200,6 +218,20 @@ class BenchTests(unittest.TestCase):
         self.assertIn('rows[0].iteration', '\n'.join(validate_bench(bad)))
         bad = bench_doc(summary={'k': {'count': 1, 'mean': 'fast'}})
         self.assertIn('summary', '\n'.join(validate_bench(bad)))
+
+    def test_invalid_matrix_cpu_rejected_before_lock(self) -> None:
+        allowed = os.sched_getaffinity(0)
+        missing = max(allowed) + 1
+        while missing in allowed:
+            missing += 1
+        before = set((VM / 'runs').glob('bench-*'))
+        completed = subprocess.run(
+            [sys.executable, '-B', str(VM / 'bench.py'), '--scenario', 'boot',
+             '--matrix', '--matrix-cpu', str(missing)],
+            cwd=VM, capture_output=True, text=True, check=False)
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        self.assertIn('not available', completed.stderr)
+        self.assertEqual(set((VM / 'runs').glob('bench-*')), before)
 
     def test_compare_cli_rejects_malformed_documents(self) -> None:
         with tempfile.TemporaryDirectory(prefix='vm-bench-bad-') as tmp:

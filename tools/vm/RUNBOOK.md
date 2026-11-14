@@ -261,7 +261,9 @@ pair and asserts warmup/row PASS, source revision and metrics; it also runs a
 compat-kernel benchmark and validates its row/metrics. `--matrix` compares
 `writeback`/`writethrough` by default; `--matrix-cache` and `--matrix-cpu`
 select other combinations, and the unpinned baseline is always included.
-Matrix rows and summary keys are grouped by scenario, cache and pin. The
+Matrix rows and summary keys are grouped by scenario, cache and pin.
+`--matrix-cpu` values are checked against the process affinity mask before
+the boot lock is taken, and duplicate cache/pin values are collapsed. The
 opt-in VM suite runs a real four-cell `writeback`/`writethrough` ×
 unpinned/pinned matrix and asserts variants, row count, summary keys and
 per-cell boot/readiness/scenario metrics.

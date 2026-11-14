@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import statistics
 import subprocess
 import sys
@@ -57,12 +58,23 @@ def variants(args) -> list[tuple[str | None, int | None]]:
     """Cache/pinning combinations for one benchmark invocation."""
     if not args.matrix:
         return [(args.cache, args.pin_cpu)]
-    caches = args.matrix_cache or ['writeback', 'writethrough']
+    caches = list(dict.fromkeys(args.matrix_cache or ['writeback', 'writethrough']))
     pins = [None]
     for cpu in args.matrix_cpu:
         if cpu not in pins:
             pins.append(cpu)
     return [(cache, pin) for cache in caches for pin in pins]
+
+
+def validate_matrix(args) -> None:
+    """Reject unsatisfiable matrix pins before the boot lock is acquired."""
+    if not args.matrix:
+        return
+    allowed = os.sched_getaffinity(0)
+    for cpu in args.matrix_cpu:
+        if cpu not in allowed:
+            raise ValueError(
+                f'matrix cpu {cpu} is not available; allowed: {sorted(allowed)}')
 
 
 def build_argv(args, scenario: dict, cache: str | None = None,
@@ -265,6 +277,7 @@ def main() -> int:
         parser.error('--matrix cannot be combined with --cache/--pin-cpu')
     names = args.scenario or ['boot']
     try:
+        validate_matrix(args)
         scenarios = [load_scenario(name) for name in names]
         parse_sizes(args.storage_size)
         # Validate required inputs and argv before taking the lock.

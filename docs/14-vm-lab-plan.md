@@ -776,5 +776,8 @@ items beyond that.
 - **2026-11-14 — daemon command-log rotation**: `--command-log-max` caps
   and rotates `daemon-commands.log` once; unit+gated coverage at a 256-byte
   cap. 326 tests + 1; 130 VM commits.
+- **2026-11-14 — benchmark matrix validation**: matrix CPUs checked against
+  affinity before the lock; duplicate variants collapsed; invalid CPU exits 2
+  with no bench dir. 331 tests; 131 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
