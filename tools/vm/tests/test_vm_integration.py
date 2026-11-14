@@ -785,6 +785,44 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertEqual(stopped.returncode, 0,
                                  stopped.stdout + stopped.stderr)
 
+    def test_daemon_command_log_rotation(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-logrotate-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=180)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--command-log-max', '256',
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                command = "head -c 400 /dev/zero | tr '\\\\0' X"
+                first = cli('exec', '--daemon-dir', str(daemon_dir),
+                            '--cmd', command)
+                self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+                log = daemon_dir / 'daemon-commands.log'
+                backup = daemon_dir / 'daemon-commands.log.1'
+                self.assertLessEqual(log.stat().st_size, 256)
+                self.assertFalse(backup.exists())
+
+                second = cli('exec', '--daemon-dir', str(daemon_dir),
+                             '--cmd', command)
+                self.assertEqual(second.returncode, 0,
+                                 second.stdout + second.stderr)
+                self.assertTrue(backup.is_file())
+                self.assertLessEqual(log.stat().st_size, 256)
+                self.assertLessEqual(backup.stat().st_size, 256)
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_daemon_qmp_right_click(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-rightclick-') as tmp:
             daemon_dir = Path(tmp) / 'daemon'

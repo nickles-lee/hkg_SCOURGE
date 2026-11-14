@@ -226,7 +226,9 @@ daemon healthy; a subsequent stop/restart in the same directory succeeds. Deleti
 makes `daemon console` fail with "serial log missing" while exec/status
 remain usable. Deleting `config.json` does not block stop; restart recreates
 it and exec works. A corrupt/unwritable command log no longer discards a
-successful exec result; the response records `log_error`. A persistent overlay whose backing does not match the expected
+successful exec result; the response records `log_error`. The command log is
+capped by `daemon start --command-log-max` (default 1 MiB) and rotates once to
+`daemon-commands.log.1`. A persistent overlay whose backing does not match the expected
 image is rejected as a "backing mismatch" before QEMU starts. A corrupted
 overlay fails cleanly without QEMU, and `--reset` rebuilds it for a clean
 start/exec/stop. A stale control socket is detected in about

@@ -773,5 +773,8 @@ items beyond that.
 - **2026-11-14 — QMP right-click coverage**: right-button absolute click
   verified with a live compat daemon. Real run PASS (4.4 s). 326 tests
   (56 skipped); 129 VM commits.
+- **2026-11-14 — daemon command-log rotation**: `--command-log-max` caps
+  and rotates `daemon-commands.log` once; unit+gated coverage at a 256-byte
+  cap. 326 tests + 1; 130 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

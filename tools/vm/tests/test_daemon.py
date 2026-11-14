@@ -89,6 +89,18 @@ class DaemonTests(unittest.TestCase):
         self.assertFalse(daemon.daemon_pid_matches(99999999))
         self.assertFalse(daemon.daemon_pid_matches(None))
 
+    def test_command_log_rotation_cap(self) -> None:
+        path = self.root / 'commands.log'
+        daemon.append_command_log(path, 'a' * 10, 10)
+        self.assertEqual(path.stat().st_size, 10)
+        daemon.append_command_log(path, 'b' * 10, 10)
+        self.assertTrue((self.root / 'commands.log.1').is_file())
+        self.assertEqual(path.stat().st_size, 10)
+        self.assertEqual((self.root / 'commands.log.1').read_bytes(), b'a' * 10)
+        daemon.append_command_log(path, 'c' * 50, 10)
+        self.assertEqual(path.stat().st_size, 10)
+        self.assertEqual(path.read_bytes(), b'c' * 10)
+
     def test_missing_control_socket_fails_fast_when_ready(self) -> None:
         daemon.write_status(self.root, {"state": "ready", "daemon_pid": os.getpid()})
         started = time.monotonic()

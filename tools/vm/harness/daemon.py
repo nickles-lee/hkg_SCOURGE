@@ -20,6 +20,21 @@ from pathlib import Path
 from .governor import LockTimeout, run_lock
 
 DEFAULT_DAEMON_DIR = "runs/daemon"
+DEFAULT_COMMAND_LOG_MAX = 1024 * 1024
+
+
+def append_command_log(path: Path, text: str, max_bytes: int) -> None:
+    """Append a command record, rotating once when the cap is exceeded."""
+    path = Path(path)
+    data = text.encode()
+    if len(data) > max_bytes:
+        data = data[-max_bytes:]
+    if path.exists() and path.stat().st_size + len(data) > max_bytes:
+        backup = path.with_name(path.name + ".1")
+        backup.unlink(missing_ok=True)
+        path.replace(backup)
+    with path.open("ab") as handle:
+        handle.write(data)
 
 
 @contextmanager
@@ -226,6 +241,7 @@ def _serve(config: dict) -> int:
     import launch  # late import avoids a module cycle
 
     daemon_dir = Path(config["daemon_dir"])
+    command_log_max = int(config.get("command_log_max", DEFAULT_COMMAND_LOG_MAX))
     kernel_target = config.get("kernel_target", "vendor")
     status = {"state": "starting", "daemon_pid": os.getpid(), "mode": kernel_target,
               "daemon_dir": str(daemon_dir), "started": time.time()}
@@ -353,8 +369,10 @@ def _serve(config: dict) -> int:
                                 ser, cmd, float(message.get("timeout", 300)))
                         log_error = None
                         try:
-                            with (daemon_dir / "daemon-commands.log").open("a") as log:
-                                log.write(f"=== {time.time()} rc={rc} ===\n{output}\n")
+                            append_command_log(
+                                daemon_dir / "daemon-commands.log",
+                                f"=== {time.time()} rc={rc} ===\n{output}\n",
+                                command_log_max)
                         except OSError as exc:
                             log_error = f"{type(exc).__name__}: {exc}"
                         response = {"ok": True, "output": output, "rc": rc,

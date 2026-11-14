@@ -1591,6 +1591,8 @@ def main() -> int:
     ds.add_argument('--ready-timeout', type=float, default=180)
     ds.add_argument('--lock-timeout', type=float, default=180,
                     help='lock queue wait, capped at --ready-timeout')
+    ds.add_argument('--command-log-max', type=int, default=1024 * 1024,
+                    help='daemon command-log cap in bytes (rotates once)')
     ds.add_argument('--pin-cpu', type=int, default=None, metavar='N',
                     help='pin all QEMU threads to host CPU N (performance experiment)')
     dserve = dsub.add_parser('_serve')
@@ -1717,6 +1719,8 @@ def main() -> int:
                     validate_pin_cpu(args.pin_cpu)
                 except ValueError as exc:
                     ap.error(str(exc))
+            if args.command_log_max <= 0:
+                ap.error('--command-log-max must be positive')
             if args.kernel == 'compat':
                 pin = verify_kernel_pin()
                 if not pin['ok']:
@@ -1753,6 +1757,7 @@ def main() -> int:
                 'cache': args.cache,
                 'ready_timeout': args.ready_timeout,
                 'lock_timeout': args.lock_timeout,
+                'command_log_max': args.command_log_max,
                 'pin_cpu': args.pin_cpu,
             }
             try:
