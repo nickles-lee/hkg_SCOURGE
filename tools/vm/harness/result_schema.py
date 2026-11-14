@@ -138,6 +138,61 @@ def _check_usb_removal(value, problems: list[str]) -> None:
         problems.append('usb_removal.error must be a string')
 
 
+def _check_lock(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('lock must be an object')
+        return
+    if 'held' in value and not isinstance(value['held'], bool):
+        problems.append('lock.held must be boolean')
+    if 'path' in value and not isinstance(value['path'], str):
+        problems.append('lock.path must be a string')
+    if 'pid' in value and not _is_int(value['pid']):
+        problems.append('lock.pid must be an integer')
+    if 'waited_seconds' in value and (
+            not _is_number(value['waited_seconds'])
+            or value['waited_seconds'] < 0):
+        problems.append('lock.waited_seconds must be non-negative')
+
+
+def _check_bundle(value, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append('failure_bundle must be an object')
+        return
+    for key in ('path', 'summary'):
+        if not isinstance(value.get(key), str) or not value[key]:
+            problems.append(f'failure_bundle.{key} must be a non-empty string')
+    if 'excerpts' in value and (
+            not _is_int(value['excerpts']) or value['excerpts'] < 0):
+        problems.append('failure_bundle.excerpts must be a non-negative integer')
+    sections = value.get('sections')
+    if not isinstance(sections, dict):
+        problems.append('failure_bundle.sections must be an object')
+    else:
+        for name, section in sections.items():
+            prefix = f'failure_bundle.sections.{name}'
+            if not isinstance(section, dict):
+                problems.append(f'{prefix} must be an object')
+                continue
+            if not isinstance(section.get('path'), str) or not section['path']:
+                problems.append(f'{prefix}.path must be a non-empty string')
+            if 'bytes' in section and (
+                    not _is_int(section['bytes']) or section['bytes'] < 0):
+                problems.append(f'{prefix}.bytes must be a non-negative integer')
+            if 'rc' in section and not _is_int(section['rc']):
+                problems.append(f'{prefix}.rc must be an integer')
+            if 'seconds' in section and not _is_number(section['seconds']):
+                problems.append(f'{prefix}.seconds must be a number')
+            for key in ('error', 'skipped'):
+                if key in section and not isinstance(section[key], str):
+                    problems.append(f'{prefix}.{key} must be a string')
+    for key in ('deadline_seconds', 'elapsed_seconds'):
+        if key in value and not _is_number(value[key]):
+            problems.append(f'failure_bundle.{key} must be a number')
+    if 'deadline_exceeded' in value and not isinstance(
+            value['deadline_exceeded'], bool):
+        problems.append('failure_bundle.deadline_exceeded must be boolean')
+
+
 def _check_patch(value, problems: list[str]) -> None:
     if not isinstance(value, dict):
         problems.append('patch must be an object')
@@ -340,9 +395,9 @@ def validate_result(result) -> list[str]:
     if 'pin_cpu' in result and result['pin_cpu'] is not None and not _is_int(result['pin_cpu']):
         problems.append('pin_cpu must be an integer or null')
     if 'lock' in result and result['lock'] is not None:
-        _check_dict(result['lock'], 'lock', problems)
+        _check_lock(result['lock'], problems)
     if 'failure_bundle' in result and result['failure_bundle'] is not None:
-        _check_dict(result['failure_bundle'], 'failure_bundle', problems)
+        _check_bundle(result['failure_bundle'], problems)
     return problems
 
 

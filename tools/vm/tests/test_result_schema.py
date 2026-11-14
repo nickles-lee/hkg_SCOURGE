@@ -192,6 +192,41 @@ class ResultSchemaTests(unittest.TestCase):
                          'audit.gaps', 'audit.missing_required'):
             self.assertIn(expected, joined)
 
+    def test_lock_and_failure_bundle_evidence(self) -> None:
+        good = valid_result(
+            lock={'held': True, 'path': '/l', 'pid': 1,
+                  'waited_seconds': 0.5},
+            failure_bundle={
+                'path': '/b', 'summary': '/b/summary.md', 'excerpts': 1,
+                'sections': {'dmesg': {'path': '/b/dmesg.log', 'bytes': 10,
+                                       'rc': 0, 'seconds': 0.1}},
+                'deadline_seconds': 45, 'deadline_exceeded': False,
+                'elapsed_seconds': 0.2})
+        self.assertEqual(validate_result(good), [])
+
+        bad = valid_result(
+            lock={'held': 'yes', 'path': 1, 'pid': 'x',
+                  'waited_seconds': -1},
+            failure_bundle={
+                'path': '', 'summary': '', 'excerpts': -1,
+                'sections': {'bad': 'str', 'worse': {
+                    'path': '', 'bytes': -1, 'rc': 'x', 'seconds': 'y',
+                    'error': 1, 'skipped': 1}},
+                'deadline_seconds': 'x', 'deadline_exceeded': 'no',
+                'elapsed_seconds': 'y'})
+        joined = '\n'.join(validate_result(bad))
+        for expected in ('lock.held', 'lock.path', 'lock.pid',
+                         'lock.waited_seconds', 'failure_bundle.path',
+                         'failure_bundle.summary', 'failure_bundle.excerpts',
+                         'failure_bundle.sections.bad',
+                         'failure_bundle.sections.worse.path',
+                         'failure_bundle.sections.worse.bytes',
+                         'failure_bundle.sections.worse.rc',
+                         'failure_bundle.sections.worse.seconds',
+                         'failure_bundle.deadline_seconds',
+                         'failure_bundle.deadline_exceeded'):
+            self.assertIn(expected, joined)
+
     def test_verdict_rc_consistency(self) -> None:
         cases = [
             (valid_result(verdict='PASS', rc=1), 'PASS requires rc == 0'),

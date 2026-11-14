@@ -931,5 +931,7 @@ items beyond that.
   validated. 393 tests; 198 VM commits.
 - **2026-11-14 — patch/phase/audit schema**: evidence blocks validated.
   394 tests; 199 VM commits.
+- **2026-11-14 — lock/bundle schema**: lock and failure-bundle evidence
+  validated. 395 tests; 200 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
