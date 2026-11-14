@@ -14,7 +14,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from bench import (build_argv, compare_bench, result_path, source_state,
-                   row_verdict, summarize, validate_matrix, variants)
+                   row_verdict, summarize, validate_child, validate_matrix,
+                   variants)
 from harness.result_schema import validate_bench
 from harness.config import load_scenario
 
@@ -51,7 +52,29 @@ def bench_doc(summary=None, metrics=None, **overrides):
     return data
 
 
+def child_result(**overrides):
+    data = {
+        'schema_version': 3, 'run_dir': '/tmp/child', 'verdict': 'PASS',
+        'rc': 0, 'timeout': 30, 'profile': {'name': 'conformance'},
+        'images': {}, 'overlays': {}, 'applied_substitutions': [],
+    }
+    data.update(overrides)
+    return data
+
+
 class BenchTests(unittest.TestCase):
+    def test_validate_child_result(self) -> None:
+        self.assertEqual(validate_child(child_result(), 0), ('PASS', []))
+        verdict, problems = validate_child(child_result(), 2)
+        self.assertEqual(verdict, 'FAIL')
+        self.assertEqual(problems, [])
+        verdict, problems = validate_child(child_result(verdict='BAD'), 0)
+        self.assertEqual(verdict, 'FAIL')
+        self.assertTrue(any('verdict' in problem for problem in problems))
+        verdict, problems = validate_child({}, 0)
+        self.assertEqual(verdict, 'FAIL')
+        self.assertIn('missing', problems[0])
+
     def test_row_verdict_normalizes_rc_mismatch(self) -> None:
         self.assertEqual(row_verdict('PASS', 0), 'PASS')
         self.assertEqual(row_verdict('PASS', 2), 'FAIL')

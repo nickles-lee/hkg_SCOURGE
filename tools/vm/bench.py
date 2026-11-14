@@ -22,7 +22,7 @@ from pathlib import Path
 
 from harness.config import load_scenario
 from harness.governor import LockTimeout, run_lock
-from harness.result_schema import validate_bench
+from harness.result_schema import validate_bench, validate_result
 from harness.storage import parse_sizes
 
 VM = Path(__file__).resolve().parent
@@ -71,6 +71,17 @@ def row_verdict(verdict: str | None, rc: int) -> str:
     if verdict == 'PASS' and rc != 0:
         return 'FAIL'
     return verdict or 'FAIL'
+
+
+def validate_child(detail: dict, rc: int) -> tuple[str, list[str]]:
+    """Validate a child result and normalize its row verdict."""
+    if not detail:
+        return 'FAIL', ['result.json missing or unreadable']
+    problems = validate_result(detail)
+    verdict = row_verdict(detail.get('verdict'), rc)
+    if problems:
+        verdict = 'FAIL'
+    return verdict, problems
 
 
 def validate_matrix(args) -> None:
@@ -315,14 +326,18 @@ def main() -> int:
                         path = result_path(log)
                         detail = (json.loads(path.read_text())
                                   if path is not None and path.is_file() else {})
+                        verdict, problems = validate_child(
+                            detail, completed.returncode)
                         warmups.append({
                             'scenario': scenario['name'],
                             'warmup': warmup_index,
                             'cache': cache,
                             'pin_cpu': pin_cpu,
-                            'verdict': row_verdict(detail.get('verdict'), completed.returncode),
+                            'verdict': verdict,
                             'rc': completed.returncode,
                             'log': str(log),
+                            **({'schema_problems': problems[:5]}
+                               if problems else {}),
                         })
                         print(f"{scenario['name']} [{suffix}] warmup "
                               f"{warmup_index}/{args.warmup}: "
@@ -341,13 +356,17 @@ def main() -> int:
                         path = result_path(log)
                         detail = (json.loads(path.read_text())
                                   if path is not None and path.is_file() else {})
+                        verdict, problems = validate_child(
+                            detail, completed.returncode)
                         rows.append({
                             'scenario': scenario['name'],
                             'iteration': iteration,
                             'cache': cache,
                             'pin_cpu': pin_cpu,
-                            'verdict': row_verdict(detail.get('verdict'), completed.returncode),
+                            'verdict': verdict,
                             'rc': completed.returncode,
+                            **({'schema_problems': problems[:5]}
+                               if problems else {}),
                             'boot_seconds': detail.get('boot_seconds'),
                             'readiness_seconds': detail.get('readiness_seconds'),
                             'scenario_seconds': detail.get('scenario_seconds'),

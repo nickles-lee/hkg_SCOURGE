@@ -822,5 +822,8 @@ items beyond that.
   exit 1; CLI tests. 344 tests; 147 VM commits.
 - **2026-11-14 — benchmark row rc agreement**: PASS with nonzero rc becomes
   FAIL in warmup/measured rows. 345 tests; 148 VM commits.
+- **2026-11-14 — benchmark child validation**: child result.json schema is
+  enforced per row; failures retain schema_problems. 346 tests; 149 VM
+  commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
