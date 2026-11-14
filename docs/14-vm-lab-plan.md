@@ -681,5 +681,8 @@ items beyond that.
   holder makes start fail with state-busy and no QEMU; release then verifies
   clean start/exec/stop. Real run PASS (7.7 s). 298 tests (29 skipped); 99
   VM commits.
+- **2026-11-14 — daemon stop during in-flight exec**: stop waits at most
+  1 s for the guest lock, cuts off a 20 s exec, kills QEMU and reports
+  stopped. Real run PASS (9.5 s). 299 tests (30 skipped); 100 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

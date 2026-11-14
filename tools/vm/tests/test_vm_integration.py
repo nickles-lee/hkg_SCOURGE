@@ -164,6 +164,50 @@ class VMIntegrationTests(unittest.TestCase):
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
 
+    def test_daemon_stop_during_inflight_exec(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-inflight-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            first = json.loads(started.stdout)
+            qemu_pid = first['qemu_pid']
+            inflight = subprocess.Popen(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', 'exec',
+                 '--daemon-dir', str(daemon_dir), '--cmd',
+                 'sleep 20; echo TOO_LATE', '--timeout', '60'],
+                cwd=VM, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            try:
+                time.sleep(1)
+                began = time.monotonic()
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                elapsed = time.monotonic() - began
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+                self.assertLess(elapsed, 15, 'stop blocked on the in-flight exec')
+                output, _ = inflight.communicate(timeout=20)
+                self.assertNotEqual(inflight.returncode, 0, output)
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and Path(f'/proc/{qemu_pid}').exists():
+                    time.sleep(0.1)
+                self.assertFalse(Path(f'/proc/{qemu_pid}').exists())
+                values = json.loads(stopped.stdout)
+                self.assertEqual(values['state'], 'stopped')
+            finally:
+                if inflight.poll() is None:
+                    inflight.kill()
+                    inflight.communicate(timeout=20)
+                cli('stop', '--daemon-dir', str(daemon_dir))
+
     def test_daemon_state_lock_contention(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-lock-') as tmp:
             root = Path(tmp)

@@ -368,11 +368,15 @@ def _serve(config: dict) -> int:
                     result = launch.qmp_screendump(qmp_socket, output)
                     response = {"ok": True, "screenshot": result}
                 elif action == "stop":
-                    try:
-                        with guest_lock:
+                    # Never let a long-running exec hold stop hostage. Sync
+                    # only when the guest lock is available without waiting.
+                    if guest_lock.acquire(timeout=1):
+                        try:
                             launch.execute_guest(ser, "sync", 10)
-                    except Exception:  # noqa: BLE001
-                        pass
+                        except Exception:  # noqa: BLE001
+                            pass
+                        finally:
+                            guest_lock.release()
                     response = {"ok": True, "stopping": True,
                                 "daemon_pid": os.getpid()}
                     handle.write((json.dumps(response) + "\n").encode())
