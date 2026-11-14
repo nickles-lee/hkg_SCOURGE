@@ -668,5 +668,8 @@ items beyond that.
 - **2026-11-14 — persistent state across daemon SIGKILL**: write marker,
   SIGKILL daemon/QEMU, restart same `--state`, verify marker and lock
   release. Real run PASS (14.1 s). 294 tests (25 skipped); 95 VM commits.
+- **2026-11-14 — daemon exec timeout recovery**: overlong exec fails with a
+  completion-timeout diagnostic and the daemon accepts a subsequent exec.
+  Real run PASS (11.1 s). 295 tests (26 skipped); 96 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

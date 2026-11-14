@@ -163,6 +163,45 @@ class VMIntegrationTests(unittest.TestCase):
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
 
+    def test_daemon_exec_timeout_recovery(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-timeout-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                timed_out = cli('exec', '--daemon-dir', str(daemon_dir),
+                                '--cmd', 'sleep 3; echo TOO_LATE', '--timeout', '1')
+                self.assertNotEqual(timed_out.returncode, 0,
+                                    timed_out.stdout + timed_out.stderr)
+                self.assertIn('timed out', (timed_out.stderr + timed_out.stdout).lower())
+
+                recovered = cli('exec', '--daemon-dir', str(daemon_dir),
+                                '--cmd', 'echo TIMEOUT_RECOVERED', '--timeout', '15')
+                self.assertEqual(recovered.returncode, 0,
+                                 recovered.stdout + recovered.stderr)
+                self.assertIn('TIMEOUT_RECOVERED', recovered.stdout)
+
+                status = cli('status', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(status.returncode, 0, status.stderr)
+                values = json.loads(status.stdout)
+                self.assertEqual(values['state'], 'ready')
+                self.assertTrue(values['reachable'])
+                self.assertTrue(values['qemu_alive'])
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_daemon_state_survives_sigkill(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-state-kill-') as tmp:
             root = Path(tmp)

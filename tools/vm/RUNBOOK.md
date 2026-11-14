@@ -200,7 +200,9 @@ an `exec` before stopping it. A SIGKILL of the daemon itself must reap QEMU
 through the parent-death signal; status becomes unreachable and a fresh start
 in the same directory succeeds. The persistent-state variant writes a marker,
 SIGKILLs the daemon, restarts on the same `--state`, and verifies the marker
-and state-lock release. A stale control socket is detected in about
+and state-lock release. A command that exceeds `daemon exec --timeout` must
+return the timeout diagnostic while the daemon remains ready for a subsequent
+exec. A stale control socket is detected in about
 0.5 s: status reports `reachable:false`, `exec` fails with a control-socket
 diagnostic, and a clean restart succeeds after the stale daemon exits.
 
