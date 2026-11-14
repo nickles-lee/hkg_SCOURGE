@@ -598,6 +598,8 @@ items beyond that.
 - **2026-11-14 — daemon failure e2e + bench matrix**: a fake-QEMU
   `daemon start` records `serial_tail`/`qemu_returncode` and surfaces the
   tail; `bench.py --matrix` compares cache modes and optional pinned CPUs
-  with an unpinned baseline. Four-cell smoke PASS. 256 tests.
+  with an unpinned baseline, accepts `--kernel vendor|compat`, and has a
+  failure-path test that still writes `bench.json`/exits 1. Four-cell smoke
+  PASS. 257 tests.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

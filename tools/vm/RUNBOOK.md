@@ -185,8 +185,8 @@ slow down when all vCPUs share one host CPU.
 For repeatable numbers, use the benchmark driver:
 
 ```sh
-python3 -B bench.py --scenario boot --repeats 3 [--cache writeback] \
-  [--pin-cpu N] [--smp N] [--memory MiB]
+python3 -B bench.py --scenario boot --repeats 3 [--kernel vendor|compat] \
+  [--cache writeback] [--pin-cpu N] [--smp N] [--memory MiB]
 python3 -B bench.py --scenario boot --repeats 3 --matrix --matrix-cpu 0
 ```
 

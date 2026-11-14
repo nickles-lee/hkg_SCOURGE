@@ -56,8 +56,9 @@ def build_argv(args, scenario: dict, cache: str | None = None,
     pin_cpu = args.pin_cpu if pin_cpu is None else pin_cpu
     argv = [
         sys.executable, '-B', str(VM / 'launch.py'), 'run', '--no-lock',
-        '--profile', args.profile, '--scenario', scenario['name'],
-        '--timeout', str(args.timeout), '--storage', args.storage,
+        '--profile', args.profile, '--kernel', args.kernel,
+        '--scenario', scenario['name'], '--timeout', str(args.timeout),
+        '--storage', args.storage,
     ]
     for value in args.storage_size:
         argv.extend(['--storage-size', value])
@@ -92,6 +93,8 @@ def main() -> int:
                         help='scenario to benchmark (repeatable; default boot)')
     parser.add_argument('--profile', choices=('research', 'conformance'),
                         default='conformance')
+    parser.add_argument('--kernel', choices=('vendor', 'compat'),
+                        default='vendor')
     parser.add_argument('--repeats', type=int, default=3)
     parser.add_argument('--timeout', type=float, default=120)
     parser.add_argument('--lock-timeout', type=float, default=600)

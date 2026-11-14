@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,7 +20,8 @@ VM = Path(__file__).resolve().parents[1]
 
 def args(**overrides):
     values = {
-        'profile': 'conformance', 'timeout': 120, 'storage': 'flat',
+        'profile': 'conformance', 'kernel': 'vendor', 'timeout': 120,
+        'storage': 'flat',
         'storage_size': [], 'cache': None, 'smp': None, 'memory': None,
         'pin_cpu': None, 'apic': False, 'usb': None, 'tools': None,
         'payload': None, 'share': None, 'matrix': False,
@@ -63,8 +66,10 @@ class BenchTests(unittest.TestCase):
 
     def test_build_argv_cache_pin_override(self) -> None:
         scenario = load_scenario('boot')
-        argv = build_argv(args(), scenario, cache='writethrough', pin_cpu=3)
+        argv = build_argv(args(kernel='compat'), scenario,
+                          cache='writethrough', pin_cpu=3)
         joined = ' '.join(argv)
+        self.assertIn('--kernel compat', joined)
         self.assertIn('--cache writethrough', joined)
         self.assertIn('--pin-cpu 3', joined)
 
@@ -80,12 +85,35 @@ class BenchTests(unittest.TestCase):
             log.write_text('no result\n')
             self.assertIsNone(result_path(log))
 
+    def test_failure_path_writes_bench_json_and_exits_nonzero(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, "-B", str(VM / "bench.py"),
+             "--scenario", "stock-update-stage", "--repeats", "1",
+             "--usb", "/dev/null", "--tools", "/dev/null",
+             "--lock-timeout", "10"],
+            cwd=VM, capture_output=True, text=True, timeout=60)
+        combined = completed.stdout + completed.stderr
+        if "another VM boot holds" in combined or "lock timeout" in combined:
+            self.skipTest("VM lab is busy with another run")
+        self.assertEqual(completed.returncode, 1, combined)
+        line = next(line for line in completed.stdout.splitlines()
+                    if line.startswith("bench: "))
+        bench_path = Path(line[7:])
+        try:
+            bench = json.loads(bench_path.read_text())
+            self.assertFalse(bench["ok"])
+            self.assertEqual(bench["rows"][0]["verdict"], "BLOCKED")
+            self.assertEqual(bench["rows"][0]["rc"], 77)
+        finally:
+            shutil.rmtree(bench_path.parent, ignore_errors=True)
+
     def test_cli_help_exposes_repeats(self) -> None:
         completed = subprocess.run(
             [sys.executable, '-B', str(VM / 'bench.py'), '--help'],
             capture_output=True, text=True, check=True)
         self.assertIn('--repeats', completed.stdout)
         self.assertIn('--matrix', completed.stdout)
+        self.assertIn('--kernel', completed.stdout)
 
 
 if __name__ == '__main__':

@@ -73,6 +73,7 @@ comparable; compare rows within a table, not across tables.
 python3 -B bench.py --scenario boot --repeats 3 --cache writeback
 python3 -B bench.py --scenario boot --repeats 3 --pin-cpu 0
 python3 -B bench.py --scenario boot --repeats 3 --matrix --matrix-cpu 0
+python3 -B bench.py --scenario boot --repeats 3 --kernel compat
 ```
 
 It serializes on the global boot lock, writes
