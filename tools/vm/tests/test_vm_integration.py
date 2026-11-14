@@ -823,6 +823,29 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertEqual(stopped.returncode, 0,
                                  stopped.stdout + stopped.stderr)
 
+    def test_recovery_power_loss_helper(self):
+        with tempfile.TemporaryDirectory(prefix='vm-powerloss-') as tmp:
+            state = Path(tmp) / 'state'
+            completed = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'),
+                 'recovery-power-loss', '--state', str(state), '--reset',
+                 '--timeout', '120'], cwd=VM, capture_output=True, text=True,
+                timeout=400)
+            combined = completed.stdout + completed.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(completed.returncode, 0, combined[-4000:])
+            start = completed.stdout.rfind('\n{\n')
+            self.assertNotEqual(start, -1, completed.stdout[-2000:])
+            summary = json.loads(completed.stdout[start:])
+            self.assertTrue(summary['ok'])
+            self.assertEqual(summary['phase1']['verdict'], 'PASS')
+            self.assertTrue(summary['phase1']['power_loss']['marker_seen'])
+            self.assertTrue(summary['phase1']['power_loss']['killed'])
+            self.assertEqual(summary['phase2']['verdict'], 'PASS')
+            self.assertTrue(summary['phase2']['recovered_marker'])
+            self.assertEqual(summary['state'], str(state))
+
     def test_compat_audio_card_and_playback(self):
         process, result = self.run_guest(
             '--kernel', 'compat', '--audio', '--timeout', '90',

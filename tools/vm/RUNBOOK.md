@@ -512,7 +512,9 @@ python3 -B launch.py recovery-power-loss \
 
 Phase 1 writes a marker, syncs it, signals `POWER_LOSS_READY`, then starts a
 write loop; the host kills QEMU. Phase 2 boots the same state and must print
-`POWER_LOSS_RECOVERED`, proving the ext4 journal recovered the marker. This is
+`POWER_LOSS_RECOVERED`, proving the ext4 journal recovered the marker. The
+opt-in VM suite runs this helper end to end and asserts both phases plus the
+`power_loss` marker/killed evidence. This is
 one crash-consistency slice, not update-engine crash safety.
 
 ## Vendor systemd partial boot (Mode V)
