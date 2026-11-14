@@ -818,5 +818,7 @@ items beyond that.
 - **2026-11-14 — daemon list stale marker**: ready/starting records with a
   dead daemon process show `STALE`; unit + gated coverage. 343 tests; 146 VM
   commits.
+- **2026-11-14 — daemon list --fail-stale**: scriptable stale detection with
+  exit 1; CLI tests. 344 tests; 147 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

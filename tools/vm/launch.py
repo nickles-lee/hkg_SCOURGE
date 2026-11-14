@@ -1641,6 +1641,8 @@ def main() -> int:
     dlist = dsub.add_parser('list', help='list daemon directories and liveness')
     dlist.add_argument('--root', type=Path, default=VM / 'runs')
     dlist.add_argument('--json', action='store_true')
+    dlist.add_argument('--fail-stale', action='store_true',
+                       help='exit 1 when any daemon entry is stale')
     for name in ('status', 'stop', 'screenshot', 'console', 'exec'):
         p = dsub.add_parser(name)
         p.add_argument('--daemon-dir', type=Path, default=VM / 'runs' / 'daemon')
@@ -1765,6 +1767,8 @@ def main() -> int:
                           f"daemon={'alive' if row['daemon_alive'] else 'dead':5} "
                           f"qemu={'alive' if row['qemu_alive'] else 'dead':5} "
                           f"kernel={row['kernel'] or '?'}{marker}")
+            if args.fail_stale and any(row['stale'] for row in rows):
+                return 1
             return 0
         daemon_dir = args.daemon_dir.resolve()
         if args.daemon_action == 'start':

@@ -52,6 +52,30 @@ class DaemonTests(unittest.TestCase):
         self.assertFalse(rows['d2']['stale'])
         self.assertEqual(daemon.list_daemons(self.root / 'missing'), [])
 
+    def test_daemon_list_fail_stale_cli(self) -> None:
+        stale_root = self.root / 'stale-root'
+        stale = stale_root / 'daemon'
+        stale.mkdir(parents=True)
+        daemon.write_status(stale, {'state': 'ready', 'daemon_pid': os.getpid(),
+                                    'qemu_pid': 99999999})
+        completed = subprocess.run(
+            [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', 'list',
+             '--root', str(stale_root), '--json', '--fail-stale'],
+            cwd=VM, capture_output=True, text=True, check=False)
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        rows = json.loads(completed.stdout)
+        self.assertTrue(rows[0]['stale'])
+
+        ok_root = self.root / 'ok-root'
+        stopped = ok_root / 'daemon'
+        stopped.mkdir(parents=True)
+        daemon.write_status(stopped, {'state': 'stopped'})
+        completed = subprocess.run(
+            [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', 'list',
+             '--root', str(ok_root), '--json', '--fail-stale'],
+            cwd=VM, capture_output=True, text=True, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_console_clamps_line_count(self) -> None:
         (self.root / 'serial.log').write_text('one\ntwo\nthree\n')
         for lines, expected in ((0, 'three'), (-5, 'three'),
