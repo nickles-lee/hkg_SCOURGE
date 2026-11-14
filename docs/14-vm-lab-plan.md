@@ -792,5 +792,8 @@ items beyond that.
   tests; 135 VM commits.
 - **2026-11-14 — list schema filter**: `list --schema` filters by
   ok/legacy/invalid/missing. 333 tests; 136 VM commits.
+- **2026-11-14 — daemon control protocol robustness**: unknown
+  action/malformed JSON rejected without disturbing the daemon. 334 tests;
+  137 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

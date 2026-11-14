@@ -183,7 +183,8 @@ python3 -B launch.py daemon stop
 The daemon keeps the QEMU process, serial reader, QMP socket and state lock
 alive; `exec`/`screenshot` use a control socket in `runs/daemon/`. A failed
 `daemon start` includes the last serial lines and QEMU return code in the
-status/error shown by the CLI. State
+status/error shown by the CLI. Unknown control actions and malformed JSON
+requests return an error without disturbing the daemon. State
 overlays survive `stop` and are reused by the next `daemon start`; the
 default daemon directory is `runs/daemon` (`--daemon-dir` overrides it).
 Stop flushes the guest with `sync` before killing QEMU. A stale/dead daemon

@@ -823,6 +823,58 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertEqual(stopped.returncode, 0,
                                  stopped.stdout + stopped.stderr)
 
+    def test_daemon_control_protocol_rejects_bad_requests(self):
+        import socket
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-badctl-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=180)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            control = daemon_dir / 'control.sock'
+            try:
+                def send(payload):
+                    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    sock.settimeout(10)
+                    sock.connect(str(control))
+                    try:
+                        sock.sendall(payload)
+                        data = b''
+                        while not data.endswith(b'\n'):
+                            chunk = sock.recv(4096)
+                            if not chunk:
+                                break
+                            data += chunk
+                    finally:
+                        sock.close()
+                    return json.loads(data)
+
+                unknown = send(b'{"action": "bogus"}\n')
+                self.assertFalse(unknown['ok'])
+                self.assertIn('unknown action', unknown['error'])
+
+                malformed = send(b'{not json}\n')
+                self.assertFalse(malformed['ok'])
+                self.assertIn('error', malformed)
+
+                alive = cli('exec', '--daemon-dir', str(daemon_dir),
+                            '--cmd', 'echo BAD_REQUEST_SAFE')
+                self.assertEqual(alive.returncode, 0,
+                                 alive.stdout + alive.stderr)
+                self.assertIn('BAD_REQUEST_SAFE', alive.stdout)
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_daemon_qmp_right_click(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-rightclick-') as tmp:
             daemon_dir = Path(tmp) / 'daemon'
