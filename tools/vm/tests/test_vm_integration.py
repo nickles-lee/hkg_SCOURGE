@@ -637,6 +637,45 @@ class VMIntegrationTests(unittest.TestCase):
             finally:
                 cli('stop', '--daemon-dir', str(daemon_dir))
 
+    def test_daemon_console_missing_serial(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-noserial-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=180)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                (daemon_dir / 'serial.log').unlink()
+                console = cli('console', '--daemon-dir', str(daemon_dir),
+                              '--lines', '20')
+                self.assertNotEqual(console.returncode, 0,
+                                    console.stdout + console.stderr)
+                self.assertIn('serial log missing',
+                              console.stdout + console.stderr)
+
+                alive = cli('exec', '--daemon-dir', str(daemon_dir),
+                            '--cmd', 'echo NO_SERIAL_CONSOLE_SAFE')
+                self.assertEqual(alive.returncode, 0,
+                                 alive.stdout + alive.stderr)
+                self.assertIn('NO_SERIAL_CONSOLE_SAFE', alive.stdout)
+                status = cli('status', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(status.returncode, 0, status.stderr)
+                values = json.loads(status.stdout)
+                self.assertEqual(values['state'], 'ready')
+                self.assertTrue(values['qemu_alive'])
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_daemon_qmp_input_invalid(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-input-bad-') as tmp:
             daemon_dir = Path(tmp) / 'daemon'

@@ -739,5 +739,8 @@ items beyond that.
 - **2026-11-14 — screenshot symlink escape check**: in-tree symlink to an
   outside path is rejected with no artifact; daemon healthy. Real run PASS
   (7.7 s). 315 tests (45 skipped); 118 VM commits.
+- **2026-11-14 — console missing-serial test**: deleted serial.log produces
+  a clear console error; exec/status/stop remain healthy. Real run PASS
+  (8.2 s). 316 tests (46 skipped); 119 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
