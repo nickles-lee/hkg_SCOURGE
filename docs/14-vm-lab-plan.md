@@ -660,5 +660,10 @@ items beyond that.
   missing socket after ready, with a ~0.5 s grace; gated test verifies status
   diagnostics, exec failure, stale-daemon termination and clean restart. Real
   run PASS (26.0 s). Cumulative 93 VM commits; 292 tests (23 skipped).
+- **2026-11-14 — daemon SIGKILL recovery + token ledger**: SIGKILL the
+  daemon, require QEMU parent-death reaping, unreachable status and clean
+  restart; real run PASS (14.3 s). 293 tests (24 skipped); 94 VM commits.
+  Available OpenCode session token evidence is recorded in NOTES (15.06M
+  non-cache; 806M including cache reads at last query).
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
