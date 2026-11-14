@@ -641,5 +641,9 @@ items beyond that.
 - **2026-11-14 — real benchmark matrix test**: opt-in four-cell
   writeback/writethrough × unpinned/pinned run asserts variants, rows,
   summary keys and metrics; real run PASS (27.7 s). 286 tests (18 skipped).
+- **2026-11-14 — QMP failure diagnostics + exit-code fix**: opt-in test
+  unlinks the QMP socket before capture, requiring FAIL/qmp_error/cleanup.
+  Fixed `run()` to return the rc after `finally` updates, so CLI exit codes
+  now match result.json. 287 tests (19 skipped).
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

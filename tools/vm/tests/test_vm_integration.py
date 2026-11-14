@@ -162,6 +162,46 @@ class VMIntegrationTests(unittest.TestCase):
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
 
+    def test_qmp_screendump_failure_diagnostics(self):
+        process = subprocess.Popen(
+            [sys.executable, '-B', str(VM / 'launch.py'), 'run',
+             '--kernel', 'compat', '--scenario', 'ui-smoke',
+             '--qmp-screenshot', '--timeout', '180', '--lock-timeout', '100'],
+            cwd=VM, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        run_dir = None
+        deadline = time.monotonic() + 60
+        qmp = None
+        try:
+            while time.monotonic() < deadline:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                if line.startswith('run: '):
+                    run_dir = Path(line[5:].strip())
+                    break
+            self.assertIsNotNone(run_dir, 'launcher never reported a run directory')
+            qmp = run_dir / 'qmp.sock'
+            while time.monotonic() < deadline and process.poll() is None:
+                if qmp.exists():
+                    qmp.unlink()
+                    break
+                time.sleep(0.05)
+            self.assertTrue(qmp is not None, 'qmp socket path missing')
+            output, _ = process.communicate(timeout=240)
+            self.assertNotEqual(process.returncode, 0,
+                                output[-4000:])
+            result = json.loads((run_dir / 'result.json').read_text())
+            self.assertEqual(result['verdict'], 'FAIL')
+            self.assertIsNone(result['screenshot'].get('qmp'))
+            self.assertIn('QMP', result['screenshot'].get('qmp_error') or '')
+            self.assertTrue(any('visible frame required' in item
+                                for item in result.get('failures', [])))
+            self.assert_cleaned(result)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=30)
+
     def test_benchmark_matrix_end_to_end(self):
         cpu = sorted(os.sched_getaffinity(0))[0]
         completed = subprocess.run(

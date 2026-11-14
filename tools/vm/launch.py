@@ -626,7 +626,19 @@ def execute_guest(ser: Serial, command: str, timeout: float) -> tuple[str, str, 
     return token, output, guest_rc, round(time.monotonic() - started, 3)
 
 
-def run(cmd: str | None, interactive: bool, timeout: float,
+def run(*args, **kwargs) -> int:
+    """Run one managed boot and return the final result rc.
+
+    The core body can update the verdict in its finally block (QMP screenshot
+    checks, recovery-thread errors, cleanup); capture the final rc after that
+    block instead of returning an earlier value.
+    """
+    outcome = {'rc': 1}
+    _run_impl(*args, outcome=outcome, **kwargs)
+    return outcome['rc']
+
+
+def _run_impl(cmd: str | None, interactive: bool, timeout: float,
         usb: Path | None = None, tools: Path | None = None,
         kernel_mode: str = "auto", payload: Path | None = None,
         profile_name: str = 'research', scenario_name: str | None = None,
@@ -643,7 +655,7 @@ def run(cmd: str | None, interactive: bool, timeout: float,
         network: bool = False, audio: bool = False,
         usb_host: list[str] | None = None, cache: str = "writeback",
         pin_cpu: int | None = None, dry_run: bool = False,
-        lock_info: dict | None = None) -> int:
+        lock_info: dict | None = None, outcome: dict | None = None) -> int:
     profile = load_profile(profile_name)
     scenario = load_scenario(scenario_name) if scenario_name else None
     if profile_name == 'conformance' and (scenario is None or interactive):
@@ -1321,6 +1333,8 @@ def run(cmd: str | None, interactive: bool, timeout: float,
             result.update(verdict='FAIL', rc=1, cleanup_errors=cleanup_errors)
         result['total_seconds'] = round(time.monotonic() - t0, 3)
         (run_dir / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+        if outcome is not None:
+            outcome['rc'] = result['rc']
         print(f"[vm] {result['verdict']} rc={result['rc']} result={run_dir / 'result.json'}", flush=True)
         if cleanup_errors:
             raise OSError('; '.join(cleanup_errors))
