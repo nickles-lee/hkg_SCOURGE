@@ -22,6 +22,15 @@ from .governor import LockTimeout, run_lock
 DEFAULT_DAEMON_DIR = "runs/daemon"
 DEFAULT_COMMAND_LOG_MAX = 1024 * 1024
 DEFAULT_SCREENSHOT_KEEP = 10
+DEFAULT_EXEC_OUTPUT_MAX = 1024 * 1024
+
+
+def limit_output(output: str, max_bytes: int) -> tuple[str, int, bool]:
+    """Keep the tail of an exec output within `max_bytes` (UTF-8)."""
+    data = output.encode("utf-8", "replace")
+    if len(data) <= max_bytes:
+        return output, len(data), False
+    return data[-max_bytes:].decode("utf-8", "replace"), len(data), True
 
 
 def prune_screenshots(daemon_dir: Path, keep: int) -> list[str]:
@@ -317,6 +326,7 @@ def _serve(config: dict) -> int:
     daemon_dir = Path(config["daemon_dir"])
     command_log_max = int(config.get("command_log_max", DEFAULT_COMMAND_LOG_MAX))
     screenshot_keep = int(config.get("screenshot_keep", DEFAULT_SCREENSHOT_KEEP))
+    exec_output_max = int(config.get("exec_output_max", DEFAULT_EXEC_OUTPUT_MAX))
     kernel_target = config.get("kernel_target", "vendor")
     status = {"state": "starting", "daemon_pid": os.getpid(), "mode": kernel_target,
               "daemon_dir": str(daemon_dir), "started": time.time()}
@@ -450,6 +460,8 @@ def _serve(config: dict) -> int:
                         with guest_lock:
                             token, output, rc, seconds = launch.execute_guest(
                                 ser, cmd, float(message.get("timeout", 300)))
+                        output, output_bytes, truncated = limit_output(
+                            output, exec_output_max)
                         log_error = None
                         try:
                             append_command_log(
@@ -459,7 +471,10 @@ def _serve(config: dict) -> int:
                         except OSError as exc:
                             log_error = f"{type(exc).__name__}: {exc}"
                         response = {"ok": True, "output": output, "rc": rc,
-                                    "seconds": seconds}
+                                    "seconds": seconds,
+                                    "output_bytes": output_bytes}
+                        if truncated:
+                            response["output_truncated"] = True
                         if log_error:
                             response["log_error"] = log_error
                 elif action == "screenshot":

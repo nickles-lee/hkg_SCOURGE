@@ -129,7 +129,8 @@ class DaemonTests(unittest.TestCase):
             'usb_host': ['058f:6366'], 'smp': 2, 'memory_mb': 3072,
             'apic': True, 'label': 'demo', 'cache': 'writethrough',
             'ready_timeout': 42, 'lock_timeout': 43,
-            'command_log_max': 1234, 'screenshot_keep': 7, 'pin_cpu': 3,
+            'command_log_max': 1234, 'screenshot_keep': 7,
+            'exec_output_max': 4321, 'pin_cpu': 3,
         }
         argv = launch.daemon_restart_argv(config, self.root)
         joined = ' '.join(argv)
@@ -143,7 +144,7 @@ class DaemonTests(unittest.TestCase):
                          '--label demo', '--cache writethrough',
                          '--ready-timeout 42', '--lock-timeout 43',
                          '--command-log-max 1234', '--screenshot-keep 7',
-                         '--pin-cpu 3'):
+                         '--exec-output-max 4321', '--pin-cpu 3'):
             self.assertIn(expected, joined)
         self.assertNotIn('--reset', argv)
         self.assertIn('--reset', launch.daemon_restart_argv(
@@ -228,6 +229,16 @@ class DaemonTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 5)
         pid = int((daemon_dir / 'fake.pid').read_text())
         self.assertFalse(daemon.pid_alive(pid))
+
+    def test_limit_output_keeps_tail(self) -> None:
+        short = 'hello\n'
+        self.assertEqual(daemon.limit_output(short, 100), (short, 6, False))
+        limited, total, truncated = daemon.limit_output(
+            'START' + 'x' * 100 + 'END', 10)
+        self.assertTrue(truncated)
+        self.assertEqual(total, 108)
+        self.assertTrue(limited.endswith('END'))
+        self.assertEqual(len(limited.encode()), 10)
 
     def test_prune_screenshots_keeps_newest(self) -> None:
         for index in range(4):

@@ -137,6 +137,7 @@ def daemon_restart_argv(config: dict, daemon_dir: Path,
         ('lock_timeout', '--lock-timeout'),
         ('command_log_max', '--command-log-max'),
         ('screenshot_keep', '--screenshot-keep'),
+        ('exec_output_max', '--exec-output-max'),
         ('pin_cpu', '--pin-cpu'),
     )
     for key, flag in mapping:
@@ -1668,6 +1669,8 @@ def main() -> int:
                     help='daemon command-log cap in bytes (rotates once)')
     ds.add_argument('--screenshot-keep', type=int, default=10,
                     help='keep the newest N screenshot captures in the daemon dir')
+    ds.add_argument('--exec-output-max', type=int, default=1024 * 1024,
+                    help='exec output cap in bytes (keeps the tail)')
     ds.add_argument('--pin-cpu', type=int, default=None, metavar='N',
                     help='pin all QEMU threads to host CPU N (performance experiment)')
     dserve = dsub.add_parser('_serve')
@@ -1828,6 +1831,8 @@ def main() -> int:
                 ap.error('--command-log-max must be positive')
             if args.screenshot_keep <= 0:
                 ap.error('--screenshot-keep must be positive')
+            if args.exec_output_max <= 0:
+                ap.error('--exec-output-max must be positive')
             if args.kernel == 'compat':
                 pin = verify_kernel_pin()
                 if not pin['ok']:
@@ -1866,6 +1871,7 @@ def main() -> int:
                 'lock_timeout': args.lock_timeout,
                 'command_log_max': args.command_log_max,
                 'screenshot_keep': args.screenshot_keep,
+                'exec_output_max': args.exec_output_max,
                 'pin_cpu': args.pin_cpu,
             }
             try:
@@ -1928,6 +1934,10 @@ def main() -> int:
                 print(f"ERROR: {response.get('error', 'daemon exec failed')}",
                       file=sys.stderr)
                 return 1
+            if response.get('output_truncated'):
+                print(f"WARNING: output truncated to "
+                      f"{len(response.get('output', '').encode())} bytes",
+                      file=sys.stderr)
             print(response.get('output', ''))
             return int(response.get('rc', 1))
         if args.daemon_action == 'screenshot':

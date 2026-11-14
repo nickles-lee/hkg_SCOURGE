@@ -1156,6 +1156,39 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertEqual(stopped.returncode, 0,
                                  stopped.stdout + stopped.stderr)
 
+    def test_daemon_exec_output_cap(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-outcap-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=180)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--exec-output-max', '1000',
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                executed = cli(
+                    'exec', '--daemon-dir', str(daemon_dir), '--cmd',
+                    "printf 'START_MARKER\\n'; "
+                    "yes OUTPUT_LINE | head -c 4000; "
+                    "printf '\\nEND_MARKER\\n'")
+                self.assertEqual(executed.returncode, 0,
+                                 executed.stdout + executed.stderr)
+                self.assertIn('END_MARKER', executed.stdout)
+                self.assertNotIn('START_MARKER', executed.stdout)
+                self.assertLessEqual(len(executed.stdout.encode()), 1100)
+                self.assertIn('truncated', executed.stderr.lower())
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_daemon_command_log_corruption(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-badlog-') as tmp:
             daemon_dir = Path(tmp) / 'daemon'

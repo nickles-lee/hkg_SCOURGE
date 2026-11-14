@@ -194,7 +194,10 @@ python3 -B launch.py daemon stop
 
 The daemon keeps the QEMU process, serial reader, QMP socket and state lock
 alive; `exec`/`screenshot` use a control socket in `runs/daemon/`.
-`daemon screenshot` keeps at most `--screenshot-keep N` (default 10) newest
+`daemon exec` caps returned output at `--exec-output-max` bytes (default
+1 MiB), keeping the tail and printing a truncation warning; the command log
+stores the capped text. `daemon screenshot` keeps at most
+`--screenshot-keep N` (default 10) newest
 `screenshot-*.png` captures in the daemon directory; older captures are
 pruned and reported in the response `pruned` list. `daemon list --root runs
 [--json] [--state ready|stale|...]` reports every daemon directory with its
