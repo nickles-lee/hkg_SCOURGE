@@ -444,6 +444,20 @@ class BenchTests(unittest.TestCase):
             self.assertFalse(report['ok'])
             self.assertTrue(report['baseline_problems'])
 
+    def test_compare_shape_ignores_order(self) -> None:
+        summary = {'k': {'count': 1, 'mean': 10.0, 'median': 10.0,
+                         'min': 10.0, 'max': 10.0}}
+        base = bench_doc(summary=summary, scenarios=['boot', 'ui-smoke'],
+                         variants=[{'cache': 'writeback', 'pin_cpu': None},
+                                   {'cache': 'writethrough', 'pin_cpu': None}])
+        current = bench_doc(summary=summary,
+                            scenarios=['ui-smoke', 'boot'],
+                            variants=[{'cache': 'writethrough', 'pin_cpu': None},
+                                      {'cache': 'writeback', 'pin_cpu': None}])
+        report = compare_bench(base, current, require_same_shape=True)
+        self.assertTrue(report['shape_match'])
+        self.assertTrue(report['ok'])
+
     def test_compare_shape_mismatch(self) -> None:
         summary = {'k': {'count': 1, 'mean': 10.0, 'median': 10.0,
                          'min': 10.0, 'max': 10.0}}

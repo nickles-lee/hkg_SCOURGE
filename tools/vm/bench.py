@@ -199,9 +199,24 @@ def compare_bench(baseline: dict, current: dict,
     source_warning = None
     if not source_match:
         source_warning = (f'source git_head differs: {baseline_head} != {current_head}')
-    shape_fields = ('repeats', 'warmup', 'scenarios', 'variants')
-    shape = {field: baseline.get(field) == current.get(field)
-             for field in shape_fields}
+    def shape_signature(document: dict) -> dict:
+        scenarios = document.get('scenarios')
+        if isinstance(scenarios, list):
+            scenarios = sorted(scenarios)
+        variants = document.get('variants')
+        if isinstance(variants, list):
+            variants = sorted(
+                (item.get('cache'), item.get('pin_cpu'))
+                for item in variants if isinstance(item, dict))
+        return {'repeats': document.get('repeats'),
+                'warmup': document.get('warmup'),
+                'scenarios': scenarios,
+                'variants': variants}
+
+    left_shape = shape_signature(baseline)
+    right_shape = shape_signature(current)
+    shape = {field: left_shape[field] == right_shape[field]
+             for field in left_shape}
     shape_match = all(shape.values())
     shape_warning = None
     if not shape_match:
