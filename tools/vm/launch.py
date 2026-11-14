@@ -67,7 +67,8 @@ from harness.result_schema import (check_all_bench, check_all_bench_dir,
                                    validate_bench, validate_file,
                                    validate_result)
 from harness.results import evaluate, evaluate_systemd_transition, phase_summary
-from harness.scenarios import profile_state, scenario_state
+from harness.scenarios import (profile_state, scenario_state,
+                               validate_scenario)
 from harness.storage import VOLUMES, cleanup_storage, create_storage, mount_script, parse_sizes
 from harness.tools import check_tools
 
@@ -1590,6 +1591,10 @@ def main() -> int:
                              help='validate every runs/bench-*/bench.json')
     check_bench.add_argument('--root', type=Path, default=None,
                              help='bench root for --all (default: runs/)')
+    check_scenario = sub.add_parser('check-scenario',
+                                    help='validate one scenario JSON contract')
+    check_scenario.add_argument('scenario',
+                                help='registered scenario name or JSON path')
     extract = sub.add_parser('extract', help='copy an artifact out of a run')
     extract.add_argument('run')
     extract.add_argument('member')
@@ -1984,6 +1989,29 @@ def main() -> int:
             'schema_version': (data or {}).get('schema_version'),
             'problems': problems,
         }, indent=2))
+        return 0 if not problems else 1
+    if args.action == 'check-scenario':
+        value = args.scenario
+        path = Path(value)
+        if path.is_file():
+            name = path.stem
+        elif value in SCENARIO_NAMES:
+            name = value
+            path = VM / 'scenarios' / f'{name}.json'
+        else:
+            print(json.dumps({'scenario': value, 'ok': False,
+                              'problems': ['unknown scenario or missing file']},
+                             indent=2))
+            return 1
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            print(json.dumps({'scenario': name, 'path': str(path), 'ok': False,
+                              'problems': [f'cannot read: {exc}']}, indent=2))
+            return 1
+        problems = validate_scenario(name, data, VM)
+        print(json.dumps({'scenario': name, 'path': str(path),
+                          'ok': not problems, 'problems': problems}, indent=2))
         return 0 if not problems else 1
     if args.action == 'check-bench':
         if args.all and args.path:

@@ -856,5 +856,7 @@ items beyond that.
 - **2026-11-14 — daemon start timeout reaping**: failed readiness terminates
   and reaps the child; PID test + normal start/exec/stop re-verified. 362
   tests; 162 VM commits.
+- **2026-11-14 — check-scenario**: per-contract CLI validation with JSON
+  report and 0/1 exit. 363 tests; 163 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.

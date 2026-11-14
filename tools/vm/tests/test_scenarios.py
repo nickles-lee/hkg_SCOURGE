@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -104,6 +106,33 @@ class ScenarioContractTests(unittest.TestCase):
             self.assertIn('missing conformance.json',
                           '\n'.join(state['problems']))
             self.assertEqual(state['unregistered'], ['extra'])
+
+    def test_check_scenario_cli(self) -> None:
+        good = subprocess.run(
+            [sys.executable, '-B', str(VM / 'launch.py'), 'check-scenario',
+             'boot'], cwd=VM, capture_output=True, text=True, check=False)
+        self.assertEqual(good.returncode, 0, good.stderr)
+        self.assertTrue(json.loads(good.stdout)['ok'])
+
+        with tempfile.TemporaryDirectory(prefix='vm-check-scenario-') as tmp:
+            broken = Path(tmp) / 'broken.json'
+            broken.write_text(json.dumps(
+                {'name': 'broken', 'description': 'x', 'checks': []}))
+            completed = subprocess.run(
+                [sys.executable, '-B', str(VM / 'launch.py'), 'check-scenario',
+                 str(broken)], cwd=VM, capture_output=True, text=True,
+                check=False)
+            self.assertEqual(completed.returncode, 1)
+            problems = '\n'.join(json.loads(completed.stdout)['problems'])
+            self.assertIn('checks must be a non-empty list', problems)
+
+        missing = subprocess.run(
+            [sys.executable, '-B', str(VM / 'launch.py'), 'check-scenario',
+             'no-such-scenario'], cwd=VM, capture_output=True, text=True,
+            check=False)
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn('unknown scenario',
+                      '\n'.join(json.loads(missing.stdout)['problems']))
 
     def test_runbook_probe_accepts_both_layouts(self) -> None:
         with tempfile.TemporaryDirectory(prefix='vm-scenarios-') as tmp:
