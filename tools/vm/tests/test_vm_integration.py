@@ -164,6 +164,44 @@ class VMIntegrationTests(unittest.TestCase):
                      '--daemon-dir', str(daemon_dir)],
                     cwd=VM, capture_output=True, text=True, timeout=60)
 
+    def test_daemon_duplicate_start_rejected(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-duplicate-') as tmp:
+            daemon_dir = Path(tmp) / 'daemon'
+
+            def cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            started = cli('start', '--daemon-dir', str(daemon_dir),
+                          '--ready-timeout', '120', '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                duplicate = cli('start', '--daemon-dir', str(daemon_dir),
+                                '--ready-timeout', '120', '--lock-timeout', '120')
+                self.assertNotEqual(duplicate.returncode, 0,
+                                    duplicate.stdout + duplicate.stderr)
+                self.assertIn('already running',
+                              duplicate.stdout + duplicate.stderr)
+
+                alive = cli('exec', '--daemon-dir', str(daemon_dir),
+                            '--cmd', 'echo DUPLICATE_START_SAFE')
+                self.assertEqual(alive.returncode, 0,
+                                 alive.stdout + alive.stderr)
+                self.assertIn('DUPLICATE_START_SAFE', alive.stdout)
+                status = cli('status', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(status.returncode, 0, status.stderr)
+                values = json.loads(status.stdout)
+                self.assertEqual(values['state'], 'ready')
+                self.assertTrue(values['qemu_alive'])
+            finally:
+                stopped = cli('stop', '--daemon-dir', str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_daemon_qmp_input(self):
         with tempfile.TemporaryDirectory(prefix='vm-daemon-input-') as tmp:
             daemon_dir = Path(tmp) / 'daemon'

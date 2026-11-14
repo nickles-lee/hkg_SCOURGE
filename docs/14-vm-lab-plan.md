@@ -687,5 +687,8 @@ items beyond that.
 - **2026-11-14 — QMP input integration**: compat daemon receives a real key
   and absolute click; responses and QEMU health verified. Real run PASS
   (5.2 s). 300 tests (31 skipped); 101 VM commits.
+- **2026-11-14 — duplicate daemon start guard**: second start fails
+  "already running" without disturbing the original; exec/status verified.
+  Real run PASS (8.6 s). 301 tests (32 skipped); 102 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
