@@ -216,9 +216,9 @@ healthy; a symlink inside the directory that resolves outside is rejected
 too. Two simultaneous `exec` requests are serialized by the guest lock;
 both return their own output with no cross-talk. Out-of-bounds clicks and
 invalid QMP qcodes fail with diagnostics and leave the daemon healthy.
-Corrupting `status.json` does not crash the daemon: status reports
-unreachable/missing state, exec still works, stop rewrites `stopped`, and a
-restart succeeds. Stopping twice is idempotent; after stop, status reports
+Corrupting or deleting `status.json` does not crash the daemon: status
+reports unreachable/missing state, exec still works, stop rewrites `stopped`,
+and a restart succeeds. Stopping twice is idempotent; after stop, status reports
 `stopped`/unreachable and exec/screenshot fail fast without artifacts. A
 screenshot copy to an unwritable/missing destination or a read-only directory
 fails with a clear error, removes the daemon-dir capture, and leaves the

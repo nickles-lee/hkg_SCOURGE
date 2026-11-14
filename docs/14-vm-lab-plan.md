@@ -763,5 +763,8 @@ items beyond that.
 - **2026-11-14 — one-shot missing-overlay rebuild**: deleted state overlay
   is recreated and loses the marker. Real run PASS (12.7 s). 323 tests
   (53 skipped); 126 VM commits.
+- **2026-11-14 — daemon missing-status recovery**: deleted status.json does
+  not block status/exec/stop/restart. Real run PASS (15.7 s). 324 tests
+  (54 skipped); 127 VM commits.
 - **Remaining:** only the blocked items above; no feasible P2 work remains.
   P3-1 is still deferred; P3-2's practical hardening is now landed.
