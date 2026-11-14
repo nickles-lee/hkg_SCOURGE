@@ -1036,8 +1036,10 @@ class VMIntegrationTests(unittest.TestCase):
                     [sys.executable, '-B', str(VM / 'launch.py'), 'daemon', *args],
                     cwd=VM, capture_output=True, text=True, timeout=240)
 
+            cpu = sorted(os.sched_getaffinity(0))[0]
             started = cli('start', '--daemon-dir', str(daemon_dir),
                           '--exec-output-max', '1000', '--screenshot-keep', '2',
+                          '--command-log-max', '900', '--pin-cpu', str(cpu),
                           '--ready-timeout', '120', '--lock-timeout', '120')
             combined = started.stdout + started.stderr
             if 'another VM boot holds' in combined or 'lock timeout' in combined:
@@ -1050,10 +1052,14 @@ class VMIntegrationTests(unittest.TestCase):
                 config = json.loads((daemon_dir / 'config.json').read_text())
                 self.assertEqual(config['exec_output_max'], 1000)
                 self.assertEqual(config['screenshot_keep'], 2)
+                self.assertEqual(config['command_log_max'], 900)
+                self.assertEqual(config['pin_cpu'], cpu)
                 status = cli('status', '--daemon-dir', str(daemon_dir))
                 values = json.loads(status.stdout)
                 self.assertEqual(values['exec_output_max'], 1000)
                 self.assertEqual(values['screenshot_keep'], 2)
+                self.assertEqual(values['command_log_max'], 900)
+                self.assertEqual(values['pin_cpu'], cpu)
 
                 executed = cli(
                     'exec', '--daemon-dir', str(daemon_dir), '--cmd',
