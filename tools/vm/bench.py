@@ -99,6 +99,11 @@ def build_argv(args, scenario: dict, cache: str | None = None,
                pin_cpu: int | None = None) -> list[str]:
     cache = args.cache if cache is None else cache
     pin_cpu = args.pin_cpu if pin_cpu is None else pin_cpu
+    mode = scenario.get('requires_mode')
+    if mode and args.kernel != mode:
+        raise ValueError(f"{scenario['name']} requires --kernel {mode}")
+    if scenario.get('requires_share') and args.share is None:
+        raise ValueError(f"{scenario['name']} requires --share")
     argv = [
         sys.executable, '-B', str(VM / 'launch.py'), 'run', '--no-lock',
         '--profile', args.profile, '--kernel', args.kernel,
@@ -122,6 +127,10 @@ def build_argv(args, scenario: dict, cache: str | None = None,
         if value is None:
             raise ValueError(f"{scenario['name']} requires --{requirement}")
         argv.extend([f'--{requirement}', str(value)])
+    if scenario.get('requires_share'):
+        argv.extend(['--share', str(args.share)])
+    if scenario.get('requires_visible_frame'):
+        argv.append('--qmp-screenshot')
     return argv
 
 

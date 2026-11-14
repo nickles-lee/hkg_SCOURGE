@@ -267,6 +267,10 @@ it is not a default because the measured ~1.5% gain at n=3 is too small to
 justify one. Avoid CPU 0 for isolation experiments and expect `--smp >1` to
 slow down when all vCPUs share one host CPU.
 
+Scenarios with `requires_mode`, `requires_share` or
+`requires_visible_frame` are wired automatically: pass a matching `--kernel`,
+`--share`, and `--qmp-screenshot` is added for visible-frame scenarios.
+
 For repeatable numbers, use the benchmark driver:
 
 ```sh

@@ -190,6 +190,24 @@ class BenchTests(unittest.TestCase):
         self.assertIn('--cache writethrough', joined)
         self.assertIn('--pin-cpu 3', joined)
 
+    def test_mode_share_and_visible_frame_wiring(self) -> None:
+        wifi = load_scenario('wifi-ui')
+        argv = build_argv(args(kernel='compat', share=Path('/tmp/share')),
+                          wifi)
+        joined = ' '.join(argv)
+        self.assertIn('--kernel compat', joined)
+        self.assertIn('--share /tmp/share', joined)
+        with self.assertRaisesRegex(ValueError, 'requires --kernel compat'):
+            build_argv(args(), wifi)
+        with self.assertRaisesRegex(ValueError, 'requires --share'):
+            build_argv(args(kernel='compat'), wifi)
+
+        smoke = load_scenario('ui-smoke')
+        argv = build_argv(args(kernel='compat'), smoke)
+        self.assertIn('--qmp-screenshot', argv)
+        with self.assertRaisesRegex(ValueError, 'requires --kernel compat'):
+            build_argv(args(), smoke)
+
     def test_missing_required_input_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, 'requires --payload'):
             build_argv(args(), load_scenario('can-smoke'))
