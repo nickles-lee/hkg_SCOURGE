@@ -574,27 +574,46 @@ def _serve(config: dict) -> int:
     return 0 if status["state"] == "stopped" else 1
 
 
+def tail_text(path: Path, lines: int) -> str:
+    """Read only enough tail bytes to return the last `lines` lines."""
+    lines = max(1, int(lines))
+    block = 64 * 1024
+    chunks: list[bytes] = []
+    newlines = 0
+    with Path(path).open("rb") as handle:
+        handle.seek(0, 2)
+        position = handle.tell()
+        while position > 0 and newlines < lines + 1:
+            size = min(block, position)
+            position -= size
+            handle.seek(position)
+            chunk = handle.read(size)
+            chunks.append(chunk)
+            newlines += chunk.count(b"\n")
+    data = b"".join(reversed(chunks))
+    text = data.decode("utf-8", "replace")
+    return "\n".join(text.splitlines()[-lines:])
+
+
 def console(daemon_dir: Path, lines: int = 200, follow: bool = False) -> int:
     path = Path(daemon_dir) / "serial.log"
     if not path.is_file():
         raise RuntimeError(f"serial log missing: {path}")
-    lines = max(1, int(lines))
-    data = path.read_text(errors="replace")
-    print("\n".join(data.splitlines()[-lines:]))
+    print(tail_text(path, lines))
     if not follow:
         return 0
-    position = len(data)
+    position = path.stat().st_size
     try:
         while True:
             time.sleep(0.2)
             if path.stat().st_size < position:
                 position = 0
-            with open(path, "r", errors="replace") as handle:
+            with path.open("rb") as handle:
                 handle.seek(position)
                 chunk = handle.read()
                 position = handle.tell()
             if chunk:
-                sys.stdout.write(chunk)
+                sys.stdout.write(chunk.decode("utf-8", "replace"))
                 sys.stdout.flush()
     except KeyboardInterrupt:
         return 0

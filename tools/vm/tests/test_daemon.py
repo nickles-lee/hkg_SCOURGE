@@ -127,6 +127,19 @@ class DaemonTests(unittest.TestCase):
             cwd=VM, capture_output=True, text=True, check=False)
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
+    def test_tail_text_bounded_reads(self) -> None:
+        path = self.root / 'serial.log'
+        path.write_text(''.join(f'line {index}\n' for index in range(10000)))
+        self.assertEqual(daemon.tail_text(path, 3),
+                         'line 9997\nline 9998\nline 9999')
+        self.assertEqual(daemon.tail_text(path, 0), 'line 9999')
+        self.assertTrue(daemon.tail_text(path, 20000).startswith('line 0\n'))
+        path.write_text('alpha\nbeta\ngamma')
+        self.assertEqual(daemon.tail_text(path, 2), 'beta\ngamma')
+        unicode_path = self.root / 'unicode.log'
+        unicode_path.write_text(''.join(f'é-{index}\n' for index in range(200)))
+        self.assertEqual(daemon.tail_text(unicode_path, 2), 'é-198\né-199')
+
     def test_console_clamps_line_count(self) -> None:
         (self.root / 'serial.log').write_text('one\ntwo\nthree\n')
         for lines, expected in ((0, 'three'), (-5, 'three'),
