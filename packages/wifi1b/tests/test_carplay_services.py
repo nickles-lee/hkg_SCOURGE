@@ -60,7 +60,7 @@ assert "ConditionPathExists=/rw_data/wifi1b/carplay-native-auth" in auth
 assert "not car-validated" in readme.lower()
 assert "do **not** run `systemctl enable`" in readme.lower()
 assert "restore the stock vbtd" in readme.lower()
-assert "static flag is not a" in readme
+assert "apple usb" in readme.lower()
 
 # The example config must stay fail-closed and must not invent identity.
 for key in ("service_name=", "name=", "model=", "manufacturer=", "serial=",
@@ -75,6 +75,7 @@ for key in ("name", "model", "manufacturer", "serial", "firmware", "hardware",
     assert f"{key}=\n" in example, key
 assert "consent=0" in example
 assert "usb_active=1" in example
+assert "usb_sysfs=/sys/bus/usb/devices" in example
 assert "ap_channel=0" in example
 
 # The README's relative links must resolve in-tree.

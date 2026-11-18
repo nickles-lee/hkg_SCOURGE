@@ -66,6 +66,7 @@ def main() -> int:
         assert all(tuple(int(part) for part in version.split(".")[:2]) <=
                    (2, 25) for version in helper["versions"]), helper["versions"]
         assert "cp_target_compat.c" in manifest["sources"]
+        assert "cp_usb.c" in manifest["sources"]
 
         binary = out / "carplay-broker"
         assert binary.is_file() and binary.stat().st_size > 0

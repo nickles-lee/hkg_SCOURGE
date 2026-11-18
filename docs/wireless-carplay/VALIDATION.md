@@ -25,7 +25,7 @@ not proof that bytes reached the phone.
 | P1 RX-hook builder gates | `OFFLINE` | `NOT VALIDATED` | Exact preimage/span/hash gates PASS; hook not deployed |
 | P1 RX bytes arrive on car | `NOT VALIDATED` | `NOT VALIDATED` | No patched `vbtd`; no `/run/wifi1b/carplay/rx.sock` traffic observed |
 | Broker host helper/fixtures | `OFFLINE` | `NOT VALIDATED` | Host build, config/identity/security gates PASS |
-| Broker target build/link | `OFFLINE` | `NOT VALIDATED` | glibc 2.25 ELF, `170000` bytes, SHA `a3f8db92…c6d22`; not executed on car |
+| Broker target build/link | `OFFLINE` | `NOT VALIDATED` | glibc 2.25 ELF, `170208` bytes, SHA `57728611…ae1e`; not executed on car |
 | Broker runtime on car | `NOT VALIDATED` | `NOT VALIDATED` | Not deployed |
 | MFi helper target build | `OFFLINE` | `NOT VALIDATED` | Built against target rootfs; not deployed |
 | MFi cert/signature from real chip | `NOT VALIDATED` | `NOT VALIDATED` | No auth socket/chip exchange observed |
@@ -41,7 +41,8 @@ not proof that bytes reached the phone.
 | Wi-Fi bootstrap | `OFFLINE` codec | `NOT VALIDATED` | No AP client; `carplay_ready:false` |
 | `_airplay._tcp` advertisement | `NOT VALIDATED` | `NOT VALIDATED` | TXT/SRV still uncaptured |
 | Projection/AirPlay handoff | `NOT VALIDATED` | `NOT VALIDATED` | No receiver trigger or projection |
-| Wired CarPlay coexistence | `NOT VALIDATED` | `NOT VALIDATED` | Not exercised this session |
+| Live Apple-USB gate | `OFFLINE` | `NOT VALIDATED` | Fixture tests block Apple/allow others/fail closed; car sysfs not probed |
+| Wired CarPlay coexistence | `NOT VALIDATED` | `NOT VALIDATED` | Not exercised this session; gate is conservative |
 | USB SSH preservation | `OFFLINE`/docs | `LIVE` | The session itself used USB SSH on port 2224 |
 | BlueLink/modem routing | `OFFLINE` reviewed | `NOT VALIDATED` | Not exercised this session |
 | Rollback/restore | `OFFLINE` docs | `NOT VALIDATED` | No deployment, so no rollback was exercised |
@@ -79,8 +80,9 @@ not proof that bytes reached the phone.
    `ap_clients` stayed 0.
 5. **Projection unresolved:** `_airplay._tcp` advertisement and the
    AppProjection trigger are still unprobed.
-6. **Safety gates:** live Apple-USB/wired detection is still WIP; the example
-   config keeps `usb_active=1` (block) until it exists.
+6. **Safety gates:** the Apple-USB scan is built and fixture-tested but not
+   car-validated; the example keeps `usb_active=1` (manual block). A charging
+   iPhone is intentionally treated as a blocker.
 7. **PSK source:** the broker still takes `ap_psk` from owner config, not an
    attested readback; it must match the daemon.
 

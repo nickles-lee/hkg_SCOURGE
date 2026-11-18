@@ -40,9 +40,14 @@ helper and patched `vbtd` have passed their offline gates.
    is valid. The AP **passphrase** is still config-supplied and is not
    attested by status; keep `ap_psk` in sync with the daemon or the phone will
    fail the join. The AirPlay port is also config-supplied.
-6. The example config sets `usb_active=1` (block). A static flag is not a
-   substitute for detecting a connected iPhone; do not set `usb_active=0`
-   where wired CarPlay may be active. Live Apple-USB detection is still WIP.
+6. The broker scans `/sys/bus/usb/devices` for Apple vendor `05ac` at policy
+   checks and blocks if any Apple USB device is present; a missing/unreadable
+   sysfs root or `idVendor` also blocks. This is point-in-time, not a
+   continuous hotplug monitor, and is built offline, **not car-validated**.
+   The example keeps
+   `usb_active=1` as an additional manual block. Set `usb_active=0` only when
+   the live scan is available and the owner accepts that a charging iPhone
+   will block the wireless offer.
 
 ## Manual install (owner, over SSH)
 

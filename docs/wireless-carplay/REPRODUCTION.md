@@ -78,7 +78,7 @@ gates; do not conflate them with the RX hook.
 | G4 | No first-party iAP2 control plane or MFi RPC | Broker + MFi helper | `BUILT-OFFLINE` |
 | G5 | AP passphrase/port are config-supplied, not attested | Fresh readback enforced; keep PSK/port in sync | `BUILT-OFFLINE` / PSK `DESIGN` |
 | G6 | AirPlay receiver not advertised/triggered | P3 minimal AppProjection trigger (only if needed) | `DEFERRED` |
-| G7 | Wired CarPlay coexistence not live-checked | Conservative Apple-USB detection + consent | `DESIGN` |
+| G7 | Wired CarPlay coexistence not live-checked | Conservative Apple-USB scan + consent | `BUILT-OFFLINE` |
 | G8 | No default-off deploy/rollback plumbing | Units + owner checklist, not auto-installed | `BUILT-OFFLINE` |
 
 ### What stock already does
@@ -236,15 +236,20 @@ gates; they are not on the D-Bus object path.
   `_airplay._tcp` appear. The fallback is a minimal `AppProjection` trigger
   patch, not the vendor iAP2 builder. `DEFERRED`; no patch address is proven.
 
-### G7. Wired CarPlay coexistence is not fail-closed yet
+### G7. Wired coexistence has a conservative live gate (not car-validated)
 
-- **Evidence:** the broker policy callback currently returns a static
-  `usb_active` config value. That is a bench override, not a live check.
-- **Consequence:** if a wired CarPlay session is active and the phone does not
-  advertise wired availability in the iAP2 exchange, a static `usb_active=0`
-  could allow a wireless offer.
-- **Fix:** detect Apple USB enumeration (conservative: any Apple USB device
-  blocks wireless) and require `consent=1`; fail closed. `DESIGN`.
+- **Evidence:** the broker scans `/sys/bus/usb/devices` (configurable
+  `usb_sysfs`) for Apple vendor `05ac` at policy/offer checks and repeats it
+  on the session policy recheck. Any Apple USB device blocks the wireless
+  offer. A missing/unreadable root, an unreadable/oversized `idVendor` entry,
+  or a read error also blocks. The manual `usb_active=1` flag remains an
+  additional block.
+- **Residual gap:** the scan is point-in-time (not a continuous hotplug
+  monitor), fixture-tested, not car-validated. It treats a charging iPhone as
+  a blocker, and it does not detect a non-Apple wired projection session. Do
+  not set `usb_active=0` unless the live scan is confirmed and the owner
+  accepts the charging-phone block.
+- **Status:** `BUILT-OFFLINE`; car validation pending.
 
 ### G8. Deployment/rollback is manual and default-off
 
@@ -281,8 +286,8 @@ down SSH, BlueLink, the AP, wired CarPlay or the stock receiver.
 
 **Target build proof (offline):** `build_carplay_broker.py` now links the
 helper against the target rootfs glibc 2.25. Current output:
-`packages/wifi1b/out/carplay-broker-target/carplay-broker`, 170000 bytes,
-SHA-256 `a3f8db92e729162c96bcfc5af2772a685bcc67abb9ea75249536318acc5c6d22`;
+`packages/wifi1b/out/carplay-broker-target/carplay-broker`, 170208 bytes,
+SHA-256 `57728611e0d7b5459d948043b7ffab4d05c7c3842cb18d756ee12c0dc2b9ae1e`;
 NEEDED is exactly the allowed seven libraries; GLIBC references are
 `{2.2.5, 2.4, 2.14, 2.17}`; no RPATH/RUNPATH; no own `GLIBC_PRIVATE`
 references; loadability requires the matching 2.25 `ld.so`, which supplies
@@ -820,6 +825,7 @@ alone.
 | Broker target build | `packages/wifi1b/scripts/build_carplay_broker.py` |
 | Target-2.25 link shims | `packages/wifi1b/src/carplay/cp_target_compat.c` |
 | Target build regression | `packages/wifi1b/tests/test_carplay_broker_target.py` |
+| Apple-USB gate | `packages/wifi1b/src/carplay/cp_usb.c`, `tests/test_carplay_usb.py` |
 | MFi helper | `packages/wifi1b/src/carplay/cp_native_auth.c` |
 | MFi target build | `packages/wifi1b/scripts/build_carplay_native.py` |
 | Default-off units/checklist | `packages/wifi1b/artifacts/systemd/`, `packages/wifi1b/artifacts/carplay/README.md` |

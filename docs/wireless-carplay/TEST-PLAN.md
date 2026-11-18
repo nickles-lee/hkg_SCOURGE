@@ -51,6 +51,7 @@ git status --short
 git log --oneline -3
 make -C packages/wifi1b/src carplay-broker
 python3 packages/wifi1b/tests/test_carplay_broker_main.py
+python3 packages/wifi1b/tests/test_carplay_usb.py
 python3 packages/wifi1b/tests/test_carplay_services.py
 SCOURGE_ROOTFS=/path/to/rootfs \
   python3 packages/wifi1b/tests/test_carplay_vbtd51_patch.py
@@ -495,8 +496,12 @@ AUTH_WANT=$(cat /rw_data/wifi1b/auth.sha256)
   "$AUTH_WANT" ] || { echo "auth hash mismatch"; exit 1; }
 ```
 
-3. Keep `usb_active=1` unless a live Apple-USB/wired gate is in place and the
-   owner explicitly accepts the risk.
+3. `usb_active=1` is a manual block. The broker also scans `usb_sysfs` for an
+   Apple USB device; a charging iPhone blocks the offer. For the first live
+   wireless test, set `usb_active=0` only with no Apple USB device attached and
+   confirm `usb_blocked:false` in `/run/wifi1b/broker-status.json`; the scan is
+   point-in-time and repeated on the session policy recheck, not a continuous
+   hotplug monitor. Otherwise keep `1` and stop.
 4. Start `scourge-carplay-auth.service` first, then
    `carplay-broker.service`.
 5. Check:

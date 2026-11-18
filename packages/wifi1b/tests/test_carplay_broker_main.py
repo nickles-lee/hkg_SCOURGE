@@ -41,6 +41,8 @@ usb_active=0
 
 with tempfile.TemporaryDirectory(prefix="broker-main-", dir="/tmp/opencode") as d:
     tmp = Path(d)
+    usb_empty = tmp / "usb-empty"
+    usb_empty.mkdir()
 
     # Missing config is a clean fail-closed exit.
     r = subprocess.run([str(BROKER), "--config", str(tmp / "missing"),
@@ -85,7 +87,8 @@ with tempfile.TemporaryDirectory(prefix="broker-main-", dir="/tmp/opencode") as 
         status3 = tmp / "s3"
         r = subprocess.run([str(BROKER), "--config", str(cfg3),
                             "--broker-status", str(status3),
-                            "--status", str(tmp / "no-daemon-status")],
+                            "--status", str(tmp / "no-daemon-status"),
+                            "--usb-sysfs", str(usb_empty)],
                            capture_output=True, text=True, timeout=20)
         assert r.returncode == 2, r
         text = status3.read_text()

@@ -12,7 +12,7 @@ all: wifi1b_daemon wifi1b_qmlpatch
 BROKER_SOURCES = carplay/cp_broker_main.c carplay/cp_wire.c carplay/cp_link.c \
 	carplay/cp_bootstrap.c carplay/cp_session.c carplay/cp_auth_broker.c \
 	carplay/cp_oem_auth_async.c carplay/cp_spp_dbus.c carplay/cp_spp_socket.c \
-	carplay/cp_runtime_broker.c
+	carplay/cp_runtime_broker.c carplay/cp_usb.c
 carplay-broker:
 	mkdir -p ../out/carplay-broker
 	$(CC) $(CFLAGS) -o ../out/carplay-broker/carplay-broker \

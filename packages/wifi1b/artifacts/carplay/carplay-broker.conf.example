@@ -50,7 +50,9 @@ airplay_port=7000
 # Fail closed: no offer until the owner explicitly grants consent.
 consent=0
 
-# Safety default: 1 blocks the broker whenever the policy callback runs, which
-# is the conservative choice until a live Apple-USB/wired-CarPlay check is
-# wired in.  Set 0 only for a bench test where wired CarPlay cannot be active.
+# Safety default: 1 is a manual block.  The broker also scans usb_sysfs for an
+# Apple USB vendor (05ac) and blocks if one is present; a missing/unreadable
+# sysfs root also blocks.  Set 0 only when the live scan is available and the
+# owner accepts that a charging iPhone will block the wireless offer.
 usb_active=1
+# usb_sysfs=/sys/bus/usb/devices

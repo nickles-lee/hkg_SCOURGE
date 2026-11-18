@@ -32,6 +32,7 @@
 
 #include "cp_runtime_broker.h"
 #include "cp_spp_socket.h"
+#include "cp_usb.h"
 #include "cp_wire.h"
 
 #define CFG_PATH "/rw_data/wifi1b/carplay-broker.conf"
@@ -68,6 +69,7 @@ typedef struct {
     char source_version[MAX_FIELD];
     int consent;
     int usb_active;
+    char usb_sysfs[256];
     char config_path[512];
     char daemon_status_path[512];
     char broker_status_path[512];
@@ -83,6 +85,7 @@ typedef struct {
     char lang_storage[MAX_LANGS][MAX_FIELD];
     const char *langs[MAX_LANGS + 1]; /* + NULL terminator */
     bool ap_ready;
+    bool usb_blocked;
 } broker_ctx_t;
 
 static broker_ctx_t g_ctx;
@@ -155,6 +158,8 @@ static int load_kv(const char *path, broker_config_t *cfg)
         else if (!strcmp(k, "source_version")) copy_field(cfg->source_version, sizeof(cfg->source_version), v);
         else if (!strcmp(k, "consent")) cfg->consent = atoi(v) != 0;
         else if (!strcmp(k, "usb_active")) cfg->usb_active = atoi(v) != 0;
+        else if (!strcmp(k, "usb_sysfs")) copy_field(cfg->usb_sysfs,
+                                                     sizeof(cfg->usb_sysfs), v);
     }
     fclose(f);
     return 0;
@@ -307,7 +312,9 @@ static bool usb_active_cb(void *user, const char *bluetooth_id,
     (void)bluetooth_id;
     (void)usb_id;
     broker_ctx_t *ctx = user;
-    return ctx->cfg.usb_active != 0;
+    ctx->usb_blocked = ctx->cfg.usb_active != 0 ||
+                       cp_usb_apple_present(ctx->cfg.usb_sysfs);
+    return ctx->usb_blocked;
 }
 
 static void update_ap_readback(broker_ctx_t *ctx, uint64_t now_ms)
@@ -392,12 +399,14 @@ static void write_status(const broker_ctx_t *ctx, const char *state,
     fprintf(f,
             "{\"ok\":%s,\"state\":\"%s\",\"error\":\"%s\","
             "\"epoch\":%u,\"peer\":\"%s\",\"ap_on_air\":%s,"
+            "\"usb_blocked\":%s,"
             "\"rx_packets\":%u,\"rx_dropped\":%u,\"tx_chunks\":%u,"
             "\"auth_failures\":%u,\"session_failures\":%u,"
             "\"init_timeouts\":%u,\"drain_timeouts\":%u}\n",
             ok ? "true" : "false", state, error,
             ctx->broker.epoch, ctx->broker.peer,
             ctx->ap.on_air ? "true" : "false",
+            ctx->usb_blocked ? "true" : "false",
             ctx->broker.stats.rx_packets, ctx->broker.stats.rx_dropped,
             ctx->broker.stats.tx_chunks, ctx->broker.stats.auth_failures,
             ctx->broker.stats.session_failures,
@@ -562,6 +571,8 @@ int main(int argc, char **argv)
     copy_field(g_ctx.cfg.broker_status_path,
                sizeof(g_ctx.cfg.broker_status_path), BROKER_STATUS);
     copy_field(g_ctx.cfg.rx_path, sizeof(g_ctx.cfg.rx_path), RX_SOCKET);
+    copy_field(g_ctx.cfg.usb_sysfs, sizeof(g_ctx.cfg.usb_sysfs),
+               "/sys/bus/usb/devices");
     copy_field(g_ctx.cfg.service_name, sizeof(g_ctx.cfg.service_name),
                "SCOURGE-iAP");
     for (int i = 1; i < argc; i++) {
@@ -577,9 +588,13 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--bus") && i + 1 < argc) {
             copy_field(g_ctx.cfg.bus_address, sizeof(g_ctx.cfg.bus_address),
                        argv[++i]);
+        } else if (!strcmp(argv[i], "--usb-sysfs") && i + 1 < argc) {
+            copy_field(g_ctx.cfg.usb_sysfs, sizeof(g_ctx.cfg.usb_sysfs),
+                       argv[++i]);
         } else {
             fprintf(stderr, "usage: %s [--config PATH] [--status PATH] "
-                    "[--broker-status PATH] [--bus ADDRESS]\n", argv[0]);
+                    "[--broker-status PATH] [--bus ADDRESS] "
+                    "[--usb-sysfs PATH]\n", argv[0]);
             return 2;
         }
     }

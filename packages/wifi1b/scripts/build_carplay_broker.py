@@ -42,6 +42,7 @@ SOURCES = [
     "cp_broker_main.c", "cp_wire.c", "cp_link.c", "cp_bootstrap.c",
     "cp_session.c", "cp_auth_broker.c", "cp_oem_auth_async.c",
     "cp_spp_dbus.c", "cp_spp_socket.c", "cp_runtime_broker.c",
+    "cp_usb.c",
 ]
 # Compiled separately with -std=gnu11 so the host fstat/fstatat declarations
 # are visible; the file itself avoids <stdlib.h> to prevent the C23 redirect.
