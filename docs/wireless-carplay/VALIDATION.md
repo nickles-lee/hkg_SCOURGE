@@ -25,7 +25,7 @@ not proof that bytes reached the phone.
 | P1 RX-hook builder gates | `OFFLINE` | `NOT VALIDATED` | Exact preimage/span/hash gates PASS; hook not deployed |
 | P1 RX bytes arrive on car | `NOT VALIDATED` | `NOT VALIDATED` | No patched `vbtd`; no `/run/wifi1b/carplay/rx.sock` traffic observed |
 | Broker host helper/fixtures | `OFFLINE` | `NOT VALIDATED` | Host build, config/identity/security gates PASS |
-| Broker target build/link | `OFFLINE` | `NOT VALIDATED` | glibc 2.25 ELF, `170208` bytes, SHA `57728611…ae1e`; not executed on car |
+| Broker target build/link | `OFFLINE` | `NOT VALIDATED` | glibc 2.25 ELF with XML validation enabled, `183176` bytes, SHA `7f086633…3bf0`; not executed on car |
 | Broker runtime on car | `NOT VALIDATED` | `NOT VALIDATED` | Not deployed |
 | MFi helper target build | `OFFLINE` | `NOT VALIDATED` | Built against target rootfs; not deployed |
 | MFi cert/signature from real chip | `NOT VALIDATED` | `NOT VALIDATED` | No auth socket/chip exchange observed |
@@ -36,6 +36,7 @@ not proof that bytes reached the phone.
 | `SendData` method ACK | `OFFLINE` client | `LIVE` | `SendData(ay 1 0x00)` returned `i 0` |
 | RFCOMM byte delivery to phone | `NOT VALIDATED` | `NOT VALIDATED` | No RFCOMM/btsnoop capture; `i 0` is a stub ACK |
 | AP SSID/channel/security/link-local | `OFFLINE` parser | `LIVE` | Status showed `IONIQ5-CarPlay`, channel 6, WPA2-PSK, link-local |
+| AP configuration agreement | `OFFLINE` | `NOT VALIDATED` | Root-private snapshot freshness, identity and PSK comparison fixture-tested; no proof of installed radio key |
 | AP client join | `NOT VALIDATED` | `NOT VALIDATED` | `ap_clients:0` before and after the SPP probe |
 | iAP2 identification/session | `OFFLINE` codec/session | `NOT VALIDATED` | No broker; stock `vbtd` does not forward RX |
 | Wi-Fi bootstrap | `OFFLINE` codec | `NOT VALIDATED` | No AP client; `carplay_ready:false` |
@@ -83,8 +84,9 @@ not proof that bytes reached the phone.
 6. **Safety gates:** the Apple-USB scan is built and fixture-tested but not
    car-validated; the example keeps `usb_active=1` (manual block). A charging
    iPhone is intentionally treated as a blocker.
-7. **PSK source:** the broker still takes `ap_psk` from owner config, not an
-   attested readback; it must match the daemon.
+7. **PSK source:** the broker refuses a stale or mismatching daemon snapshot.
+   The daemon reports its configured PSK, not an attestation of the running
+   radio key. Successful association is still a separate gate.
 
 ## Forbidden claims until new evidence exists
 

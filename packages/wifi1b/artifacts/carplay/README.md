@@ -6,6 +6,8 @@ shipped as artifacts and are **not** copied or enabled by
 feature; it is the deployment plumbing for the checkpoints in
 [`docs/wireless-carplay/VBT-SPP-HOOK-PORTING.md`](../../../../docs/wireless-carplay/VBT-SPP-HOOK-PORTING.md)
 and [`DEFERRED-CAR-PROBES.md`](../../../../docs/wireless-carplay/DEFERRED-CAR-PROBES.md).
+In an assembled payload, consult the adjacent `TEST-PLAN.md` and
+`VALIDATION.md` and verify `sha256sum -c SHA256SUMS` before staging.
 
 ## Files
 
@@ -34,12 +36,17 @@ helper and patched `vbtd` have passed their offline gates.
 4. `/rw_data/wifi1b/carplay-broker.conf` is owner-supplied, root-owned `0600`,
    and `consent=1` is a deliberate owner choice. Empty identity fields keep
    the broker stopped.
-5. The daemon reports fresh AP/readback state in `/rw_data/wifi1b/status.json`.
-   The broker refreshes SSID/channel/security/link-local from that readback,
-   and `cp_bootstrap` refuses an offer until the AP is ready and the readback
-   is valid. The AP **passphrase** is still config-supplied and is not
-   attested by status; keep `ap_psk` in sync with the daemon or the phone will
-   fail the join. The AirPlay port is also config-supplied.
+5. The daemon reports fresh AP state in root-private `status.json`. The broker
+   compares the observed SSID/channel/security/link-local and the daemon's
+   configured SSID/passphrase against the owner config before permitting an
+   offer. This checks configuration agreement, not the running radio's key.
+   The AirPlay port is still config-supplied. `carplay-broker --check-ap`
+   checks the snapshot without connecting to the bus or opening the RX socket.
+   This bundle does not ship the Wifi1b daemon. The installed daemon must
+   provide the current flat AP status schema, including configured SSID/PSK,
+   observation readiness, apply state, and `updated_ms` in whole seconds
+   expressed as milliseconds. An incompatible daemon is a stop, not a
+   reason to bypass the check.
 6. The broker scans `/sys/bus/usb/devices` for Apple vendor `05ac` at policy
    checks and blocks if any Apple USB device is present; a missing/unreadable
    sysfs root or `idVendor` also blocks. This is point-in-time, not a
@@ -50,6 +57,10 @@ helper and patched `vbtd` have passed their offline gates.
    will block the wireless offer.
 
 ## Manual install (owner, over SSH)
+
+Stop if an intended destination already contains files you did not stage or
+cannot identify. The commands below are for a fresh, explicitly authorized
+test installation, not an upgrade over an existing installation.
 
 ```sh
 # From the staged USB/SSH directory, not from the repo checkout:
@@ -62,7 +73,9 @@ systemctl daemon-reload
 ```
 
 Do **not** run `systemctl enable` until the owner explicitly accepts the
-experimental status and the prerequisites above. Start the Wifi1b daemon/AP
+experimental status and the prerequisites above. Before starting either unit,
+complete the helper hash comparisons and `--check-ap` in Phase 4 of
+`TEST-PLAN.md`. Start the Wifi1b daemon/AP
 yourself first; the broker unit does **not** pull in `wifi1b-daemon.service`,
 so starting the broker cannot change AP/network state. Start the helper first,
 then the broker:

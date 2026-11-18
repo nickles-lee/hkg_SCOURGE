@@ -15,7 +15,7 @@ BROKER_SOURCES = carplay/cp_broker_main.c carplay/cp_wire.c carplay/cp_link.c \
 	carplay/cp_runtime_broker.c carplay/cp_usb.c
 carplay-broker:
 	mkdir -p ../out/carplay-broker
-	$(CC) $(CFLAGS) -o ../out/carplay-broker/carplay-broker \
+	$(CC) $(CFLAGS) -DCP_SPP_DBUS_HAVE_LIBXML2 -o ../out/carplay-broker/carplay-broker \
 		$(BROKER_SOURCES) $(shell pkg-config --cflags --libs dbus-1 libxml-2.0) -pthread
 
 wifi1b_daemon: wifi1b_daemon.c wifi1b_backend.inc ../../common/radio_owner.h FORCE

@@ -168,6 +168,8 @@ def verify_helper(path: Path) -> dict[str, object]:
             undefined.add(name)
         else:
             defined.add(name)
+    if "xmlReadMemory" not in undefined:
+        raise BuildError("D-Bus XML validation is not linked")
     for name in ("__isoc23_strtol", "__isoc23_strtoul", "fstat", "fstatat"):
         if name in undefined:
             raise BuildError(f"helper still has undefined target-absent {name}")
@@ -198,6 +200,7 @@ def build(rootfs: Path, out: Path) -> dict[str, object]:
         "-O2", "-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic",
         "-fno-pie", "-fstack-protector-strong", "-march=x86-64",
         "-mtune=generic", "-fcf-protection=none",
+        "-DCP_SPP_DBUS_HAVE_LIBXML2",
         "-I", str(SRC), *pkg_config_cflags("dbus-1"),
         *pkg_config_cflags("libxml-2.0"),
     ]

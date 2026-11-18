@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
 # SPDX-License-Identifier: AGPL-3.0-only
 """Fixture-only smoke test for the experimental broker helper front end."""
+import json
 import os
+import time
 from pathlib import Path
 import subprocess
 import tempfile
@@ -43,6 +45,42 @@ with tempfile.TemporaryDirectory(prefix="broker-main-", dir="/tmp/opencode") as 
     tmp = Path(d)
     usb_empty = tmp / "usb-empty"
     usb_empty.mkdir()
+    config = tmp / "snapshot.conf"
+    config.write_text(IDENTITY.replace("ap_psk=test-passphrase",
+                                       r'ap_psk=test\"passphrase'))
+    snapshot = tmp / "ap.json"
+    snapshot.touch(mode=0o600)
+    good = dict(app="wifi1b", mode="carplay", observations_fresh=True,
+                ap_active=True, ap_network_ready=True, applying=False,
+                ap_ssid="IONIQ5-CarPlay", carplay_ssid="IONIQ5-CarPlay",
+                carplay_psk=r'test\"passphrase', ap_channel=6,
+                ap_security="WPA2-PSK", ap_linklocal="fe80::1%wlan0",
+                updated_ms=int(time.time()) * 1000)
+
+    def check_snapshot(text, expected, file=snapshot):
+        if file == snapshot:
+            snapshot.write_text(text)
+        result = subprocess.run([str(BROKER), "--check-ap", "--config",
+                                 str(config), "--status", str(file)],
+                                capture_output=True, text=True, timeout=10)
+        assert result.returncode == expected, result
+        assert "passphrase" not in result.stdout + result.stderr
+
+    check_snapshot(json.dumps(good), 0)
+    for replacement in (dict(updated_ms=good["updated_ms"] - 6000),
+                        dict(updated_ms=good["updated_ms"] + 60000),
+                        dict(carplay_psk="another-passphrase"),
+                        dict(carplay_ssid="Other AP"), dict(ap_active=False),
+                        dict(applying=True), dict(ap_channel=262)):
+        check_snapshot(json.dumps(good | replacement), 2)
+    check_snapshot(json.dumps(good)[:-1], 2)
+    check_snapshot('{"ap_active":true,' + json.dumps(good)[1:], 2)
+    snapshot.chmod(0o644)
+    check_snapshot(json.dumps(good), 2)
+    snapshot.chmod(0o600)
+    link = tmp / "status-link"
+    link.symlink_to(snapshot)
+    check_snapshot("", 2, link)
 
     # Missing config is a clean fail-closed exit.
     r = subprocess.run([str(BROKER), "--config", str(tmp / "missing"),

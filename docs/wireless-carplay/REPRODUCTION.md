@@ -76,7 +76,7 @@ gates; do not conflate them with the RX hook.
 | G2 | Registration chain exists; orchestration missing | P2 call `ListenSPP` with CAFF, verify object/TX; no patch preferred | `DESIGN` / car probe |
 | G3 | Wireless capability flags are empty/dead | Broker bypasses the gate; no flag patch | `BUILT-OFFLINE` |
 | G4 | No first-party iAP2 control plane or MFi RPC | Broker + MFi helper | `BUILT-OFFLINE` |
-| G5 | AP passphrase/port are config-supplied, not attested | Fresh readback enforced; keep PSK/port in sync | `BUILT-OFFLINE` / PSK `DESIGN` |
+| G5 | AP configuration must agree before a Wi-Fi offer | Check fresh daemon SSID/channel/security/link-local and configured PSK | `BUILT-OFFLINE`; radio key and receiver port not attested |
 | G6 | AirPlay receiver not advertised/triggered | P3 minimal AppProjection trigger (only if needed) | `DEFERRED` |
 | G7 | Wired CarPlay coexistence not live-checked | Conservative Apple-USB scan + consent | `BUILT-OFFLINE` |
 | G8 | No default-off deploy/rollback plumbing | Units + owner checklist, not auto-installed | `BUILT-OFFLINE` |
@@ -203,21 +203,18 @@ gates; they are not on the D-Bus object path.
     `packages/wifi1b/artifacts/carplay/README.md`.
   All are `BUILT-OFFLINE`; none are installed or activated.
 
-### G5. AP readback freshness is enforced; the PSK is not attested
+### G5. Require a fresh, matching AP snapshot
 
-- **Evidence:** the Wifi1b daemon brings up the AP, CarPlay IE and mDNS
-  service flags and writes `/rw_data/wifi1b/status.json`. The broker requires
-  `observations_fresh`, `ap_active` and `ap_network_ready`, then refreshes
-  `ap_ssid`, `ap_channel`, `ap_security` and `ap_linklocal` from the readback.
-  `cp_bootstrap` refuses the WiFi offer until `AP_READY` and `readback_valid`
-  are set, so a stale/off-air status cannot start the offer.
-- **Residual gap:** the AP **passphrase** (`ap_psk`) and AirPlay port are
-  config-supplied; `status.json` is not used as a trust anchor for them. If
-  `ap_psk` does not match the daemon, the phone fails the join. Keep the
-  owner config in sync; do not treat the readback as attesting the PSK.
-- **Fix/status:** freshness gate `BUILT-OFFLINE`; PSK/port attestation remains
-  `DESIGN`. The example config leaves identity/AP values empty and sets
-  `usb_active=1`, so it fails closed until the owner fills it.
+- The broker reads a bounded root-private regular file, rejects stale or
+  future timestamps, and requires active, ready AP mode with no pending apply.
+  Observed SSID/channel/security/link-local and configured SSID/PSK must
+  match immutable owner config. A mismatch prevents a new offer and clears
+  the pending offer hold; it does not retract an already-sent offer, which
+  still follows its bounded deadline or cancellation path.
+- This is configuration agreement, **not** radio key attestation; the
+  receiver port remains config-supplied. `--check-ap` is a read-only preflight.
+- **Status:** `BUILT-OFFLINE`; actual association and receiver port still
+  need live evidence.
 
 ### G6. AirPlay receiver advertisement/projection is not wired
 
@@ -286,8 +283,8 @@ down SSH, BlueLink, the AP, wired CarPlay or the stock receiver.
 
 **Target build proof (offline):** `build_carplay_broker.py` now links the
 helper against the target rootfs glibc 2.25. Current output:
-`packages/wifi1b/out/carplay-broker-target/carplay-broker`, 170208 bytes,
-SHA-256 `57728611e0d7b5459d948043b7ffab4d05c7c3842cb18d756ee12c0dc2b9ae1e`;
+`carplay-broker`, 183176 bytes,
+SHA-256 `7f0866333856f2150e0a2d60a8061eb286acb2d1e68686a46d0b8101d45f3bf0`;
 NEEDED is exactly the allowed seven libraries; GLIBC references are
 `{2.2.5, 2.4, 2.14, 2.17}`; no RPATH/RUNPATH; no own `GLIBC_PRIVATE`
 references; loadability requires the matching 2.25 `ld.so`, which supplies

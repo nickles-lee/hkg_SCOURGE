@@ -62,24 +62,22 @@ SCOURGE_ROOTFS=/path/to/rootfs \
 python3 scripts/policy_check.py all
 ```
 
-Build the deployable artifacts and record their hashes:
+Build the private candidate once. Record its payload path for the later
+host steps; no separate `$D/build` is needed:
 
 ```sh
-rm -rf "$D/build"
-python3 packages/wifi1b/scripts/build_carplay_spp_patch.py \
-  --input /path/to/vbtd-51 \
-  --out "$D/build/vbtd" \
-  --target 51
-python3 packages/wifi1b/scripts/build_carplay_broker.py \
-  --rootfs /path/to/rootfs \
-  --out "$D/build/broker"
-python3 packages/wifi1b/scripts/build_carplay_native.py \
-  --rootfs /path/to/rootfs \
-  --out "$D/build/native"
-sha256sum "$D/build/vbtd/vbtd-51.spp-rx.patched"
-sha256sum "$D/build/broker/carplay-broker"
-sha256sum "$D/build/native/carplay-native-auth"
+umask 077
+mkdir -p "$D"
+sh packages/wifi1b/scripts/build_carplay_candidate.sh /path/to/rootfs \
+  > "$D/build.log" || exit 1
+PAYLOAD=$(sed -n 's/^Private WIP candidate (not car-validated): //p' "$D/build.log")
+[ -n "$PAYLOAD" ] && (cd "$PAYLOAD" && sha256sum -c SHA256SUMS) || exit 1
+printf '%s\n' "$PAYLOAD" > "$D/payload-path"
 ```
+
+The payload contains a firmware-derived artifact; keep it private. It does
+not contain owner config, firmware libraries, or a Wifi1b daemon replacement.
+It does not install or start services.
 
 Expected current P1 output for the recorded toolchain: size `14117064`, SHA
 `8691ad1468122c5f9f8c577dedb0f2185bb126b2f8afe8b94ceb44bcc095a9a9`.
@@ -322,9 +320,11 @@ Copy the patched binary and its host-recorded hash to the car:
 # host
 DATE=$(date +%Y%m%d)                 # replace with the session date
 D=/tmp/opencode/carplay-$DATE
-sha256sum "$D/build/vbtd/vbtd-51.spp-rx.patched" | awk '{print $1}' \
+PAYLOAD=$(cat "$D/payload-path") || exit 1
+[ -n "$PAYLOAD" ] && (cd "$PAYLOAD" && sha256sum -c SHA256SUMS) || exit 1
+sha256sum "$PAYLOAD/vbtd-51.spp-rx.patched" | awk '{print $1}' \
   > "$D/patch.sha256"
-scp -P 2224 "$D/build/vbtd/vbtd-51.spp-rx.patched" \
+scp -P 2224 "$PAYLOAD/vbtd-51.spp-rx.patched" \
   wifi1b@10.55.0.2:/rw_data/carplay/vbtd-51.spp-rx.patched
 scp -P 2224 "$D/patch.sha256" \
   wifi1b@10.55.0.2:/rw_data/carplay/patch.sha256
@@ -472,18 +472,20 @@ Preconditions: Phase 3 passed, target broker and MFi helper hashes verified,
 owner config prepared, AP PSK matches the daemon, `consent=1` deliberately
 chosen.
 
-1. Copy `carplay-broker`, `carplay-native-auth`, both units and the owner
-   config as described in
-   `packages/wifi1b/artifacts/carplay/README.md`.
+1. Stage only the intended files from the same verified Phase 0 payload.
+   Install the helpers, units and private owner config as described in the
+   payload's `INSTALL.md`, but **do not start either unit yet**.
 2. Compare the on-car hashes with the host-recorded ones; abort on mismatch:
 
 ```sh
 # host: record and copy the exact hashes being staged
 DATE=$(date +%Y%m%d)         # same date as Phase 0
 D=/tmp/opencode/carplay-$DATE
-sha256sum "$D/build/broker/carplay-broker" | awk '{print $1}' \
+PAYLOAD=$(cat "$D/payload-path") || exit 1
+[ -n "$PAYLOAD" ] && (cd "$PAYLOAD" && sha256sum -c SHA256SUMS) || exit 1
+sha256sum "$PAYLOAD/carplay-broker" | awk '{print $1}' \
   > "$D/broker.sha256"
-sha256sum "$D/build/native/carplay-native-auth" | awk '{print $1}' \
+sha256sum "$PAYLOAD/carplay-native-auth" | awk '{print $1}' \
   > "$D/auth.sha256"
 scp -P 2224 "$D/broker.sha256" "$D/auth.sha256" \
   wifi1b@10.55.0.2:/rw_data/wifi1b/
@@ -502,9 +504,19 @@ AUTH_WANT=$(cat /rw_data/wifi1b/auth.sha256)
    confirm `usb_blocked:false` in `/run/wifi1b/broker-status.json`; the scan is
    point-in-time and repeated on the session policy recheck, not a continuous
    hotplug monitor. Otherwise keep `1` and stop.
-4. Start `scourge-carplay-auth.service` first, then
+4. Run the installed, hash-verified broker's read-only preflight on the car:
+
+   ```sh
+   /rw_data/wifi1b/carplay-broker --check-ap \
+     --config /rw_data/wifi1b/carplay-broker.conf || exit 1
+   ```
+
+   Expect `AP snapshot matches`. A refusal is a stop; check settled AP mode,
+   status-schema compatibility and exact owner config values. Do not copy
+   the snapshot into evidence; it contains credentials.
+5. Start `scourge-carplay-auth.service` first, then
    `carplay-broker.service`.
-5. Check:
+6. Check:
 
 ```sh
 systemctl status --no-pager scourge-carplay-auth.service carplay-broker.service

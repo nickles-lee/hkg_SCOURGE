@@ -84,7 +84,6 @@ typedef struct {
     cp_boot_ap_readback ap;
     char lang_storage[MAX_LANGS][MAX_FIELD];
     const char *langs[MAX_LANGS + 1]; /* + NULL terminator */
-    bool ap_ready;
     bool usb_blocked;
 } broker_ctx_t;
 
@@ -165,48 +164,60 @@ static int load_kv(const char *path, broker_config_t *cfg)
     return 0;
 }
 
-static bool json_string(const char *text, const char *key, char *out, size_t cap)
+/* status.json is a bounded flat object of strings, integers and booleans.
+ * Reject other shapes rather than searching for key text inside values. */
+static const char *skip_space(const char *p)
 {
-    char needle[96];
-    snprintf(needle, sizeof(needle), "\"%s\":\"", key);
-    const char *p = strstr(text, needle);
-    if (p == NULL) return false;
-    p += strlen(needle);
-    const char *e = strchr(p, '"');
-    if (e == NULL || e <= p) return false;
-    size_t n = (size_t)(e - p);
-    if (n >= cap) n = cap - 1;
-    memcpy(out, p, n);
+    while (*p && strchr(" \t\r\n", *p)) p++;
+    return p;
+}
+
+static int hex_digit(unsigned char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static bool json_string(const char **cursor, char *out, size_t cap)
+{
+    const char *p = *cursor;
+    size_t n = 0;
+    if (*p++ != '"') return false;
+    while (*p && *p != '"') {
+        unsigned char c = (unsigned char)*p++;
+        if (c < 0x20) return false;
+        if (c == '\\') {
+            switch (*p) {
+            case '"': case '\\': case '/': c = (unsigned char)*p++; break;
+            case 'n': c = '\n'; p++; break;
+            case 'r': c = '\r'; p++; break;
+            case 't': c = '\t'; p++; break;
+            case 'u': {
+                unsigned v = 0;
+                p++;
+                for (unsigned i = 0; i < 4; i++) {
+                    int digit = hex_digit((unsigned char)*p);
+                    if (digit < 0) return false;
+                    v = 16 * v + (unsigned)digit;
+                    p++;
+                }
+                /* The daemon escapes ASCII controls this way, not Unicode. */
+                if (v == 0 || v > 0x7f) return false;
+                c = (unsigned char)v;
+                break;
+            }
+            default: return false;
+            }
+        }
+        if (n + 1 >= cap) return false;
+        out[n++] = (char)c;
+    }
+    if (*p != '"') return false;
     out[n] = '\0';
+    *cursor = p + 1;
     return true;
-}
-
-static bool json_int(const char *text, const char *key, long *out)
-{
-    char needle[96];
-    snprintf(needle, sizeof(needle), "\"%s\":", key);
-    const char *p = strstr(text, needle);
-    if (p == NULL) return false;
-    p += strlen(needle);
-    while (*p == ' ') p++;
-    char *end = NULL;
-    long v = strtol(p, &end, 10);
-    if (end == p) return false;
-    *out = v;
-    return true;
-}
-
-static bool json_bool(const char *text, const char *key, bool *out)
-{
-    char needle[96];
-    snprintf(needle, sizeof(needle), "\"%s\":", key);
-    const char *p = strstr(text, needle);
-    if (p == NULL) return false;
-    p += strlen(needle);
-    while (*p == ' ') p++;
-    if (!strncmp(p, "true", 4)) { *out = true; return true; }
-    if (!strncmp(p, "false", 5)) { *out = false; return true; }
-    return false;
 }
 
 static bool map_security(const char *text, cp_wire_wifi_security *out)
@@ -232,6 +243,79 @@ static void strip_zone(char *s)
 {
     char *p = strchr(s, '%');
     if (p != NULL) *p = '\0';
+}
+
+static bool ap_snapshot_matches(const char *p, const broker_config_t *cfg,
+                                time_t now)
+{
+    const char *keys[] = {
+        "app", "mode", "observations_fresh", "ap_active", "ap_network_ready",
+        "applying", "ap_ssid", "carplay_ssid", "carplay_psk", "ap_channel",
+        "ap_security", "ap_linklocal", "updated_ms",
+    };
+    unsigned seen = 0;
+    const unsigned count = sizeof(keys) / sizeof(keys[0]);
+    p = skip_space(p);
+    if (*p++ != '{' || now <= 0) return false;
+    do {
+        char key[128], value[1024];
+        long number = 0;
+        p = skip_space(p);
+        if (!json_string(&p, key, sizeof(key))) return false;
+        p = skip_space(p);
+        if (*p++ != ':') return false;
+        p = skip_space(p);
+        char type = *p;
+        if (type == '"') {
+            if (!json_string(&p, value, sizeof(value))) return false;
+        } else if (!strncmp(p, "true", 4) || !strncmp(p, "false", 5)) {
+            p += type == 't' ? 4 : 5;
+        } else {
+            char *end;
+            errno = 0;
+            if (type != '-' && (type < '0' || type > '9')) return false;
+            number = strtol(p, &end, 10);
+            if (errno || end == p) return false;
+            p = end;
+            type = 'i';
+        }
+        for (unsigned i = 0; i < count; i++) {
+            if (strcmp(key, keys[i])) continue;
+            if (seen & (1u << i)) return false;
+            seen |= 1u << i;
+            cp_wire_wifi_security observed, expected;
+            switch (i) {
+            case 0: if (type != '"' || strcmp(value, "wifi1b")) return false; break;
+            case 1: if (type != '"' || strcmp(value, "carplay")) return false; break;
+            case 2: case 3: case 4: if (type != 't') return false; break;
+            case 5: if (type != 'f') return false; break;
+            case 6: case 7: if (type != '"' || strcmp(value, cfg->ap_ssid)) return false; break;
+            case 8: if (type != '"' || strcmp(value, cfg->ap_psk)) return false; break;
+            case 9: if (type != 'i' || number != (long)cfg->ap_channel) return false; break;
+            case 10:
+                if (type != '"' || !map_security(value, &observed) ||
+                    !map_security(cfg->ap_security, &expected) ||
+                    observed != expected) return false;
+                break;
+            case 11:
+                if (type != '"') return false;
+                strip_zone(value);
+                if (!cp_wire_link_local_usable(value) ||
+                    strcmp(value, cfg->link_local)) return false;
+                break;
+            case 12:
+                if (type != 'i' || number <= 0 || number % 1000 ||
+                    number / 1000 > now || now - number / 1000 > 5)
+                    return false;
+                break;
+            }
+            break;
+        }
+        p = skip_space(p);
+        if (*p == '}')
+            return *skip_space(p + 1) == '\0' && seen == (1u << count) - 1;
+    } while (*p++ == ',');
+    return false;
 }
 
 static bool identity_complete(const broker_config_t *c)
@@ -317,59 +401,38 @@ static bool usb_active_cb(void *user, const char *bluetooth_id,
     return ctx->usb_blocked;
 }
 
-static void update_ap_readback(broker_ctx_t *ctx, uint64_t now_ms)
+static bool read_ap_snapshot(const broker_config_t *cfg, uid_t expected_uid)
 {
     char text[16384];
-    char ssid[64] = "";
-    char security[32] = "";
-    char linklocal[64] = "";
-    long channel = 0;
-    bool fresh = false, active = false, network = false;
-    FILE *f = fopen(ctx->cfg.daemon_status_path, "r");
-    if (f == NULL) {
-        if (ctx->ap.on_air) {
-            ctx->ap.on_air = false;
-            (void)cp_runtime_broker_set_ap_readback(&ctx->broker, &ctx->ap, now_ms);
-        }
-        return;
+    struct stat st;
+    int fd = open(cfg->daemon_status_path,
+                  O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return false;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_uid != expected_uid || (st.st_mode & 077) != 0 ||
+        st.st_size <= 0 || (uint64_t)st.st_size >= sizeof(text)) {
+        close(fd);
+        return false;
     }
-    size_t n = fread(text, 1, sizeof(text) - 1, f);
+    FILE *f = fdopen(fd, "r");
+    if (!f) {
+        close(fd);
+        return false;
+    }
+    size_t n = fread(text, 1, sizeof(text), f);
+    bool valid = !ferror(f) && n == (size_t)st.st_size && !memchr(text, 0, n);
     fclose(f);
+    if (!valid) return false;
     text[n] = '\0';
-    if (!json_bool(text, "observations_fresh", &fresh) || !fresh ||
-        !json_bool(text, "ap_active", &active) || !active ||
-        !json_bool(text, "ap_network_ready", &network) || !network ||
-        !json_string(text, "ap_ssid", ssid, sizeof(ssid)) ||
-        !json_int(text, "ap_channel", &channel) || channel <= 0 ||
-        !json_string(text, "ap_security", security, sizeof(security)) ||
-        !json_string(text, "ap_linklocal", linklocal, sizeof(linklocal))) {
-        if (ctx->ap.on_air) {
-            ctx->ap.on_air = false;
-            (void)cp_runtime_broker_set_ap_readback(&ctx->broker, &ctx->ap, now_ms);
-        }
-        return;
-    }
-    strip_zone(linklocal);
-    cp_wire_wifi_security sec;
-    if (!map_security(security, &sec)) {
-        if (ctx->ap.on_air) {
-            ctx->ap.on_air = false;
-            (void)cp_runtime_broker_set_ap_readback(&ctx->broker, &ctx->ap, now_ms);
-        }
-        return;
-    }
-    copy_field(ctx->cfg.ap_ssid, sizeof(ctx->cfg.ap_ssid), ssid);
-    copy_field(ctx->cfg.link_local, sizeof(ctx->cfg.link_local), linklocal);
-    ctx->cfg.ap_channel = (unsigned)channel;
-    ctx->cfg.ap_security[0] = '\0';
-    copy_field(ctx->cfg.ap_security, sizeof(ctx->cfg.ap_security), security);
-    ctx->ap.ssid = ctx->cfg.ap_ssid;
-    ctx->ap.channel = (uint8_t)channel;
-    ctx->ap.security = sec;
-    ctx->ap.link_local = ctx->cfg.link_local;
-    ctx->ap.on_air = true;
-    ctx->ap_ready = true;
-    (void)cp_runtime_broker_set_ap_readback(&ctx->broker, &ctx->ap, now_ms);
+    return ap_snapshot_matches(text, cfg, time(NULL));
+}
+
+static cp_session_error_t update_ap_readback(broker_ctx_t *ctx, uint64_t now_ms)
+{
+    bool on_air = read_ap_snapshot(&ctx->cfg, 0);
+    if (on_air == ctx->ap.on_air) return CP_SESSION_OK;
+    ctx->ap.on_air = on_air;
+    return cp_runtime_broker_set_ap_readback(&ctx->broker, &ctx->ap, now_ms);
 }
 
 static void prepare_status_dir(const broker_config_t *cfg)
@@ -533,11 +596,13 @@ static int run_broker(broker_ctx_t *ctx)
             break;
         }
         now = monotonic_ms();
-        rc = cp_runtime_broker_tick(&ctx->broker, pfds, nfds, (uint64_t)now);
-        if (now - last_ap >= 2000) {
-            update_ap_readback(ctx, (uint64_t)now);
+        rc = CP_SESSION_OK;
+        if (!last_ap || now - last_ap >= 500) {
+            rc = update_ap_readback(ctx, (uint64_t)now);
             last_ap = now;
         }
+        if (rc == CP_SESSION_OK)
+            rc = cp_runtime_broker_tick(&ctx->broker, pfds, nfds, (uint64_t)now);
         if (rc != CP_SESSION_OK || ctx->broker.fatal) {
             snprintf(error, sizeof(error), "broker tick: %d", (int)rc);
             write_status(ctx, "fatal", error);
@@ -564,6 +629,7 @@ static int run_broker(broker_ctx_t *ctx)
 
 int main(int argc, char **argv)
 {
+    bool check_ap = false;
     memset(&g_ctx, 0, sizeof(g_ctx));
     copy_field(g_ctx.cfg.config_path, sizeof(g_ctx.cfg.config_path), CFG_PATH);
     copy_field(g_ctx.cfg.daemon_status_path,
@@ -576,7 +642,9 @@ int main(int argc, char **argv)
     copy_field(g_ctx.cfg.service_name, sizeof(g_ctx.cfg.service_name),
                "SCOURGE-iAP");
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--config") && i + 1 < argc) {
+        if (!strcmp(argv[i], "--check-ap")) {
+            check_ap = true;
+        } else if (!strcmp(argv[i], "--config") && i + 1 < argc) {
             copy_field(g_ctx.cfg.config_path, sizeof(g_ctx.cfg.config_path),
                        argv[++i]);
         } else if (!strcmp(argv[i], "--status") && i + 1 < argc) {
@@ -594,7 +662,7 @@ int main(int argc, char **argv)
         } else {
             fprintf(stderr, "usage: %s [--config PATH] [--status PATH] "
                     "[--broker-status PATH] [--bus ADDRESS] "
-                    "[--usb-sysfs PATH]\n", argv[0]);
+                    "[--usb-sysfs PATH] [--check-ap]\n", argv[0]);
             return 2;
         }
     }
@@ -604,11 +672,17 @@ int main(int argc, char **argv)
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
-    prepare_status_dir(&g_ctx.cfg);
+    if (!check_ap) prepare_status_dir(&g_ctx.cfg);
 
     if (load_kv(g_ctx.cfg.config_path, &g_ctx.cfg) != 0) {
         fprintf(stderr, "cannot read %s\n", g_ctx.cfg.config_path);
         return 2;
+    }
+    if (check_ap) {
+        bool ok = identity_complete(&g_ctx.cfg) &&
+                  read_ap_snapshot(&g_ctx.cfg, geteuid());
+        puts(ok ? "AP snapshot matches" : "AP snapshot refused");
+        return ok ? 0 : 2;
     }
     load_bus_default(&g_ctx.cfg);
     if (!identity_complete(&g_ctx.cfg)) {

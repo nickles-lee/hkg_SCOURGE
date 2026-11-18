@@ -31,9 +31,10 @@ bt_mac=
 device_id=
 
 # AP bootstrap values.  They must identify the AP the daemon actually runs.
-# The broker refreshes SSID/channel/security/link-local from status.json and
-# refuses an offer until the readback is fresh; ap_psk is not refreshed and
-# must match the daemon's PSK.  See the daemon's status/config for the values.
+# Fill in the actual SSID, channel, security mode and link-local address
+# (without the interface zone, e.g. omit %wlan0). Zero/blank values are not
+# auto-filled. The broker checks these against fresh daemon status and
+# requires ap_psk to match the daemon's configured PSK before offering Wi-Fi.
 ap_ssid=
 ap_psk=
 ap_channel=0

@@ -49,6 +49,7 @@ pinned); remove the previous two-model requirement. GLM was unavailable
 | C6 | Installer/restore, regression gates, experimental release pair | V23 independent offline review and fresh private build/artifact gates PASS at `42f5e4b`, including 32 side-by-side groups; phone/car proof remains unverified and optional firmware SPP readback remains blocked |
 | C7 | Parked vehicle/iPhone validation, explicitly owner-authorized | Partial 2026-11-18 probe: P2 registration + `SendData` method ACK only; no P1/broker/AP/projection. Full C7 not complete |
 | C8 | Test plan, validation matrix, P1/broker deployment preparation | Validation/test-plan docs added; live Apple-USB gate built/fixture-tested; deployment and live P1/broker remain pending |
+| C9 | Target broker integration and private candidate | D-Bus XML validation enabled in host and target builds; AP configuration agreement fixture-tested; owner-rootfs bundle assembled and checksum-verified. Manual install only; projection and on-car runtime still unverified |
 
 At each checkpoint record: exact commit/tree, commands and results, incomplete
 coverage, and the next action. Never equate a mocked exchange with vehicle
