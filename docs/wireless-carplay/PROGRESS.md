@@ -2,16 +2,22 @@
 
 ## Resume here
 
-Current branch: `wireless-carplay-confirmed-fixes`.
+Current branch: `carplay-vbtd51-broker`, checkpoints `7e1ebda` (build-only
+broker/units/reproduction map) and `69f1b31` (live P2 docs). Not pushed.
 Current V24 integration and release gates: [V24.md](V24.md).
 Historical V23 offline checkpoint: [V23.md](V23.md).
 Reviewed defect checkpoints: [CONFIRMED-FIXES.md](CONFIRMED-FIXES.md).
 Exact stock-gap/patch/address map for reproduction:
 [REPRODUCTION.md](REPRODUCTION.md).
+What is actually proven: [VALIDATION.md](VALIDATION.md).
+Executable car-session plan: [TEST-PLAN.md](TEST-PLAN.md).
+
 Live 2026-11-18 P2 result: the stock CAFF SerialPort object appeared with
-`status="connected"`; `SendData(ay 1 0x00)` returned `i 0` (stub ACK, RFCOMM
-delivery not captured). No registration patch is needed; RX/AP bootstrap
-remain.
+`status="connected"`, local/remote UUID CAFF. `SendData(ay 1 0x00)` returned
+`i 0` (stub ACK; no RFCOMM capture, delivery unproven). The object persisted
+after `StopListenSPP`; `ap_clients` stayed 0, `carplay_ready:false`,
+`carplay_session_observed:false`. No registration patch is needed; P1 RX,
+broker/MFi deployment and AP bootstrap remain.
 The original `wireless-carplay-integration` branch is preserved as history.
 
 Goal: complete a wireless bootstrap compatible with the pinned LIVI reference,
@@ -37,11 +43,12 @@ pinned); remove the previous two-model requirement. GLM was unavailable
 | C0 | Preserve existing WIP; update review policy; dedicated branch | Complete: `4279a70` |
 | C1 | Bounded wire codec, identification and bootstrap state-machine tests | Offline independent PASS: original `6e4d7f1`; auth/session/link follow-ups `cc18b9d`, `8287120`, `3815f5f`. No phone validation |
 | C2 | AP IPv6/readiness/firewall and current-network snapshot | Offline/namespace independent PASS at `8014e6c`; V23 modem-policy integration and target behavior require separate gates |
-| C3 | Recover and verify OEM Bluetooth RX/TX/listener and MFi/identity ABI | Static research complete for SPP; live bus/transport proof still pending |
+| C3 | Recover and verify OEM Bluetooth RX/TX/listener and MFi/identity ABI | Static research complete; live 2026-11-18 P2 registration/TX object PASS; P1 RX and MFi chip still pending |
 | C4 | Integrate wireless transport and authenticated bootstrap | Deferred auth, SPP transport and serialized runtime broker independently reviewed offline. All remain unactivated; trusted target receiver integration and live phone/OEM validation still gated |
 | C5 | Connect existing OEM discovery/receiver and lifecycle observations | Offline passive-probe/pin follow-up PASS at `dd970f3`; trusted live receiver mapping and lifecycle integration pending |
 | C6 | Installer/restore, regression gates, experimental release pair | V23 independent offline review and fresh private build/artifact gates PASS at `42f5e4b`, including 32 side-by-side groups; phone/car proof remains unverified and optional firmware SPP readback remains blocked |
-| C7 | Parked vehicle/iPhone validation, explicitly owner-authorized | Not authorized |
+| C7 | Parked vehicle/iPhone validation, explicitly owner-authorized | Partial 2026-11-18 probe: P2 registration + `SendData` method ACK only; no P1/broker/AP/projection. Full C7 not complete |
+| C8 | Test plan, validation matrix, P1/broker deployment preparation | Validation/test-plan docs added; deployment and live P1/broker remain pending |
 
 At each checkpoint record: exact commit/tree, commands and results, incomplete
 coverage, and the next action. Never equate a mocked exchange with vehicle

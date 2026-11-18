@@ -28,7 +28,9 @@ results before changing any status in V23/V24 or the release docs.
   `.../serial_00000000_deca_fade_deca_deafdecacaff` appeared with
   `status="connected"` and local/remote UUID CAFF. No registration patch was
   needed. The adapter stayed `discoverable=true`, `pairable=false`; the daemon
-  `/carplay/pair` action reported Bluetooth control unavailable.
+  `/carplay/pair` action reported Bluetooth control unavailable. The object
+  persisted after `StopListenSPP` with `status="connected"`; it is expected to
+  clear on phone disconnect.
 
 ## 2. SPP TX loopback
 
@@ -41,7 +43,8 @@ results before changing any status in V23/V24 or the release docs.
 - A broker `SendData` int32 0 is a stub ACK, not delivery.
 - **Live result 2026-11-18:** `SendData(ay 1 0x00)` returned `i 0` on the live
   object. No RFCOMM capture was available, so byte delivery to the phone is
-  still unproven. AP clients remained 0; the Wi-Fi bootstrap was not reached.
+  still unproven. AP clients remained 0; `carplay_ready` and
+  `carplay_session_observed` stayed false; the Wi-Fi bootstrap was not reached.
 
 ## 3. SIG Test Mode listener (unverified on `vbtd-51`)
 

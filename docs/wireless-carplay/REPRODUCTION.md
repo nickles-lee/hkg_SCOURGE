@@ -512,7 +512,12 @@ SCOURGE-iAP)` returned `i 0`. The object
 `.../serial_00000000_deca_fade_deca_deafdecacaff` appeared with
 `status="connected"` and local/remote UUID CAFF. `SendData(ay 1 0x00)`
 returned `i 0`; no RFCOMM capture was available, so delivery is still
-unproven. AP clients remained 0, so the Wi-Fi bootstrap was not reached.
+unproven. AP clients remained 0, so the Wi-Fi bootstrap was not reached. The
+object persisted after `StopListenSPP` with `status="connected"`; it is
+expected to clear on phone disconnect. The adapter stayed
+`discoverable=true`, `pairable=false`; the daemon `/carplay/pair` action
+reported “Bluetooth control unavailable.” `carplay_ready` and
+`carplay_session_observed` stayed false.
 **No registration patch is needed for the live object.** P1/broker RX and the
 AP/bootstrap path remain the next gates.
 

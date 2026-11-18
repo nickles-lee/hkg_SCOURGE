@@ -18,7 +18,9 @@ registration. During the earlier connection window no vendor SerialPort
 object was observed, but a snapshot **during** a live connection is still
 missing (see `DEFERRED-CAR-PROBES.md` §1). The first-party broker needs the
 RX hook for inbound bytes and a `ListenSPP` orchestration test for the
-vendor TX object; it is not yet car-verified.
+vendor TX object; it is not yet car-verified. Live 2026-11-18: the stock
+SerialPort object appeared and `SendData` returned a stub ACK; see
+[`VALIDATION.md`](VALIDATION.md) and [`TEST-PLAN.md`](TEST-PLAN.md).
 
 Identify the exact running binary first:
 
