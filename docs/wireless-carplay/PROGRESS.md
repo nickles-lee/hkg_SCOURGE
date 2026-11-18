@@ -8,6 +8,10 @@ Historical V23 offline checkpoint: [V23.md](V23.md).
 Reviewed defect checkpoints: [CONFIRMED-FIXES.md](CONFIRMED-FIXES.md).
 Exact stock-gap/patch/address map for reproduction:
 [REPRODUCTION.md](REPRODUCTION.md).
+Live 2026-11-18 P2 result: the stock CAFF SerialPort object appeared with
+`status="connected"`; `SendData(ay 1 0x00)` returned `i 0` (stub ACK, RFCOMM
+delivery not captured). No registration patch is needed; RX/AP bootstrap
+remain.
 The original `wireless-carplay-integration` branch is preserved as history.
 
 Goal: complete a wireless bootstrap compatible with the pinned LIVI reference,

@@ -1,6 +1,8 @@
 # Wireless CarPlay: stock gaps, first-party fixes, and the exact patch map
 
-**Status: offline/build-only. Nothing in this document is car-validated.**
+**Status: offline/build-only except the 2026-11-18 P2 registration
+observation. RFCOMM delivery, AP bootstrap and full wireless CarPlay remain
+unvalidated.**
 This is the reproduction companion to
 [`VBT-SPP-HOOK-PORTING.md`](VBT-SPP-HOOK-PORTING.md) and
 [`DEFERRED-CAR-PROBES.md`](DEFERRED-CAR-PROBES.md). It records what stock
@@ -20,7 +22,7 @@ Ghidra image addresses, file offsets, or runtime ASLR addresses.
 | `BUILT-OFFLINE` | Source builds and offline tests pass; not executed on the car |
 | `DESIGN` | Patch/sequence proposed but not implemented |
 | `DEFERRED` | Needs a car, iPhone, live bus, or chip probe |
-| `CAR-VALIDATED` | On-car evidence exists. **No wireless CarPlay item currently has this label** |
+| `CAR-VALIDATED` | End-to-end on-car evidence. **No wireless CarPlay item has this label**; the 2026-11-18 P2 observation is registration-only, not full CarPlay |
 
 ## 1. End-to-end path and where stock breaks
 
@@ -505,8 +507,18 @@ D-Bus object path, and their signatures lack the peer address/UUID.
 | `ProjectionDeviceStateManager::SetSppListenStatus` | `0x3b4890` | `0x2e` | Empty state stub |
 | `ProjectionDeviceStateManager::SetSppDisconnectedStatus` | `0x3b48c0` | `0x3ec` | Log-only state stub |
 
-**Status:** primary experiment `DEFERRED` (needs car); fallback patch
-`DESIGN`, not implemented. No registration patch is claimed.
+**Live result (2026-11-18):** with the phone connected, `ListenSPP(CAFF,
+SCOURGE-iAP)` returned `i 0`. The object
+`.../serial_00000000_deca_fade_deca_deafdecacaff` appeared with
+`status="connected"` and local/remote UUID CAFF. `SendData(ay 1 0x00)`
+returned `i 0`; no RFCOMM capture was available, so delivery is still
+unproven. AP clients remained 0, so the Wi-Fi bootstrap was not reached.
+**No registration patch is needed for the live object.** P1/broker RX and the
+AP/bootstrap path remain the next gates.
+
+**Status:** primary experiment **live-verified for registration**; TX method
+ACK only, RFCOMM delivery and full bootstrap `DEFERRED`. Fallback patch
+`DESIGN`, not implemented.
 
 ### P3 — AirPlay/projection trigger (not identified)
 

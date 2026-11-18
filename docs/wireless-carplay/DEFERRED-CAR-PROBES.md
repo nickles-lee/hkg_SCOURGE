@@ -1,7 +1,9 @@
 # Deferred car probes and blockers
 
-These require the car or a live iPhone. Nothing here is claimed as passed.
-Record results before changing any status in V23/V24 or the release docs.
+These require the car or a live iPhone. §1/§2 record a 2026-11-18 partial live
+result: registration appeared and `SendData` returned a stub ACK, but RFCOMM
+delivery, AP bootstrap and full wireless CarPlay remain unproven. Record
+results before changing any status in V23/V24 or the release docs.
 
 ## 1. SerialPort D-Bus object during a live SPP connection
 
@@ -21,6 +23,12 @@ Record results before changing any status in V23/V24 or the release docs.
 - If the object is still absent, check SPP service `0xa` enabled, a known/paired
   device, and a real `VBT_SPP_CONNECT_CFM`; a fallback binary patch is the last
   resort, not the first.
+- **Live result 2026-11-18:** with the phone connected, `ListenSPP(CAFF,
+  SCOURGE-iAP)` returned `i 0`; the object
+  `.../serial_00000000_deca_fade_deca_deafdecacaff` appeared with
+  `status="connected"` and local/remote UUID CAFF. No registration patch was
+  needed. The adapter stayed `discoverable=true`, `pairable=false`; the daemon
+  `/carplay/pair` action reported Bluetooth control unavailable.
 
 ## 2. SPP TX loopback
 
@@ -31,6 +39,9 @@ Record results before changing any status in V23/V24 or the release docs.
   `VBTSppManager::SendData` (`0x494c30`) -> `VBTSppSendDataReq` (`0x7294e0`)
   -> `BrcmSpp::BrcmSppSendCmd` (`0x7879f0`).
 - A broker `SendData` int32 0 is a stub ACK, not delivery.
+- **Live result 2026-11-18:** `SendData(ay 1 0x00)` returned `i 0` on the live
+  object. No RFCOMM capture was available, so byte delivery to the phone is
+  still unproven. AP clients remained 0; the Wi-Fi bootstrap was not reached.
 
 ## 3. SIG Test Mode listener (unverified on `vbtd-51`)
 
