@@ -11,21 +11,38 @@ Record results before changing any status in V23/V24 or the release docs.
   object path `/dev_<peer>/serial_<uuid>`.
 - Stock `vbtd-51` showed no SerialPort object after an earlier connection had
   closed. A snapshot **during** the connection is still missing.
-- If absent, determine whether `SetSppListenStatus`/`AddSerialPortList` must be
-  restored or whether the broker needs a direct TX hook.
+- The static chain is present: `VBTSppConnectCfm` -> `SetSerialPortConnectionStatus`
+  -> `AddSerialPortList` -> `GeniviCommonAPIFactory::registerSerialPortStub`.
+  `SetSppListen`/`SetSppListenStatus` are state-notification stubs, not
+  registration gates.
+- Before/while connecting, call the vendor adapter's `ListenSPP` with the CAFF
+  UUID (interface `org.bluez.Adapter.Adapter.v2_0`; confirm the exact service
+  and object path with `busctl tree`). Expect a `VBTSppListenCfm` log entry.
+- If the object is still absent, check SPP service `0xa` enabled, a known/paired
+  device, and a real `VBT_SPP_CONNECT_CFM`; a fallback binary patch is the last
+  resort, not the first.
 
 ## 2. SPP TX loopback
 
-- With a live connection, call the vendor `SendData` path with a bounded test
-  payload and confirm RFCOMM `SENT`/phone receipt.
+- With a live connection and a `SerialPort.v2_0_*` object, call `SendData`
+  with a single `0x00` byte (not a CAFF PDU). Expect the method to return 0,
+  `VBTSppSendDataCfm` to log, and one RFCOMM UIH frame in a capture.
+- Static chain: `StackSerialPortStub::SendData` (`0x612e50`) ->
+  `VBTSppManager::SendData` (`0x494c30`) -> `VBTSppSendDataReq` (`0x7294e0`)
+  -> `BrcmSpp::BrcmSppSendCmd` (`0x7879f0`).
 - A broker `SendData` int32 0 is a stub ACK, not delivery.
 
-## 3. SIG Test Mode listener
+## 3. SIG Test Mode listener (unverified on `vbtd-51`)
 
-- `VBTConfig` `VBT.GAP."SIG Test Mode": true` makes `VBTSppEnableCfm` call
-  `Listen("BTSPP", 00001101-...)`. That is the generic SPP UUID, not CAFF.
-- Test whether it creates a SerialPort object, but do not assume it helps
-  CarPlay; the phone's CarPlay discovery uses CAFF.
+- The earlier expectation was that `VBTConfig` `VBT.GAP."SIG Test Mode": true`
+  makes `VBTSppEnableCfm` call `Listen("BTSPP", 00001101-...)`. That is **not
+  established** on `-51`. The cached Ghidra export only analyzed 252 of the
+  real 0xd5a bytes (`readelf -sW`), and that prefix is logger-only; the rest
+  of the function has not been decompiled. Do not conclude either "it calls
+  Listen" or "it is log-only" from the cached text.
+- Reanalyze the full `VBTSppEnableCfm` extent before running the probe. If a
+  listener appears, it is generic SPP, not CAFF; the phone's CarPlay discovery
+  uses CAFF. Do not expect this probe to create the CAFF transport.
 
 ## 4. AirPlay receiver identity and advertisement
 
@@ -38,6 +55,8 @@ Record results before changing any status in V23/V24 or the release docs.
 ## 5. MFi helper and chip
 
 - Build/deploy the root MFi helper and its `/run/scourge-carplay-auth` socket.
+  The default-off unit is `packages/wifi1b/artifacts/systemd/scourge-carplay-auth.service`;
+  see `packages/wifi1b/artifacts/carplay/README.md`.
 - Verify real certificate/signature responses; never fake AA00-AA05.
 
 ## 6. Vendor projection trigger

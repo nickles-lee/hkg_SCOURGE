@@ -1,0 +1,613 @@
+/* SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+ * SPDX-License-Identifier: AGPL-3.0-only
+ *
+ * Experimental first-party CarPlay broker helper.
+ *
+ * This is the supervised process that owns cp_runtime_broker, the credit
+ * checked SPP hook socket, and the private/explicit OEM session bus.  It is
+ * NOT linked into wifi1b-daemon and is NOT activated by the installer.
+ *
+ * Inputs are root-owned files:
+ *   /rw_data/wifi1b/carplay-broker.conf   identity + bus + service name
+ *   /rw_data/wifi1b/status.json           daemon-attested AP readback
+ *   /run/wifi1b/carplay/rx.sock           patched vbtd hook datagrams
+ *   /run/scourge-carplay-auth/auth.sock   root MFi helper
+ *
+ * The helper never starts a bus, never runs ip/route/SSH/AP commands, and
+ * never synthesizes authentication, pairing or projection success.
+ */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "cp_runtime_broker.h"
+#include "cp_spp_socket.h"
+#include "cp_wire.h"
+
+#define CFG_PATH "/rw_data/wifi1b/carplay-broker.conf"
+#define DAEMON_STATUS "/rw_data/wifi1b/status.json"
+/* Keep status outside the unit's RuntimeDirectory so a failed/stopped unit
+ * does not delete the diagnostic.  The RX socket stays under carplay/. */
+#define BROKER_STATUS "/run/wifi1b/broker-status.json"
+#define RX_SOCKET "/run/wifi1b/carplay/rx.sock"
+#define SESSION_ENV "/tmp/session_appmgr.env"
+#define MAX_LANGS 8u
+#define MAX_FIELD 128u
+
+typedef struct {
+    char bus_address[512];
+    char service_name[128];
+    char name[MAX_FIELD];
+    char model[MAX_FIELD];
+    char manufacturer[MAX_FIELD];
+    char serial[MAX_FIELD];
+    char firmware[MAX_FIELD];
+    char hardware[MAX_FIELD];
+    char eap[MAX_FIELD];
+    char language[MAX_FIELD];
+    char languages[MAX_FIELD * MAX_LANGS];
+    char transport_name[MAX_FIELD];
+    char bt_mac[32];
+    char device_id[MAX_FIELD];
+    char ap_ssid[64];
+    char ap_psk[96];
+    unsigned ap_channel;
+    char ap_security[32];
+    char link_local[64];
+    unsigned airplay_port;
+    char source_version[MAX_FIELD];
+    int consent;
+    int usb_active;
+    char config_path[512];
+    char daemon_status_path[512];
+    char broker_status_path[512];
+    char rx_path[256];
+} broker_config_t;
+
+typedef struct {
+    broker_config_t cfg;
+    cp_session_config_t session;
+    cp_runtime_broker broker;
+    cp_spp_socket rx;
+    cp_boot_ap_readback ap;
+    char lang_storage[MAX_LANGS][MAX_FIELD];
+    const char *langs[MAX_LANGS + 1]; /* + NULL terminator */
+    bool ap_ready;
+} broker_ctx_t;
+
+static broker_ctx_t g_ctx;
+static volatile sig_atomic_t g_stop;
+
+static int64_t monotonic_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void signal_handler(int sig)
+{
+    (void)sig;
+    g_stop = 1;
+}
+
+static char *trim(char *s)
+{
+    if (s == NULL) return s;
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+    char *e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' ||
+                     e[-1] == '\r' || e[-1] == '\n')) e--;
+    *e = '\0';
+    return s;
+}
+
+static void copy_field(char *dst, size_t cap, const char *src)
+{
+    if (cap == 0) return;
+    if (src == NULL) src = "";
+    snprintf(dst, cap, "%s", src);
+}
+
+static int load_kv(const char *path, broker_config_t *cfg)
+{
+    FILE *f = fopen(path, "r");
+    if (f == NULL) return -1;
+    char line[1024];
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char *p = trim(line);
+        if (*p == '\0' || *p == '#' || *p == ';') continue;
+        char *eq = strchr(p, '=');
+        if (eq == NULL) continue;
+        *eq = '\0';
+        char *k = trim(p);
+        char *v = trim(eq + 1);
+        if (!strcmp(k, "bus_address")) copy_field(cfg->bus_address, sizeof(cfg->bus_address), v);
+        else if (!strcmp(k, "service_name")) copy_field(cfg->service_name, sizeof(cfg->service_name), v);
+        else if (!strcmp(k, "name")) copy_field(cfg->name, sizeof(cfg->name), v);
+        else if (!strcmp(k, "model")) copy_field(cfg->model, sizeof(cfg->model), v);
+        else if (!strcmp(k, "manufacturer")) copy_field(cfg->manufacturer, sizeof(cfg->manufacturer), v);
+        else if (!strcmp(k, "serial")) copy_field(cfg->serial, sizeof(cfg->serial), v);
+        else if (!strcmp(k, "firmware")) copy_field(cfg->firmware, sizeof(cfg->firmware), v);
+        else if (!strcmp(k, "hardware")) copy_field(cfg->hardware, sizeof(cfg->hardware), v);
+        else if (!strcmp(k, "eap_name")) copy_field(cfg->eap, sizeof(cfg->eap), v);
+        else if (!strcmp(k, "language")) copy_field(cfg->language, sizeof(cfg->language), v);
+        else if (!strcmp(k, "languages")) copy_field(cfg->languages, sizeof(cfg->languages), v);
+        else if (!strcmp(k, "transport_name")) copy_field(cfg->transport_name, sizeof(cfg->transport_name), v);
+        else if (!strcmp(k, "bt_mac")) copy_field(cfg->bt_mac, sizeof(cfg->bt_mac), v);
+        else if (!strcmp(k, "device_id")) copy_field(cfg->device_id, sizeof(cfg->device_id), v);
+        else if (!strcmp(k, "ap_ssid")) copy_field(cfg->ap_ssid, sizeof(cfg->ap_ssid), v);
+        else if (!strcmp(k, "ap_psk")) copy_field(cfg->ap_psk, sizeof(cfg->ap_psk), v);
+        else if (!strcmp(k, "ap_channel")) cfg->ap_channel = (unsigned)strtoul(v, NULL, 0);
+        else if (!strcmp(k, "ap_security")) copy_field(cfg->ap_security, sizeof(cfg->ap_security), v);
+        else if (!strcmp(k, "link_local")) copy_field(cfg->link_local, sizeof(cfg->link_local), v);
+        else if (!strcmp(k, "airplay_port")) cfg->airplay_port = (unsigned)strtoul(v, NULL, 0);
+        else if (!strcmp(k, "source_version")) copy_field(cfg->source_version, sizeof(cfg->source_version), v);
+        else if (!strcmp(k, "consent")) cfg->consent = atoi(v) != 0;
+        else if (!strcmp(k, "usb_active")) cfg->usb_active = atoi(v) != 0;
+    }
+    fclose(f);
+    return 0;
+}
+
+static bool json_string(const char *text, const char *key, char *out, size_t cap)
+{
+    char needle[96];
+    snprintf(needle, sizeof(needle), "\"%s\":\"", key);
+    const char *p = strstr(text, needle);
+    if (p == NULL) return false;
+    p += strlen(needle);
+    const char *e = strchr(p, '"');
+    if (e == NULL || e <= p) return false;
+    size_t n = (size_t)(e - p);
+    if (n >= cap) n = cap - 1;
+    memcpy(out, p, n);
+    out[n] = '\0';
+    return true;
+}
+
+static bool json_int(const char *text, const char *key, long *out)
+{
+    char needle[96];
+    snprintf(needle, sizeof(needle), "\"%s\":", key);
+    const char *p = strstr(text, needle);
+    if (p == NULL) return false;
+    p += strlen(needle);
+    while (*p == ' ') p++;
+    char *end = NULL;
+    long v = strtol(p, &end, 10);
+    if (end == p) return false;
+    *out = v;
+    return true;
+}
+
+static bool json_bool(const char *text, const char *key, bool *out)
+{
+    char needle[96];
+    snprintf(needle, sizeof(needle), "\"%s\":", key);
+    const char *p = strstr(text, needle);
+    if (p == NULL) return false;
+    p += strlen(needle);
+    while (*p == ' ') p++;
+    if (!strncmp(p, "true", 4)) { *out = true; return true; }
+    if (!strncmp(p, "false", 5)) { *out = false; return true; }
+    return false;
+}
+
+static bool map_security(const char *text, cp_wire_wifi_security *out)
+{
+    if (text == NULL || out == NULL) return false;
+    if (!strcmp(text, "WPA2") || !strcmp(text, "WPA2-PSK")) {
+        *out = CP_WIRE_WIFI_WPA2;
+        return true;
+    }
+    if (!strcmp(text, "WPA2/WPA3") || !strcmp(text, "WPA2-WPA3")) {
+        *out = CP_WIRE_WIFI_WPA2_WPA3;
+        return true;
+    }
+    if (!strcmp(text, "WPA3") || !strcmp(text, "SAE") ||
+        !strcmp(text, "WPA3-SAE")) {
+        *out = CP_WIRE_WIFI_WPA3;
+        return true;
+    }
+    return false;
+}
+
+static void strip_zone(char *s)
+{
+    char *p = strchr(s, '%');
+    if (p != NULL) *p = '\0';
+}
+
+static bool identity_complete(const broker_config_t *c)
+{
+    return c->name[0] && c->model[0] && c->manufacturer[0] &&
+           c->serial[0] && c->firmware[0] && c->hardware[0] &&
+           c->eap[0] && c->language[0] && c->transport_name[0] &&
+           c->bt_mac[0] && c->device_id[0] && c->ap_ssid[0] &&
+           c->ap_psk[0] && c->ap_channel != 0 && c->ap_channel <= 255 &&
+           c->ap_security[0] && c->link_local[0] &&
+           c->airplay_port != 0 && c->airplay_port <= 65535 &&
+           c->service_name[0];
+}
+
+static void parse_languages(broker_ctx_t *ctx)
+{
+    unsigned n = 0;
+    char *save = NULL;
+    char list[sizeof(ctx->cfg.languages)];
+    copy_field(list, sizeof(list), ctx->cfg.languages);
+    for (char *p = strtok_r(list, ",", &save);
+         p != NULL && n < MAX_LANGS; p = strtok_r(NULL, ",", &save)) {
+        char *v = trim(p);
+        if (*v == '\0') continue;
+        copy_field(ctx->lang_storage[n], sizeof(ctx->lang_storage[n]), v);
+        ctx->langs[n] = ctx->lang_storage[n];
+        n++;
+    }
+    if (n == 0) {
+        copy_field(ctx->lang_storage[0], sizeof(ctx->lang_storage[0]),
+                   ctx->cfg.language);
+        ctx->langs[0] = ctx->lang_storage[0];
+        n = 1;
+    }
+    ctx->langs[n] = NULL;
+}
+
+static bool build_session_config(broker_ctx_t *ctx)
+{
+    cp_session_config_default(&ctx->session);
+    cp_boot_config *b = &ctx->session.boot;
+    b->name = ctx->cfg.name;
+    b->model_identifier = ctx->cfg.model;
+    b->manufacturer = ctx->cfg.manufacturer;
+    b->serial_number = ctx->cfg.serial;
+    b->firmware_version = ctx->cfg.firmware;
+    b->hardware_version = ctx->cfg.hardware;
+    b->eap_name = ctx->cfg.eap;
+    b->current_language = ctx->cfg.language;
+    b->supported_languages = ctx->langs;
+    b->supported_language_count = 0;
+    while (ctx->langs[b->supported_language_count] != NULL)
+        b->supported_language_count++;
+    b->bluetooth_transport_name = ctx->cfg.transport_name;
+    b->bluetooth_mac = ctx->cfg.bt_mac;
+    b->ap_ssid = ctx->cfg.ap_ssid;
+    b->ap_passphrase = ctx->cfg.ap_psk;
+    b->ap_channel = (uint8_t)ctx->cfg.ap_channel;
+    if (!map_security(ctx->cfg.ap_security, &b->ap_security))
+        return false;
+    b->link_local = ctx->cfg.link_local;
+    b->airplay_port = (uint16_t)ctx->cfg.airplay_port;
+    b->device_identifier = ctx->cfg.device_id;
+    b->source_version = ctx->cfg.source_version[0] ? ctx->cfg.source_version : NULL;
+    return true;
+}
+
+static cp_boot_consent consent_cb(void *user, uint64_t now_ms)
+{
+    (void)now_ms;
+    broker_ctx_t *ctx = user;
+    return ctx->cfg.consent ? CP_BOOT_CONSENT_GRANTED : CP_BOOT_CONSENT_DENIED;
+}
+
+static bool usb_active_cb(void *user, const char *bluetooth_id,
+                          const char *usb_id)
+{
+    (void)bluetooth_id;
+    (void)usb_id;
+    broker_ctx_t *ctx = user;
+    return ctx->cfg.usb_active != 0;
+}
+
+static void update_ap_readback(broker_ctx_t *ctx, uint64_t now_ms)
+{
+    char text[16384];
+    char ssid[64] = "";
+    char security[32] = "";
+    char linklocal[64] = "";
+    long channel = 0;
+    bool fresh = false, active = false, network = false;
+    FILE *f = fopen(ctx->cfg.daemon_status_path, "r");
+    if (f == NULL) {
+        if (ctx->ap.on_air) {
+            ctx->ap.on_air = false;
+            (void)cp_runtime_broker_set_ap_readback(&ctx->broker, &ctx->ap, now_ms);
+        }
+        return;
+    }
+    size_t n = fread(text, 1, sizeof(text) - 1, f);
+    fclose(f);
+    text[n] = '\0';
+    if (!json_bool(text, "observations_fresh", &fresh) || !fresh ||
+        !json_bool(text, "ap_active", &active) || !active ||
+        !json_bool(text, "ap_network_ready", &network) || !network ||
+        !json_string(text, "ap_ssid", ssid, sizeof(ssid)) ||
+        !json_int(text, "ap_channel", &channel) || channel <= 0 ||
+        !json_string(text, "ap_security", security, sizeof(security)) ||
+        !json_string(text, "ap_linklocal", linklocal, sizeof(linklocal))) {
+        if (ctx->ap.on_air) {
+            ctx->ap.on_air = false;
+            (void)cp_runtime_broker_set_ap_readback(&ctx->broker, &ctx->ap, now_ms);
+        }
+        return;
+    }
+    strip_zone(linklocal);
+    cp_wire_wifi_security sec;
+    if (!map_security(security, &sec)) {
+        if (ctx->ap.on_air) {
+            ctx->ap.on_air = false;
+            (void)cp_runtime_broker_set_ap_readback(&ctx->broker, &ctx->ap, now_ms);
+        }
+        return;
+    }
+    copy_field(ctx->cfg.ap_ssid, sizeof(ctx->cfg.ap_ssid), ssid);
+    copy_field(ctx->cfg.link_local, sizeof(ctx->cfg.link_local), linklocal);
+    ctx->cfg.ap_channel = (unsigned)channel;
+    ctx->cfg.ap_security[0] = '\0';
+    copy_field(ctx->cfg.ap_security, sizeof(ctx->cfg.ap_security), security);
+    ctx->ap.ssid = ctx->cfg.ap_ssid;
+    ctx->ap.channel = (uint8_t)channel;
+    ctx->ap.security = sec;
+    ctx->ap.link_local = ctx->cfg.link_local;
+    ctx->ap.on_air = true;
+    ctx->ap_ready = true;
+    (void)cp_runtime_broker_set_ap_readback(&ctx->broker, &ctx->ap, now_ms);
+}
+
+static void prepare_status_dir(const broker_config_t *cfg)
+{
+    /* Best effort: status is diagnostics, not a transport gate.  Create the
+     * directory before the first write so identity/security failures are
+     * visible to the operator.  The status file itself stays outside the
+     * unit's RuntimeDirectory so it survives a failed stop.  A fixture path
+     * outside /run/wifi1b already has its own parent. */
+    if (cfg == NULL ||
+        strncmp(cfg->broker_status_path, "/run/wifi1b/", 12) != 0)
+        return;
+    (void)mkdir("/run/wifi1b", 0755);
+    (void)mkdir("/run/wifi1b/carplay", 0700);
+}
+
+static void write_status(const broker_ctx_t *ctx, const char *state,
+                         const char *error)
+{
+    char tmp[640];
+    bool ok = !strcmp(state, "started") || !strcmp(state, "running") ||
+              !strcmp(state, "stopped");
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%d", ctx->cfg.broker_status_path,
+             (int)getpid());
+    FILE *f = fopen(tmp, "w");
+    if (f == NULL) return;
+    fprintf(f,
+            "{\"ok\":%s,\"state\":\"%s\",\"error\":\"%s\","
+            "\"epoch\":%u,\"peer\":\"%s\",\"ap_on_air\":%s,"
+            "\"rx_packets\":%u,\"rx_dropped\":%u,\"tx_chunks\":%u,"
+            "\"auth_failures\":%u,\"session_failures\":%u,"
+            "\"init_timeouts\":%u,\"drain_timeouts\":%u}\n",
+            ok ? "true" : "false", state, error,
+            ctx->broker.epoch, ctx->broker.peer,
+            ctx->ap.on_air ? "true" : "false",
+            ctx->broker.stats.rx_packets, ctx->broker.stats.rx_dropped,
+            ctx->broker.stats.tx_chunks, ctx->broker.stats.auth_failures,
+            ctx->broker.stats.session_failures,
+            ctx->broker.stats.init_timeouts, ctx->broker.stats.drain_timeouts);
+    fclose(f);
+    rename(tmp, ctx->cfg.broker_status_path);
+}
+
+static int prepare_rx_socket(broker_ctx_t *ctx, char *error, size_t error_size)
+{
+    cp_spp_socket_init(&ctx->rx);
+    if (mkdir("/run/wifi1b", 0755) != 0 && errno != EEXIST) {
+        snprintf(error, error_size, "cannot create rx parent: %s",
+                 strerror(errno));
+        return -1;
+    }
+    if (mkdir("/run/wifi1b/carplay", 0700) != 0 && errno != EEXIST) {
+        snprintf(error, error_size, "cannot create rx directory: %s",
+                 strerror(errno));
+        return -1;
+    }
+    chmod("/run/wifi1b/carplay", 0700);
+    if (ctx->cfg.rx_path[0] && strcmp(ctx->cfg.rx_path, RX_SOCKET) != 0) {
+        snprintf(error, error_size, "rx socket path must be %s", RX_SOCKET);
+        return -1;
+    }
+    if (cp_spp_socket_open(&ctx->rx) != 0) {
+        snprintf(error, error_size, "cannot open credential-checked rx socket");
+        return -1;
+    }
+    return 0;
+}
+
+static void load_bus_default(broker_config_t *cfg)
+{
+    if (cfg->bus_address[0]) return;
+    FILE *f = fopen(SESSION_ENV, "r");
+    if (f == NULL) return;
+    char line[1024];
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char *p = strstr(line, "DBUS_SESSION_BUS_ADDRESS=");
+        if (p == NULL) continue;
+        p += strlen("DBUS_SESSION_BUS_ADDRESS=");
+        char *v = trim(p);
+        char *comma = strchr(v, ',');
+        if (comma != NULL) *comma = '\0';
+        copy_field(cfg->bus_address, sizeof(cfg->bus_address), v);
+        break;
+    }
+    fclose(f);
+}
+
+static int run_broker(broker_ctx_t *ctx)
+{
+    char error[256] = "";
+    int64_t now = monotonic_ms();
+    if (prepare_rx_socket(ctx, error, sizeof(error)) != 0) {
+        write_status(ctx, "fatal", error);
+        return 2;
+    }
+    cp_runtime_broker_config_t bc;
+    memset(&bc, 0, sizeof(bc));
+    bc.experimental = 1;
+    bc.enabled = 1;
+    bc.spp.bus_address = ctx->cfg.bus_address;
+    bc.spp.service_name = ctx->cfg.service_name;
+    bc.spp.experimental = 1;
+    bc.spp.expected_owner_uid_set = 1;
+    bc.spp.expected_owner_uid = 0;
+    bc.auth.experimental = true;
+    bc.session = ctx->session;
+    bc.role = CP_LINK_ROLE_INITIATOR;
+    bc.consent = consent_cb;
+    bc.usb_active = usb_active_cb;
+    bc.policy_context = ctx;
+    ctx->ap.ssid = ctx->cfg.ap_ssid;
+    ctx->ap.channel = (uint8_t)ctx->cfg.ap_channel;
+    ctx->ap.security = CP_WIRE_WIFI_WPA2;
+    (void)map_security(ctx->cfg.ap_security, &ctx->ap.security);
+    ctx->ap.link_local = ctx->cfg.link_local;
+    ctx->ap.on_air = false;
+    bc.ap_readback = ctx->ap;
+    bc.have_ap_readback = 1;
+    bc.init_timeout_ms = 30000;
+    bc.drain_timeout_ms = 2000;
+    bc.rx = &ctx->rx;
+
+    cp_session_error_t rc = cp_runtime_broker_init(&ctx->broker, &bc);
+    if (rc != CP_SESSION_OK) {
+        snprintf(error, sizeof(error), "broker init: %d", (int)rc);
+        write_status(ctx, "fatal", error);
+        cp_spp_socket_close(&ctx->rx);
+        return 2;
+    }
+    rc = cp_runtime_broker_start(&ctx->broker, (uint64_t)now);
+    if (rc != CP_SESSION_OK) {
+        snprintf(error, sizeof(error), "broker start: %d", (int)rc);
+        write_status(ctx, "fatal", error);
+        cp_runtime_broker_destroy(&ctx->broker, (uint64_t)now);
+        cp_spp_socket_close(&ctx->rx);
+        return 2;
+    }
+    write_status(ctx, "started", "");
+    int64_t last_ap = 0;
+    bool failed = false;
+    while (!g_stop) {
+        struct pollfd pfds[CP_RUNTIME_BROKER_MAX_POLLFDS];
+        size_t nfds = cp_runtime_broker_pollfds(&ctx->broker, pfds,
+                                                CP_RUNTIME_BROKER_MAX_POLLFDS);
+        now = monotonic_ms();
+        int timeout = 500;
+        uint64_t next = cp_runtime_broker_next_deadline(&ctx->broker);
+        if (next != UINT64_MAX && next > (uint64_t)now) {
+            uint64_t delta = next - (uint64_t)now;
+            if (delta < (uint64_t)timeout) timeout = (int)delta;
+        } else if (next != UINT64_MAX) {
+            timeout = 0;
+        }
+        int pr = poll(pfds, (nfds_t)nfds, timeout);
+        if (pr < 0 && errno != EINTR) {
+            snprintf(error, sizeof(error), "poll: %s", strerror(errno));
+            write_status(ctx, "fatal", error);
+            failed = true;
+            break;
+        }
+        now = monotonic_ms();
+        rc = cp_runtime_broker_tick(&ctx->broker, pfds, nfds, (uint64_t)now);
+        if (now - last_ap >= 2000) {
+            update_ap_readback(ctx, (uint64_t)now);
+            last_ap = now;
+        }
+        if (rc != CP_SESSION_OK || ctx->broker.fatal) {
+            snprintf(error, sizeof(error), "broker tick: %d", (int)rc);
+            write_status(ctx, "fatal", error);
+            failed = true;
+            break;
+        }
+        if (ctx->broker.restart_required) {
+            rc = cp_runtime_broker_restart(&ctx->broker, (uint64_t)now);
+            if (rc != CP_SESSION_OK) {
+                snprintf(error, sizeof(error), "broker restart: %d", (int)rc);
+                write_status(ctx, "fatal", error);
+                failed = true;
+                break;
+            }
+        }
+        write_status(ctx, "running", "");
+    }
+    cp_runtime_broker_destroy(&ctx->broker, (uint64_t)now);
+    cp_spp_socket_close(&ctx->rx);
+    if (failed) return 2;
+    write_status(ctx, "stopped", "");
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    memset(&g_ctx, 0, sizeof(g_ctx));
+    copy_field(g_ctx.cfg.config_path, sizeof(g_ctx.cfg.config_path), CFG_PATH);
+    copy_field(g_ctx.cfg.daemon_status_path,
+               sizeof(g_ctx.cfg.daemon_status_path), DAEMON_STATUS);
+    copy_field(g_ctx.cfg.broker_status_path,
+               sizeof(g_ctx.cfg.broker_status_path), BROKER_STATUS);
+    copy_field(g_ctx.cfg.rx_path, sizeof(g_ctx.cfg.rx_path), RX_SOCKET);
+    copy_field(g_ctx.cfg.service_name, sizeof(g_ctx.cfg.service_name),
+               "SCOURGE-iAP");
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--config") && i + 1 < argc) {
+            copy_field(g_ctx.cfg.config_path, sizeof(g_ctx.cfg.config_path),
+                       argv[++i]);
+        } else if (!strcmp(argv[i], "--status") && i + 1 < argc) {
+            copy_field(g_ctx.cfg.daemon_status_path,
+                       sizeof(g_ctx.cfg.daemon_status_path), argv[++i]);
+        } else if (!strcmp(argv[i], "--broker-status") && i + 1 < argc) {
+            copy_field(g_ctx.cfg.broker_status_path,
+                       sizeof(g_ctx.cfg.broker_status_path), argv[++i]);
+        } else if (!strcmp(argv[i], "--bus") && i + 1 < argc) {
+            copy_field(g_ctx.cfg.bus_address, sizeof(g_ctx.cfg.bus_address),
+                       argv[++i]);
+        } else {
+            fprintf(stderr, "usage: %s [--config PATH] [--status PATH] "
+                    "[--broker-status PATH] [--bus ADDRESS]\n", argv[0]);
+            return 2;
+        }
+    }
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signal_handler;
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+    signal(SIGPIPE, SIG_IGN);
+    prepare_status_dir(&g_ctx.cfg);
+
+    if (load_kv(g_ctx.cfg.config_path, &g_ctx.cfg) != 0) {
+        fprintf(stderr, "cannot read %s\n", g_ctx.cfg.config_path);
+        return 2;
+    }
+    load_bus_default(&g_ctx.cfg);
+    if (!identity_complete(&g_ctx.cfg)) {
+        char error[] = "identity or AP configuration incomplete";
+        write_status(&g_ctx, "identity_incomplete", error);
+        fprintf(stderr, "%s\n", error);
+        return 2;
+    }
+    parse_languages(&g_ctx);
+    if (!build_session_config(&g_ctx)) {
+        char error[] = "unsupported AP security";
+        write_status(&g_ctx, "identity_incomplete", error);
+        fprintf(stderr, "%s\n", error);
+        return 2;
+    }
+    return run_broker(&g_ctx);
+}

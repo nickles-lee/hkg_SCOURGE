@@ -1707,7 +1707,7 @@ int cp_spp_dbus_listen(cp_spp_dbus *engine, uint64_t now_ms)
         sent = send_string_call(engine, engine->unique_owner,
                                 engine->adapter_path,
                                 engine->adapter_interface, "ListenSPP",
-                                engine->service_name, engine->uuid_accessory,
+                                engine->uuid_accessory, engine->service_name,
                                 CP_SPP_DBUS_PK_LISTEN, now_ms, NULL);
     } else {
         sent = send_string_call(engine, engine->unique_owner,
@@ -1736,7 +1736,7 @@ int cp_spp_dbus_stop(cp_spp_dbus *engine, uint64_t now_ms)
         return CP_SPP_DBUS_ERR_STATE;
     if (!send_string_call(engine, engine->unique_owner, engine->adapter_path,
                          engine->adapter_interface, "StopListenSPP",
-                         engine->service_name, engine->uuid_accessory,
+                         engine->uuid_accessory, engine->service_name,
                          CP_SPP_DBUS_PK_STOP, now_ms, NULL))
         return CP_SPP_DBUS_ERR_STATE;
     engine->stop_pending = true;

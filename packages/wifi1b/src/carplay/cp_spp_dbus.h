@@ -89,7 +89,8 @@ typedef struct {
     /* Optional; defaults CAFF/CAFE.  Must be distinct. */
     const char *uuid_accessory;
     const char *uuid_phone;
-    /* REQUIRED: OEM SDP listener name passed to ListenSPP. */
+    /* REQUIRED: OEM SDP listener name.  Vendor ListenSPP signature is
+     * (UUID, name), so this is the second argument, not the first. */
     const char *service_name;
     /* Production defaults to uid 0 (root).  Tests may set an explicit uid. */
     int expected_owner_uid_set;

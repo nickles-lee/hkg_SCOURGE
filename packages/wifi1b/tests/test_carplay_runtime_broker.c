@@ -148,13 +148,13 @@ static DBusHandlerResult mock_filter(DBusConnection *conn, DBusMessage *msg,
         const char *signature = dbus_message_get_signature(msg);
         bool ok = false;
         if (signature != NULL && strcmp(signature, "ss") == 0) {
-            const char *name = NULL, *uuid = NULL;
+            const char *uuid = NULL, *name = NULL;
             ok = dbus_message_get_args(msg, NULL,
-                DBUS_TYPE_STRING, &name, DBUS_TYPE_STRING, &uuid,
+                DBUS_TYPE_STRING, &uuid, DBUS_TYPE_STRING, &name,
                 DBUS_TYPE_INVALID) &&
-                name != NULL && uuid != NULL &&
-                strcmp(name, TEST_SERVICE) == 0 &&
-                strcmp(uuid, CP_SPP_DBUS_UUID_CAFF) == 0;
+                uuid != NULL && name != NULL &&
+                strcmp(uuid, CP_SPP_DBUS_UUID_CAFF) == 0 &&
+                strcmp(name, TEST_SERVICE) == 0;
         }
         if (!ok) {
             mock_reply_error(conn, msg, DBUS_ERROR_INVALID_ARGS);

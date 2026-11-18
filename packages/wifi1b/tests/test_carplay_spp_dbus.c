@@ -224,13 +224,13 @@ static DBusHandlerResult mock_filter(DBusConnection *conn, DBusMessage *msg,
         const char *signature = dbus_message_get_signature(msg);
         bool ok = false;
         if (signature != NULL && strcmp(signature, "ss") == 0) {
-            const char *name = NULL, *uuid = NULL;
+            const char *uuid = NULL, *name = NULL;
             ok = dbus_message_get_args(msg, NULL,
-                DBUS_TYPE_STRING, &name, DBUS_TYPE_STRING, &uuid,
+                DBUS_TYPE_STRING, &uuid, DBUS_TYPE_STRING, &name,
                 DBUS_TYPE_INVALID) &&
-                name != NULL && uuid != NULL &&
-                strcmp(name, TEST_SERVICE) == 0 &&
-                strcmp(uuid, CP_SPP_DBUS_UUID_CAFF) == 0;
+                uuid != NULL && name != NULL &&
+                strcmp(uuid, CP_SPP_DBUS_UUID_CAFF) == 0 &&
+                strcmp(name, TEST_SERVICE) == 0;
         } else if (signature != NULL && strcmp(signature, "s") == 0) {
             const char *name = NULL;
             ok = dbus_message_get_args(msg, NULL,
@@ -248,12 +248,12 @@ static DBusHandlerResult mock_filter(DBusConnection *conn, DBusMessage *msg,
     }
     if (path != NULL && strcmp(path, ADAPTER_PATH) == 0 &&
         dbus_message_is_method_call(msg, ADAPTER_IFACE, "StopListenSPP")) {
-        const char *name = NULL, *uuid = NULL;
+        const char *uuid = NULL, *name = NULL;
         if (dbus_message_get_signature(msg) != NULL &&
             strcmp(dbus_message_get_signature(msg), "ss") == 0 &&
-            dbus_message_get_args(msg, NULL, DBUS_TYPE_STRING, &name,
-                DBUS_TYPE_STRING, &uuid, DBUS_TYPE_INVALID) &&
-            !strcmp(name, TEST_SERVICE) && !strcmp(uuid, CP_SPP_DBUS_UUID_CAFF)) {
+            dbus_message_get_args(msg, NULL, DBUS_TYPE_STRING, &uuid,
+                DBUS_TYPE_STRING, &name, DBUS_TYPE_INVALID) &&
+            !strcmp(uuid, CP_SPP_DBUS_UUID_CAFF) && !strcmp(name, TEST_SERVICE)) {
             mock->stop_seen = true;
             mock->listener = false;
             mock_reply_int(conn, msg, 0);

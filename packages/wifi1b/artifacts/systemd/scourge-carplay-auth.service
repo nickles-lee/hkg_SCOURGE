@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# EXPERIMENTAL, default-off. Root-only MFi certificate/signature helper for
+# the first-party CarPlay broker. It is not installed or enabled by the
+# Wifi1b payload builder. It loads the pinned vendor MFi library and talks to
+# the real chip; it never fabricates a certificate or signature.
+#
+# Prerequisites: /rw_data/wifi1b/carplay-native-auth built against the target
+# rootfs, and the pinned /app/lib/libCoreUtils.so present. The helper's
+# compiled-in SHA-256 pin must match the deployed library.
+
+[Unit]
+Description=SCOURGE experimental CarPlay MFi auth helper (WIP, not car-validated)
+After=Dbuslaunch.service
+Before=carplay-broker.service
+StartLimitInterval=300
+StartLimitBurst=5
+ConditionPathExists=/rw_data/wifi1b/carplay-native-auth
+
+[Service]
+Type=simple
+UMask=0077
+Environment=PATH=/bin:/sbin:/usr/bin:/usr/sbin
+ExecStart=/rw_data/wifi1b/carplay-native-auth --serve --experimental
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

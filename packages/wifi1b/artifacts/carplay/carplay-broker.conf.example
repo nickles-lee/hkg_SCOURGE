@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Owner-supplied configuration for the experimental CarPlay broker.
+# Install as /rw_data/wifi1b/carplay-broker.conf, root:root, mode 0600.
+#
+# This template intentionally leaves identity and AP values empty.  The
+# helper rejects an incomplete configuration and does not open the RX socket
+# or session bus.  Never commit a filled copy; it contains vehicle identity
+# and AP credentials.
+
+# OEM SDP listener name passed to the adapter's ListenSPP method.
+service_name=SCOURGE-iAP
+
+# Identity advertised in identification/session-start.  Use the same values
+# as the Wifi1b CarPlay config, not invented ones.
+name=
+model=
+manufacturer=
+serial=
+firmware=
+hardware=
+eap_name=
+language=en
+languages=en
+transport_name=
+
+# Bluetooth identity.  Use the head unit's own Bluetooth address/device ID.
+# These are persistent vehicle identifiers; keep them out of Git.
+bt_mac=
+device_id=
+
+# AP bootstrap values.  They must identify the AP the daemon actually runs.
+# The broker refreshes SSID/channel/security/link-local from status.json and
+# refuses an offer until the readback is fresh; ap_psk is not refreshed and
+# must match the daemon's PSK.  See the daemon's status/config for the values.
+ap_ssid=
+ap_psk=
+ap_channel=0
+ap_security=WPA2
+link_local=
+
+# AirPlay receiver port.  The vendor receiver currently listens on 7000.
+airplay_port=7000
+
+# Optional; omit to read DBUS_SESSION_BUS_ADDRESS from
+# /tmp/session_appmgr.env.
+# bus_address=unix:path=/tmp/session_appmgr
+
+# Fail closed: no offer until the owner explicitly grants consent.
+consent=0
+
+# Safety default: 1 blocks the broker whenever the policy callback runs, which
+# is the conservative choice until a live Apple-USB/wired-CarPlay check is
+# wired in.  Set 0 only for a bench test where wired CarPlay cannot be active.
+usb_active=1

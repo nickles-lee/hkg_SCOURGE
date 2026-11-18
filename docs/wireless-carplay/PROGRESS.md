@@ -6,6 +6,8 @@ Current branch: `wireless-carplay-confirmed-fixes`.
 Current V24 integration and release gates: [V24.md](V24.md).
 Historical V23 offline checkpoint: [V23.md](V23.md).
 Reviewed defect checkpoints: [CONFIRMED-FIXES.md](CONFIRMED-FIXES.md).
+Exact stock-gap/patch/address map for reproduction:
+[REPRODUCTION.md](REPRODUCTION.md).
 The original `wireless-carplay-integration` branch is preserved as history.
 
 Goal: complete a wireless bootstrap compatible with the pinned LIVI reference,
