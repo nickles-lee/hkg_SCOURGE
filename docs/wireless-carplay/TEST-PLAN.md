@@ -19,6 +19,9 @@ Nothing in this plan has been end-to-end validated. Read
   before the first write.
 - Keep phone MACs, AP PSKs, keys and personal data out of Git and out of chat;
   evidence goes under `/tmp/opencode/carplay-<date>/`.
+- HCI snoop traces are raw Bluetooth traffic. Keep them outside the repo and
+  out of shared chat; record only lengths, frame types, DLCIs and hashes.
+  Never print or paste `pi`, `deviceid`, BSSIDs or Bluetooth addresses.
 - A failed gate is a stop, not a workaround.
 
 **Command context:** *host* commands run in the repo checkout; *car* commands
@@ -30,14 +33,15 @@ until a step explicitly copies them to the car.
 
 | Window | Do | Do not |
 |---|---|---|
-| 15 min | Phase 0 (host preflight), Phase 1 (non-destructive snapshot + stock backup), Phase 2 (SPP registration/TX ACK) | Deploy or replace `vbtd` |
-| 45 min | Above + Phase 3 (P1 RX hook temporary deployment and RX capture) | Start broker auth/projection without Phase 3 passing |
+| 15 min | Phase 0 (host preflight), Phase 1 (non-destructive snapshot + stock backup), Phase 2 (SPP registration + TX ladder steps 1-2) | Deploy or replace `vbtd` |
+| 45 min | Above + Phase 2b (D1 receiver identity, stock only) and Phase 3 (P1 RX hook temporary deployment and RX capture) | Start broker auth/projection without Phase 3 passing |
 | 90 min | Above + Phase 4 (broker/MFi), Phase 5 (AP/iAP2 bootstrap) | Patch AppProjection |
 | 120 min | Above + Phase 6 (regression/rollback) | Leave an unvalidated patch installed |
 
 If only 15 minutes are available, do **not** deploy. The live P2 probe is
 read-only except for the listener and adapter discoverability; it is the
-highest-value short session.
+highest-value short session. D1 (Phase 2b) is the highest-value stock-only
+probe and needs no listener at all; run it first when time allows.
 
 ## 2. Phase 0 — host preflight
 
@@ -129,12 +133,16 @@ Record:
   redacted `status.json`. Do not cat the whole `bt.state`; it includes the
   head-unit Bluetooth address.
 - Phone connection state (media/HFP profiles present does not prove CAFF).
+- The stock vendor log sink that carries `VBT`/`[BSA]` lines, or `none` if it
+  cannot be identified read-only. TX ladder step 2 depends on it.
 - Existing `org.bluez.SerialPort.SerialPort.v2_0_*` count (normally 0 before
   the listener).
 - AP SSID/channel/security/link-local, `ap_clients`, `carplay_ready`.
-  Record `carplay_session_observed` only as a daemon field: in the current
-  daemon it is hardcoded `false` and is **not** pass evidence. Use the
-  broker’s session counters for the live session check.
+  `carplay_session_observed` is derived from a fresh root-owned broker
+  status (`running`, receiver observed, AP on air, peer, `rx_packets > 0`)
+  and requires a joined client; that derivation is offline-tested only, so
+  it is not pass evidence by itself. Use the broker’s session counters for
+  the live session check.
 - USB SSH works; BlueLink/modem state is unchanged.
 - The owner’s local/serial recovery method, or explicitly `none`; if none and
   USB SSH is the only route, do not replace `vbtd`.
@@ -238,10 +246,54 @@ If the stock copy hash differs from the pin, any label is missing/unreadable,
 or the rollback script cannot be created, **stop**. Do not replace `vbtd`
 without a self-contained, label-preserving restore path.
 
-## 4. Phase 2 — SPP registration and TX method (no binary patch)
+## 4. Phase 2 — SPP registration and TX ladder (no binary patch)
 
-This is the same non-patching probe that already passed once. Do not run it
-concurrently with another listener/adapter change.
+This repeats the 2026-11-18 registration probe; only TX ladder step 1 was
+observed then. Do not run it concurrently with another listener/adapter
+change.
+
+### Capture prerequisite (for TX ladder step 3)
+
+Step 3 needs a host-side HCI trace, and the snoop writer is configured at
+daemon startup, not per probe:
+
+- `BSA_Boot` ELF `0x84ffe0` calls `DispBtSnoopInit` ELF `0x8a2260`;
+  `DispHciAclData` ELF `0x883ac0` runs inside the `bte_hcisu_send` ELF
+  `0x84f7b0` path, before the queued send. These are inside `vbtd-51`, re-verified by `objdump` against the
+  pinned whole-file SHA-256 `55e21d…cec9e0`; there is no separate per-function
+  pin. No capture has been taken and no OEM code executed.
+- `DispBtSnoopInit` opens with `O_CREAT|O_TRUNC` and exits the daemon if the
+  open fails. The startup path can supply a filename (`-b`/snoop config); the
+  in-binary pattern is `log_data/BT/vbt_snoop_<pid>.cfa`.
+
+Check for an already-enabled trace (read-only):
+
+```sh
+ls -l /proc/$(pidof vbtd)/fd | grep -i 'cfa'
+for d in /log_data /rw_data /tmp /var/log; do
+  [ -d "$d" ] && find "$d" -maxdepth 3 -name 'vbt_snoop_*.cfa' -type f
+done
+```
+
+Record how the daemon was started and where a filename could come from
+(`tr '\0' ' ' < /proc/$(pidof vbtd)/cmdline; echo`, plus the `vbtd` unit's
+snoop-related lines via `systemctl cat vbtd.service`). Do not edit the unit
+without owner approval. Never assume a filename from the pattern alone.
+
+If a trace exists, copy it to a root-only path under `/rw_data/carplay/`
+**before** any restart (the next start truncates it), then record its size and
+SHA-256. Use it only if it spans the phone connection and the `SendData`
+call.
+
+If no trace exists, do not enable snoop silently. Either run Phase 2 without
+step 3 (`host emission: unrecorded`) or get explicit owner approval for one
+controlled restart with the Phase 1 stock backup in place. Capture must start
+before the phone connects, or the RFCOMM SABM/PN negotiation is missing. A bad
+path exits the daemon, so a restart is a Bluetooth outage risk. A restart also
+drops the current SPP connection: wait for `pidof vbtd`, then let the phone
+reconnect while the trace is active.
+
+### Registration probe
 
 ```sh
 DATE=$(date +%Y%m%d)                 # same date as Phase 0
@@ -272,17 +324,62 @@ Expected live evidence:
 - `status="connected"`.
 - Local and remote UUID both CAFF.
 - `SendData` is present with signature `ay -> i`.
+- If a trace spans the connection: the header version/datalink, then RFCOMM
+  SABM/PN before the probe. A listener object without a trace is still a
+  registration-only result.
 
-TX method check (one byte only, not a CAFF PDU):
+TX evidence ladder (one byte only, not a CAFF PDU). The call below is step 1:
 
 ```sh
 busctl --address="$A" call "$S" "$P" \
   org.bluez.SerialPort.SerialPort.v2_0 SendData ay 1 0
 ```
 
-Expected: `i 0`. **This is a stub ACK, not delivery.** If an RFCOMM/btsnoop
-capture is available, capture one UIH frame; otherwise record “delivery
-unproven.”
+1. **D-Bus ACK** — expected `i 0`. `StackSerialPortStub::SendData`
+   (`0x612e50`) ignores the vendor result at `0x613011` and builds the reply
+   at `0x613038`.
+2. **Vendor acceptance** — read the stock log sink identified in Phase 1 for
+   `VBTSppSendDataCfm` (`0x490b60`) at the time of the call. No sink means no
+   step 2: record `vendor acceptance: unobserved`. Do not infer it from step
+   1 or step 3.
+3. **Host emission** — in the trace, locate the ACL stream for the connected
+   phone after the call and require one outbound RFCOMM UIH on the SPP DLCI.
+   Read the header before decoding:
+
+   ```sh
+   CAP=<path to the trace>
+   wc -c < "$CAP"; sha256sum "$CAP"
+   head -c 16 "$CAP" | od -An -tx1
+   ```
+
+   The first eight bytes are the btsnoop magic
+   `62 74 73 6e 6f 6f 70 00`; record the 4-byte version and 4-byte datalink
+   that follow. Do not assume H4 vs USB. Each record then has original length,
+   included length, 8-byte flags, 8-byte cumulative drops and an 8-byte
+   timestamp (big-endian); bit 0 of the flags is direction (0 = host to
+   controller). Follow L2CAP signaling, then RFCOMM SABM/PN, then UIH. If a
+   btsnoop-capable decoder is available, for example:
+
+   ```sh
+   command -v tshark >/dev/null && tshark -r "$CAP" -Y btrfcomm -T fields \
+     -e frame.number -e btrfcomm.frame_type -e btrfcomm.dlci -e btrfcomm.length
+   ```
+
+   If no decoder is available, stop at the header/framing check and record
+   `host emission: not decoded`; do not infer a UIH from hex. Decode on the
+   car where possible; copying the trace to `$D` moves raw phone traffic
+   off-car and needs owner approval.
+
+   Pass: one TX UIH on the SPP DLCI after the call, recorded as frame type,
+   DLCI and included length. Do not copy the payload into any log.
+4. **Peer receipt** — out of scope for Phase 2. A bare `0x00` need not
+   produce a reply; with an iPhone this needs the real iAP2 exchange
+   (Phase 3/4). An owned cooperative SPP peer proves the stack path only.
+
+"RFCOMM delivery to phone" stays `NOT VALIDATED` in
+[`VALIDATION.md`](VALIDATION.md) until step 4 exists. Phase 2 is a
+registration-only result unless step 3 is recorded; step 1 never passes the
+TX gate on its own.
 
 If no object appears:
 
@@ -305,7 +402,82 @@ busctl --address="$A" call org.bluez.Adapter.Adapter.v2_0_lge1 /lge1 \
 A connected SerialPort may persist until the phone disconnects; that is
 expected and not a failed stop.
 
-## 5. Phase 3 — P1 RX hook deployment and capture
+## 5. Phase 2b — D1 receiver identity on the AP (stock only)
+
+Run before any projection work, before the broker, and before any persistent
+change. It deploys nothing: no receiver restart, no `AppProjection` change,
+no config write, no `vbtd` replacement. A missing field is `unobserved`,
+never a pass. Stop conditions are in
+[`DEFERRED-CAR-PROBES.md`](DEFERRED-CAR-PROBES.md) §4. This probe is
+independent of Phase 2 and may be run before it; nothing in Phase 2 is a
+prerequisite.
+
+### Listener owner and scope on 7000
+
+Port 7000 is `0x1B58`; LISTEN is state `0A`:
+
+```sh
+awk 'NR>1 && $4=="0A" { split($2,a,":"); if (toupper(a[2])=="1B58")
+  print FILENAME, $2, "uid=" $8, "inode=" $10 }' /proc/net/tcp /proc/net/tcp6
+```
+
+The bind address must be the wildcard or the receiver interface address;
+loopback-only is `listener-scope` and a stop. Resolve the inode to an owner
+once, not per poll:
+
+```sh
+INODE=<inode from the line above>
+for d in /proc/[0-9]*; do
+  ls -l "$d/fd" 2>/dev/null | grep -q "socket:\[$INODE\]" || continue
+  printf 'pid=%s comm=%s exe=%s\n' "${d#/proc/}" \
+    "$(cat "$d/comm" 2>/dev/null)" "$(readlink "$d/exe" 2>/dev/null)"
+done
+```
+
+Require an allowlisted stock owner (`AppProjection` by default). Unknown owner
+is `listener-owner` and a stop.
+
+### AP-side `_airplay._tcp` SRV/TXT
+
+Browse from the AP side with a read-only client already present on the unit:
+the target-built passive probe if an approved earlier step left one there, or
+an existing browse tool. D1 installs nothing. If neither client exists, record
+`DNS-SD: unobserved` and stop before projection work; do not install a browser
+just for the probe.
+
+Record the instance count, SRV port, `srcvers`, `deviceid_match`, and
+`pi_sha256` + length. Hash `pi` in place and never print it (the snippet is
+bash-only; `read -s` is not POSIX `sh`):
+
+```sh
+read -rs pi || { echo "pi input failed"; exit 1; }   # paste; no echo
+printf '%s' "$pi" | sha256sum
+unset pi
+```
+
+If `read -s` is unsupported (POSIX `sh` or busybox without it), hash on the
+owner's device instead; do not echo the value or put it on a command line.
+
+### Identity rule and pass/stop
+
+Exactly one corroborated candidate:
+
+- `deviceid` equals the head-unit Bluetooth address with the last byte
+  incremented, or the pinned `device_id`; anything else is
+  `deviceid_match=no` and a stop;
+- `pi` matches `receiver_pi_sha256` when pinned;
+- the 7000 listener is owned by the stock receiver and is not loopback-only.
+
+Record how any beacon/Apple IE was read (AP config readback or an on-air scan
+from an owner device). No readback is `IE: unverified`; `app_info=1` is
+Interworking, not the Apple Device IE. A port answer is not identity.
+
+**Stop** (report, do not patch) on: no advertisement, two different
+identities, unknown listener owner, loopback-only listener, `deviceid`/`pi`
+mismatch, or an IE claim without readback. Do not restart `AppProjection` or
+change DNS-SD scope on the basis of D1.
+
+## 6. Phase 3 — P1 RX hook deployment and capture
 
 **Do this only after Phase 2 and only with the owner present.** Confirm the
 owner’s local/serial recovery method before replacing `vbtd`; if USB SSH is
@@ -466,7 +638,7 @@ P1 fail/rollback trigger:
 - Restore the stock `vbtd` with the label-preserving block above, restart, and
   verify SSH before further work.
 
-## 6. Phase 4 — broker and MFi helper deployment
+## 7. Phase 4 — broker and MFi helper deployment
 
 Preconditions: Phase 3 passed, target broker and MFi helper hashes verified,
 owner config prepared, AP PSK matches the daemon, `consent=1` deliberately
@@ -536,19 +708,25 @@ Broker fail triggers: missing bus, missing RX socket, missing daemon status,
 unsupported AP security, MFi failure, any policy refusal, any fatal status.
 Do not bypass with a static consent/USB override.
 
-## 7. Phase 5 — AP/iAP2 bootstrap and projection
+## 8. Phase 5 — AP/iAP2 bootstrap and projection
 
 1. Start wireless CarPlay on the phone.
 2. Watch `status.json` for `ap_clients` and the broker status for session
    counters. Do not use the daemon’s `carplay_session_observed` /
-   `carplay_ready` as proof yet: `carplay_session_observed` is currently
-   hardcoded `false` in `wifi1b_daemon.c`.
+   `carplay_ready` as proof yet: their derivation is offline-tested only and
+   the on-car values remain unvalidated.
 3. Check the broker counters and logs; confirm the phone received the AP
    credentials and joined `IONIQ5-CarPlay`.
-4. Capture `_airplay._tcp` TXT/SRV and the receiver port if tools permit.
-5. Only if the receiver does not advertise after a completed first-party
-   session, investigate the minimal AppProjection trigger; do not patch
-   `CarPlayAppFrameworkStart`’s PLT stub.
+4. Observe `_airplay._tcp` TXT/SRV from the AP side and corroborate it
+   against the stock listener and the Phase 2b (D1) baseline. Compare
+   before/after phone association; verify that the broker's configured
+   receiver port matches. If D1 recorded `unobserved`, record this observation
+   as unobserved too rather than assuming it appeared.
+5. If the phone joined but projection did not start, distinguish discovery
+   and selection (`_carplay-ctrl._tcp`, OEM controller events/request) from
+   incoming setup, session creation, and first frame. Follow the
+   [stock projection findings](STOCK-PROJECTION.md). Do not patch or
+   restart `AppProjection` on the basis of missing mDNS or a 455 alone.
 
 Pass criteria are layered; record each separately:
 
@@ -558,7 +736,7 @@ Pass criteria are layered; record each separately:
 - `_airplay._tcp` appears with the expected identity.
 - Projection/UI appears (only then can “wireless CarPlay works” be claimed).
 
-## 8. Phase 6 — regression and rollback
+## 9. Phase 6 — regression and rollback
 
 Rollback is part of the test, not an afterthought.
 
@@ -588,14 +766,16 @@ Verify after rollback:
 - Wired CarPlay still works.
 - No listener/SerialPort object is left behind after phone disconnect.
 
-## 9. Evidence to capture
+## 10. Evidence to capture
 
 | File | Content |
 |---|---|
 | `host.log` | Commands, test results, build hashes |
 | `car-preflight.log` | Kernel, `vbtd` hash, redacted status, D-Bus names, AP state |
 | `p2-listen.log` | `ListenSPP` return, object path, attrs |
-| `p2-senddata.log` | `SendData` return, capture result, delivery caveat |
+| `p2-senddata.log` | `SendData` return, ladder steps 1–2, capture header/datalink |
+| `p2-snoop.log` | Trace path/size/SHA-256, btsnoop version/datalink, RFCOMM frame types/DLCI/lengths only |
+| `d1-receiver.log` | Listener scope/owner, SRV port, `srcvers`, `deviceid_match`, `pi_sha256`, IE source |
 | `p1-rx.log` | Header bytes, counters, any malformed frames; **delete after header extraction** |
 | `broker-status.json` | State, counters, AP readback, errors |
 | `auth.log` | Real helper status only; no credential bytes |
@@ -604,10 +784,12 @@ Verify after rollback:
 
 Redact phone and head-unit Bluetooth MACs, `carplay_btaddr`/`carplay_id`,
 AP PSKs, client SSID/BSSID, `imported_from`, keys and personal data before
-sharing. Prefer the filtered `redact()` output from Phase 1 over a raw
-`status.json` or `bt.state` copy.
+sharing. TXT `pi` and `deviceid` are never pasted; keep only `pi_sha256` and
+`deviceid_match`. Prefer the filtered `redact()` output from Phase 1 over a
+raw `status.json` or `bt.state` copy. Raw snoop traces stay outside the repo
+and outside shared chat.
 
-## 10. Abort conditions
+## 11. Abort conditions
 
 Stop and roll back on any of:
 
@@ -621,14 +803,14 @@ Stop and roll back on any of:
 - MFi authentication failure or any request to fake a response.
 - Any sign that the phone or owner data is at risk.
 
-## 11. If the car is unavailable
+## 12. If the car is unavailable
 
 Do only Phase 0. Keep the target/broker/MFi builds, their manifests and the
 hash evidence. Do not mark any live row in
 [`VALIDATION.md`](VALIDATION.md) as validated. The next session starts at
 Phase 1.
 
-## 12. Owner inputs needed before deployment
+## 13. Owner inputs needed before deployment
 
 - SSH route and confirmation that USB SSH is the recovery path.
 - CarPlay identity fields and AP PSK source (root-only; never commit).

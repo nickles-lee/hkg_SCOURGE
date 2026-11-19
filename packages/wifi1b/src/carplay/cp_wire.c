@@ -806,7 +806,9 @@ cp_wire_status cp_wire_decode_challenge_request(const cp_wire_view *view,
         if (st != CP_WIRE_OK) {
             return st;
         }
-        if (payload_len == 0u || payload_len > CP_WIRE_MAX_CHALLENGE) {
+        if (payload_len != CP_WIRE_AUTH_CHALLENGE_SHA1 &&
+            payload_len != CP_WIRE_AUTH_CHALLENGE_SHA256) {
+            /* AA02 carries an MFi digest: SHA-1 or SHA-256 only. */
             return CP_WIRE_ERR_RANGE;
         }
         *challenge = payload;

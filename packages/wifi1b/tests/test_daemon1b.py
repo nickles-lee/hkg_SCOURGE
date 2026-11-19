@@ -52,6 +52,14 @@ with tempfile.TemporaryDirectory(prefix="wifi1b-daemon-", dir="/tmp/opencode") a
     assert status["client_modem_unknown"] is False
     assert status["client_legacy_route_removed"] == 0
     assert status["ssh_fw_open"] is False
+    assert status["carplay_session_observed"] is False
+    assert status["carplay_ready"] is False
+    assert status["carplay_gate"] == "inactive"
+    assert status["carplay_ie_observation"] == "ie_unverified"
+    assert status["carplay_ie_observed"] is False
+    assert status["carplay_vendor_ie_requested"] is False
+    assert status["carplay_firewall_ok"] is False
+    assert status["carplay_last_apply_ok"] is False
     assert isinstance(status["disk_free_kb"], int) and status["disk_free_kb"] >= 0
     assert status["disk_low"] is False
     assert "carplay_control=wifi1b" in cfg
@@ -126,7 +134,9 @@ with tempfile.TemporaryDirectory(prefix="wifi1b-daemon-", dir="/tmp/opencode") a
     assert "status=OK" in again.stdout
 
 src = (ROOT / "src/wifi1b_daemon.c").read_text() + (ROOT / "src/wifi1b_backend.inc").read_text()
-for needle in ("ap_scan=2", "iw reg set GB", "carplay_id=%s", "app_info=1",
+for needle in ("ap_scan=2", "iw reg set GB", "carplay_id=%s", "carplay_vendor_ie",
+               "ap_vendor_elements", "ie_unverified", "WIFI1B_APP_CP",
+               "app_info=1",
                "-p %d", "DHCP", "10.42.0.1",
                "carplay_control", "apply_carplay_control", "Stock USB",
                # The CarPlay chain must be hooked into OUTPUT as well as INPUT:

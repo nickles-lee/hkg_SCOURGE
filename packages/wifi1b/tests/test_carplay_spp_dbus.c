@@ -381,7 +381,8 @@ static void child_main(const char *address, const char *scenario,
     int request = dbus_bus_request_name(conn, ADAPTER_SERVICE,
         DBUS_NAME_FLAG_DO_NOT_QUEUE, &error);
     if (request != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER) _exit(5);
-    if (strcmp(scenario, "serial_missing")) {
+    if (strcmp(scenario, "serial_missing") &&
+        strcmp(scenario, "no_connect")) {
         request = dbus_bus_request_name(conn, SERIAL_SERVICE,
             DBUS_NAME_FLAG_DO_NOT_QUEUE, &error);
         if (request != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER) _exit(7);
@@ -402,6 +403,12 @@ static void child_main(const char *address, const char *scenario,
             }
             if (command == 'I') mock_impostor_status(address, "disconnected");
             if (command == 'D') mock_emit_status(conn, "disconnected");
+            if (command == 'R') mock_emit_status(conn, "connected");
+            if (command == 'T') {
+                for (unsigned i = 0; i < 50 && !mock.stop_seen; i++)
+                    (void)dbus_connection_read_write_dispatch(conn, 20);
+                _exit(mock.stop_seen ? 0 : 9);
+            }
             if (command == 'C') {
                 for (unsigned i = 0; i < 10; i++)
                     (void)dbus_connection_read_write_dispatch(conn, 20);
@@ -413,7 +420,8 @@ static void child_main(const char *address, const char *scenario,
                 mock_emit_status(conn, "Connected");
                 usleep(120000);
             }
-            if (strcmp(scenario, "no_connect") != 0) {
+            if (strcmp(scenario, "no_connect") != 0 &&
+                strcmp(scenario, "attach_existing") != 0) {
                 if (!strcmp(scenario, "bad_serial_path"))
                     mock_bad_status(conn, true);
                 else if (!strcmp(scenario, "bad_status_signature"))
@@ -681,6 +689,19 @@ int main(int argc, char **argv)
         return 0;
     }
     CHECK(cp_spp_dbus_listener_owned(engine) == 1);
+    if (!strcmp(scenario, "attach_existing")) {
+        wait_state(engine, &now, CP_SPP_DBUS_STATE_CONNECTED, &cap, 4000);
+        CHECK(cp_spp_dbus_state_get(engine) == CP_SPP_DBUS_STATE_CONNECTED);
+        CHECK(cap.status_calls == 0); /* no status signal supplied */
+        CHECK(cp_spp_dbus_connect_generation(engine) == 1u);
+        char peer[18];
+        CHECK(cp_spp_dbus_peer(engine, peer, sizeof(peer)) == CP_SPP_DBUS_OK);
+        CHECK(!strcmp(peer, TEST_PEER));
+        cp_spp_dbus_close(engine);
+        close(cmd_pipe[1]); kill(child, SIGTERM); (void)waitpid(child, NULL, 0);
+        puts("PASS: attach enumerates an already-registered SerialPort object");
+        return 0;
+    }
     if (!strcmp(scenario, "serial_missing") ||
         !strcmp(scenario, "bad_serial_path") ||
         !strcmp(scenario, "bad_status_signature")) {
@@ -719,8 +740,34 @@ int main(int argc, char **argv)
     wait_state(engine, &now, CP_SPP_DBUS_STATE_CONNECTED, &cap, 4000);
     CHECK(cp_spp_dbus_state_get(engine) == CP_SPP_DBUS_STATE_CONNECTED);
     CHECK(cap.status_calls >= 1);
-    /* A status transition is not a trusted receiver observation. */
-    CHECK(cp_spp_dbus_state_get(engine) == CP_SPP_DBUS_STATE_CONNECTED);
+    CHECK(cp_spp_dbus_connect_generation(engine) == 1u);
+    if (!strcmp(scenario, "reconnect")) {
+        char command = 'D';
+        CHECK(write(cmd_pipe[1], &command, 1) == 1);
+        wait_state(engine, &now, CP_SPP_DBUS_STATE_LISTENING, &cap, 4000);
+        CHECK(cp_spp_dbus_state_get(engine) == CP_SPP_DBUS_STATE_LISTENING);
+        CHECK(cap.removed >= 1);
+        command = 'R';
+        CHECK(write(cmd_pipe[1], &command, 1) == 1);
+        wait_state(engine, &now, CP_SPP_DBUS_STATE_CONNECTED, &cap, 4000);
+        CHECK(cp_spp_dbus_state_get(engine) == CP_SPP_DBUS_STATE_CONNECTED);
+        CHECK(cp_spp_dbus_connect_generation(engine) == 2u);
+        cp_spp_dbus_close(engine);
+        close(cmd_pipe[1]); kill(child, SIGTERM); (void)waitpid(child, NULL, 0);
+        puts("PASS: same-peer reconnect advances the connection generation");
+        return 0;
+    }
+    if (!strcmp(scenario, "close_owned")) {
+        cp_spp_dbus_close(engine);
+        char command = 'T';
+        CHECK(write(cmd_pipe[1], &command, 1) == 1);
+        int status = 0;
+        CHECK(waitpid(child, &status, 0) == child);
+        CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        close(cmd_pipe[1]);
+        puts("PASS: close stops only its own listener with the introspection order");
+        return 0;
+    }
     if (!strcmp(scenario, "close_inflight") || !strcmp(scenario, "close_fatal")) {
         uint8_t byte = 0x55;
         CHECK(cp_spp_dbus_send(engine, &byte, 1, now) == CP_SPP_DBUS_OK);
@@ -791,12 +838,7 @@ int main(int argc, char **argv)
     CHECK(cp_spp_dbus_send(engine, frame, CP_SPP_DBUS_MAX_TX_BYTES + 1u, now) ==
           CP_SPP_DBUS_ERR_INVALID);
     CHECK(cp_spp_dbus_send(engine, frame, 0, now) == CP_SPP_DBUS_ERR_INVALID);
-    if (!strcmp(scenario, "send_error") || !strcmp(scenario, "send_timeout") ||
-        !strcmp(scenario, "disconnect")) {
-        if (!strcmp(scenario, "disconnect")) {
-            char command = 'D';
-            CHECK(write(cmd_pipe[1], &command, 1) == 1);
-        }
+    if (!strcmp(scenario, "send_error") || !strcmp(scenario, "send_timeout")) {
         wait_state(engine, &now, CP_SPP_DBUS_STATE_FATAL, &cap, 4000);
         CHECK(cp_spp_dbus_state_get(engine) == CP_SPP_DBUS_STATE_FATAL);
         CHECK(cp_spp_dbus_tx_queued(engine) == 0);
@@ -806,7 +848,23 @@ int main(int argc, char **argv)
             CP_SPP_DBUS_ERR_NOT_CONNECTED);
         cp_spp_dbus_close(engine);
         close(cmd_pipe[1]); kill(child, SIGTERM); (void)waitpid(child, NULL, 0);
-        puts("PASS: send failure/timeout/disconnect retires queued transport bytes");
+        puts("PASS: send failure/timeout retires queued transport bytes");
+        return 0;
+    }
+    if (!strcmp(scenario, "disconnect")) {
+        char command = 'D';
+        CHECK(write(cmd_pipe[1], &command, 1) == 1);
+        wait_state(engine, &now, CP_SPP_DBUS_STATE_LISTENING, &cap, 4000);
+        CHECK(cp_spp_dbus_state_get(engine) == CP_SPP_DBUS_STATE_LISTENING);
+        CHECK(cap.removed >= 1);
+        CHECK(cp_spp_dbus_tx_queued(engine) == 0);
+        CHECK(cap.fatal_calls == 0);
+        CHECK(cp_spp_dbus_deliver_rx(engine, TEST_PEER,
+            CP_SPP_DBUS_RX_UUID_KIND_CAFF, (const uint8_t *)"rx", 2) ==
+            CP_SPP_DBUS_ERR_NOT_CONNECTED);
+        cp_spp_dbus_close(engine);
+        close(cmd_pipe[1]); kill(child, SIGTERM); (void)waitpid(child, NULL, 0);
+        puts("PASS: disconnect retires queued bytes and keeps the owned listener");
         return 0;
     }
     wait_acks(engine, &now, &cap, 4, 8000);
@@ -851,6 +909,10 @@ int main(int argc, char **argv)
     CHECK(cp_spp_dbus_listener_owned(engine) == 0);
     CHECK(cp_spp_dbus_state_get(engine) == CP_SPP_DBUS_STATE_LISTENING);
     CHECK(cap.removed >= 1);
+    /* Stop is idempotent and never re-sends for an unowned listener. */
+    CHECK(cp_spp_dbus_stop(engine, now) == CP_SPP_DBUS_OK);
+    CHECK(cp_spp_dbus_stop(engine, now) == CP_SPP_DBUS_OK);
+    CHECK(cp_spp_dbus_listener_owned(engine) == 0);
 
     cp_spp_dbus_close(engine);
     close(cmd_pipe[1]);

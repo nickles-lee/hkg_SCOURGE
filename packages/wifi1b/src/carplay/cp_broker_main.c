@@ -19,6 +19,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <net/if.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -30,6 +31,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "cp_receiver_lookup.h"
+#include "cp_receiver_policy.h"
 #include "cp_runtime_broker.h"
 #include "cp_spp_socket.h"
 #include "cp_usb.h"
@@ -67,6 +70,14 @@ typedef struct {
     char link_local[64];
     unsigned airplay_port;
     char source_version[MAX_FIELD];
+    char receiver_interface[CP_OEM_RECEIVER_MAX_INTERFACE];
+    unsigned receiver_timeout_ms;
+    unsigned receiver_settle_ms;
+    char receiver_listener_owner[64];
+    char receiver_pi_sha256[CP_OEM_RECEIVER_SHA256_LEN * 2u + 1u];
+    char receiver_backend_root[256];
+    char receiver_backend_library[512];
+    int receiver_allow_unpinned_backend;
     int consent;
     int usb_active;
     char usb_sysfs[256];
@@ -82,6 +93,16 @@ typedef struct {
     cp_runtime_broker broker;
     cp_spp_socket rx;
     cp_boot_ap_readback ap;
+    cp_receiver_lookup_result receiver;
+    cp_receiver_policy_result accepted;
+    cp_receiver_listener_result listener;
+    cp_receiver_lookup_status receiver_lookup_status;
+    cp_receiver_policy_status receiver_policy_status;
+    char receiver_reason[32];
+    bool receiver_policy_evaluated;
+    uint8_t receiver_pi_pin[CP_OEM_RECEIVER_SHA256_LEN];
+    bool receiver_have_pi_pin;
+    bool receiver_ready;
     char lang_storage[MAX_LANGS][MAX_FIELD];
     const char *langs[MAX_LANGS + 1]; /* + NULL terminator */
     bool usb_blocked;
@@ -155,6 +176,14 @@ static int load_kv(const char *path, broker_config_t *cfg)
         else if (!strcmp(k, "link_local")) copy_field(cfg->link_local, sizeof(cfg->link_local), v);
         else if (!strcmp(k, "airplay_port")) cfg->airplay_port = (unsigned)strtoul(v, NULL, 0);
         else if (!strcmp(k, "source_version")) copy_field(cfg->source_version, sizeof(cfg->source_version), v);
+        else if (!strcmp(k, "receiver_interface")) copy_field(cfg->receiver_interface,
+                                                            sizeof(cfg->receiver_interface), v);
+        else if (!strcmp(k, "receiver_timeout_ms")) cfg->receiver_timeout_ms = (unsigned)strtoul(v, NULL, 0);
+        else if (!strcmp(k, "receiver_settle_ms")) cfg->receiver_settle_ms = (unsigned)strtoul(v, NULL, 0);
+        else if (!strcmp(k, "receiver_listener_owner")) copy_field(cfg->receiver_listener_owner,
+                                                                   sizeof(cfg->receiver_listener_owner), v);
+        else if (!strcmp(k, "receiver_pi_sha256")) copy_field(cfg->receiver_pi_sha256,
+                                                              sizeof(cfg->receiver_pi_sha256), v);
         else if (!strcmp(k, "consent")) cfg->consent = atoi(v) != 0;
         else if (!strcmp(k, "usb_active")) cfg->usb_active = atoi(v) != 0;
         else if (!strcmp(k, "usb_sysfs")) copy_field(cfg->usb_sysfs,
@@ -323,11 +352,10 @@ static bool identity_complete(const broker_config_t *c)
     return c->name[0] && c->model[0] && c->manufacturer[0] &&
            c->serial[0] && c->firmware[0] && c->hardware[0] &&
            c->eap[0] && c->language[0] && c->transport_name[0] &&
-           c->bt_mac[0] && c->device_id[0] && c->ap_ssid[0] &&
+           c->bt_mac[0] && c->ap_ssid[0] &&
            c->ap_psk[0] && c->ap_channel != 0 && c->ap_channel <= 255 &&
            c->ap_security[0] && c->link_local[0] &&
-           c->airplay_port != 0 && c->airplay_port <= 65535 &&
-           c->service_name[0];
+           c->service_name[0] && c->receiver_interface[0];
 }
 
 static void parse_languages(broker_ctx_t *ctx)
@@ -355,6 +383,10 @@ static void parse_languages(broker_ctx_t *ctx)
 
 static bool build_session_config(broker_ctx_t *ctx)
 {
+    if (ctx->cfg.device_id[0] == '\0' || ctx->cfg.airplay_port == 0u ||
+        ctx->cfg.airplay_port > 65535u) {
+        return false;
+    }
     cp_session_config_default(&ctx->session);
     cp_boot_config *b = &ctx->session.boot;
     b->name = ctx->cfg.name;
@@ -401,16 +433,16 @@ static bool usb_active_cb(void *user, const char *bluetooth_id,
     return ctx->usb_blocked;
 }
 
-static bool read_ap_snapshot(const broker_config_t *cfg, uid_t expected_uid)
+static bool read_status_text(const broker_config_t *cfg, uid_t expected_uid,
+                             char *text, size_t cap)
 {
-    char text[16384];
     struct stat st;
     int fd = open(cfg->daemon_status_path,
                   O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) return false;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
         st.st_uid != expected_uid || (st.st_mode & 077) != 0 ||
-        st.st_size <= 0 || (uint64_t)st.st_size >= sizeof(text)) {
+        st.st_size <= 0 || (uint64_t)st.st_size >= cap) {
         close(fd);
         return false;
     }
@@ -419,12 +451,228 @@ static bool read_ap_snapshot(const broker_config_t *cfg, uid_t expected_uid)
         close(fd);
         return false;
     }
-    size_t n = fread(text, 1, sizeof(text), f);
+    size_t n = fread(text, 1, cap, f);
     bool valid = !ferror(f) && n == (size_t)st.st_size && !memchr(text, 0, n);
     fclose(f);
     if (!valid) return false;
     text[n] = '\0';
+    return true;
+}
+
+static bool read_ap_snapshot(const broker_config_t *cfg, uid_t expected_uid)
+{
+    char text[16384];
+    if (!read_status_text(cfg, expected_uid, text, sizeof(text))) return false;
     return ap_snapshot_matches(text, cfg, time(NULL));
+}
+
+typedef enum {
+    AP_SNAPSHOT_MISSING = 0,
+    AP_SNAPSHOT_STALE,
+    AP_SNAPSHOT_FRESH
+} ap_snapshot_state;
+
+/*
+ * A diagnostic --check-receiver classifies the daemon snapshot but does not
+ * require it.  The runtime path still requires FRESH before any bus/RX work.
+ */
+static ap_snapshot_state classify_ap_snapshot(const broker_config_t *cfg)
+{
+    char text[16384];
+    if (!read_status_text(cfg, geteuid(), text, sizeof(text))) {
+        return AP_SNAPSHOT_MISSING;
+    }
+    return ap_snapshot_matches(text, cfg, time(NULL)) ? AP_SNAPSHOT_FRESH
+                                                      : AP_SNAPSHOT_STALE;
+}
+
+static const char *ap_snapshot_state_string(ap_snapshot_state state)
+{
+    switch (state) {
+    case AP_SNAPSHOT_FRESH: return "fresh";
+    case AP_SNAPSHOT_STALE: return "stale";
+    default: return "missing";
+    }
+}
+
+static int preflight_stop(void *context)
+{
+    (void)context;
+    return g_stop != 0;
+}
+
+static int receiver_check_exit_code(const broker_ctx_t *ctx);
+
+static bool wait_ap_for_receiver(const broker_ctx_t *ctx, uint64_t deadline,
+                                 char *error, size_t error_size)
+{
+    while (!g_stop) {
+        if (read_ap_snapshot(&ctx->cfg, geteuid())) {
+            return true;
+        }
+        uint64_t now = (uint64_t)monotonic_ms();
+        if (now >= deadline) {
+            break;
+        }
+        struct timespec pause = {0, 250000000};
+        (void)nanosleep(&pause, NULL);
+    }
+    snprintf(error, error_size,
+             "AP snapshot not ready for receiver preflight");
+    return false;
+}
+
+static const char *listener_scope_string(const cp_receiver_listener_result *r)
+{
+    if (!r->found) return "absent";
+    if (r->wildcard) return "wildcard";
+    if (r->loopback_only) return "loopback";
+    if (r->address_allowed) return "specific";
+    return "foreign";
+}
+
+/*
+ * Resolve the stock receiver before any bus/RX work.  The advertisement is
+ * untrusted input, so policy evaluates every distinct candidate, ties the
+ * advertised device ID to the locally configured Bluetooth MAC (+1), checks
+ * an optional pi SHA-256 pin, and requires a local LISTEN socket on the
+ * advertised port whose owner is allowlisted.  The observed values, not the
+ * configured assumptions, are what go into 0x4301.
+ *
+ * require_fresh_snapshot is true for the runtime path.  --check-receiver
+ * passes false so a stale daemon snapshot is reported, not treated as a
+ * preflight blocker.
+ */
+static bool receiver_preflight(broker_ctx_t *ctx, bool require_fresh_snapshot,
+                               char *error, size_t error_size)
+{
+    unsigned timeout = ctx->cfg.receiver_timeout_ms != 0u
+                           ? ctx->cfg.receiver_timeout_ms
+                           : 15000u;
+    uint64_t deadline = (uint64_t)monotonic_ms() + timeout;
+    unsigned ifindex;
+    cp_receiver_lookup_config lookup;
+    cp_receiver_policy_params params;
+    cp_receiver_listener_config listener;
+    cp_receiver_lookup_status lookup_status;
+    cp_receiver_policy_status policy_status;
+    cp_receiver_listener_status listener_status;
+    size_t candidate_count;
+    uint64_t now;
+    uint64_t remaining;
+
+    ctx->receiver_ready = false;
+    ctx->receiver_policy_evaluated = false;
+    ctx->receiver_policy_status = CP_RECEIVER_POLICY_ERR_NO_SERVICE;
+    ctx->receiver_lookup_status = CP_RECEIVER_LOOKUP_OK;
+    copy_field(ctx->receiver_reason, sizeof(ctx->receiver_reason),
+               "preflight");
+    memset(&ctx->receiver, 0, sizeof(ctx->receiver));
+    memset(&ctx->accepted, 0, sizeof(ctx->accepted));
+    memset(&ctx->listener, 0, sizeof(ctx->listener));
+    ctx->listener.status = CP_RECEIVER_LISTENER_ABSENT;
+
+    if (require_fresh_snapshot &&
+        !wait_ap_for_receiver(ctx, deadline, error, error_size)) {
+        copy_field(ctx->receiver_reason, sizeof(ctx->receiver_reason),
+                   "ap-snapshot");
+        return false;
+    }
+    ifindex = if_nametoindex(ctx->cfg.receiver_interface);
+    if (ifindex == 0u) {
+        copy_field(ctx->receiver_reason, sizeof(ctx->receiver_reason),
+                   "interface");
+        snprintf(error, error_size, "receiver interface %s is not up",
+                 ctx->cfg.receiver_interface);
+        return false;
+    }
+    now = (uint64_t)monotonic_ms();
+    remaining = deadline > now ? deadline - now : 0u;
+    if (remaining == 0u) {
+        copy_field(ctx->receiver_reason, sizeof(ctx->receiver_reason),
+                   "timeout");
+        snprintf(error, error_size,
+                 "receiver preflight timed out waiting for %s",
+                 ctx->cfg.receiver_interface);
+        return false;
+    }
+    memset(&lookup, 0, sizeof(lookup));
+    memcpy(lookup.interface_name, ctx->cfg.receiver_interface,
+           strlen(ctx->cfg.receiver_interface) + 1u);
+    lookup.interface_index = ifindex;
+    lookup.timeout_ms = remaining;
+    lookup.settle_ms = ctx->cfg.receiver_settle_ms != 0u
+                           ? ctx->cfg.receiver_settle_ms
+                           : 500u;
+    lookup.max_services = CP_OEM_RECEIVER_MAX_SERVICES;
+    lookup.backend_root = ctx->cfg.receiver_backend_root[0] != '\0'
+                              ? ctx->cfg.receiver_backend_root
+                              : "/";
+    lookup.backend_library = ctx->cfg.receiver_backend_library[0] != '\0'
+                                 ? ctx->cfg.receiver_backend_library
+                                 : NULL;
+    lookup.allow_unpinned_backend =
+        ctx->cfg.receiver_allow_unpinned_backend != 0;
+    lookup_status = cp_receiver_lookup_live(&lookup, preflight_stop, NULL,
+                                            &ctx->receiver);
+    ctx->receiver_lookup_status = lookup_status;
+    if (lookup_status != CP_RECEIVER_LOOKUP_OK) {
+        copy_field(ctx->receiver_reason, sizeof(ctx->receiver_reason),
+                   cp_receiver_lookup_status_string(lookup_status));
+        snprintf(error, error_size, "receiver lookup on %s: %s",
+                 ctx->cfg.receiver_interface,
+                 cp_receiver_lookup_status_string(lookup_status));
+        return false;
+    }
+    candidate_count = (size_t)ctx->receiver.resolved_count +
+                      (size_t)ctx->receiver.rejected_count;
+    if (candidate_count > CP_OEM_RECEIVER_MAX_SERVICES) {
+        candidate_count = CP_OEM_RECEIVER_MAX_SERVICES;
+    }
+    memset(&params, 0, sizeof(params));
+    params.bt_mac = ctx->cfg.bt_mac;
+    params.expected_device_id = ctx->cfg.device_id;
+    params.expected_port = ctx->cfg.airplay_port;
+    params.expected_source_version = ctx->cfg.source_version;
+    params.expected_pi_sha256 = ctx->receiver_have_pi_pin
+                                    ? ctx->receiver_pi_pin
+                                    : NULL;
+    policy_status = cp_receiver_policy_accept(
+        ctx->receiver.services, candidate_count, &params, &ctx->accepted);
+    ctx->receiver_policy_status = policy_status;
+    ctx->receiver_policy_evaluated = true;
+    if (policy_status != CP_RECEIVER_POLICY_OK) {
+        copy_field(ctx->receiver_reason, sizeof(ctx->receiver_reason),
+                   cp_receiver_policy_status_string(policy_status));
+        snprintf(error, error_size,
+                 "receiver advertisement refused (%s): service_count=%u",
+                 cp_receiver_policy_status_string(policy_status),
+                 (unsigned)ctx->receiver.service_count);
+        return false;
+    }
+    memset(&listener, 0, sizeof(listener));
+    listener.proc_root = "/proc";
+    listener.interface_name = ctx->cfg.receiver_interface;
+    listener.owner_allowlist = ctx->cfg.receiver_listener_owner;
+    listener_status = cp_receiver_listener_check(
+        ctx->accepted.port, &listener, &ctx->listener);
+    if (listener_status != CP_RECEIVER_LISTENER_OK) {
+        copy_field(ctx->receiver_reason, sizeof(ctx->receiver_reason),
+                   cp_receiver_listener_status_string(listener_status));
+        snprintf(error, error_size,
+                 "receiver listener refused (%s) on port %u",
+                 cp_receiver_listener_status_string(listener_status),
+                 (unsigned)ctx->accepted.port);
+        return false;
+    }
+    copy_field(ctx->cfg.device_id, sizeof(ctx->cfg.device_id),
+               ctx->accepted.device_id);
+    ctx->cfg.airplay_port = ctx->accepted.port;
+    copy_field(ctx->cfg.source_version, sizeof(ctx->cfg.source_version),
+               ctx->accepted.source_version);
+    copy_field(ctx->receiver_reason, sizeof(ctx->receiver_reason), "ok");
+    ctx->receiver_ready = true;
+    return true;
 }
 
 static cp_session_error_t update_ap_readback(broker_ctx_t *ctx, uint64_t now_ms)
@@ -449,27 +697,99 @@ static void prepare_status_dir(const broker_config_t *cfg)
     (void)mkdir("/run/wifi1b/carplay", 0700);
 }
 
+static void hex_encode(const uint8_t *data, size_t len, char *out,
+                       size_t out_size)
+{
+    static const char digits[] = "0123456789abcdef";
+    size_t i;
+
+    if (out == NULL || out_size == 0u) return;
+    if (len * 2u + 1u > out_size) {
+        out[0] = '\0';
+        return;
+    }
+    for (i = 0u; i < len; i++) {
+        out[i * 2u] = digits[(data[i] >> 4) & 0x0fu];
+        out[i * 2u + 1u] = digits[data[i] & 0x0fu];
+    }
+    out[len * 2u] = '\0';
+}
+
 static void write_status(const broker_ctx_t *ctx, const char *state,
                          const char *error)
 {
-    char tmp[640];
+    char tmp[1024];
+    char esc_state[64];
+    char esc_error[640];
+    char esc_peer[64];
+    char esc_reason[64];
+    char esc_source_version[128];
+    char esc_service_name[384];
+    char esc_owner[192];
+    char pi_hex[CP_OEM_RECEIVER_SHA256_LEN * 2u + 1u];
     bool ok = !strcmp(state, "started") || !strcmp(state, "running") ||
               !strcmp(state, "stopped");
     snprintf(tmp, sizeof(tmp), "%s.tmp.%d", ctx->cfg.broker_status_path,
              (int)getpid());
     FILE *f = fopen(tmp, "w");
     if (f == NULL) return;
+    (void)cp_receiver_json_escape(state, esc_state, sizeof(esc_state));
+    (void)cp_receiver_json_escape(error, esc_error, sizeof(esc_error));
+    (void)cp_receiver_json_escape(ctx->broker.peer, esc_peer,
+                                  sizeof(esc_peer));
+    (void)cp_receiver_json_escape(ctx->receiver_reason, esc_reason,
+                                  sizeof(esc_reason));
+    (void)cp_receiver_json_escape(ctx->cfg.source_version,
+                                  esc_source_version,
+                                  sizeof(esc_source_version));
+    (void)cp_receiver_json_escape(ctx->accepted.service_name,
+                                  esc_service_name, sizeof(esc_service_name));
+    (void)cp_receiver_json_escape(ctx->listener.owner_name, esc_owner,
+                                  sizeof(esc_owner));
+    pi_hex[0] = '\0';
+    if (ctx->receiver_ready) {
+        hex_encode(ctx->accepted.pi_sha256,
+                   sizeof(ctx->accepted.pi_sha256), pi_hex, sizeof(pi_hex));
+    }
     fprintf(f,
             "{\"ok\":%s,\"state\":\"%s\",\"error\":\"%s\","
             "\"epoch\":%u,\"peer\":\"%s\",\"ap_on_air\":%s,"
             "\"usb_blocked\":%s,"
+            "\"receiver_observed\":%s,\"receiver_port\":%u,"
+            "\"receiver_service_count\":%u,"
+            "\"receiver_resolved_count\":%u,"
+            "\"receiver_rejected_count\":%u,"
+            "\"receiver_lookup\":\"%s\",\"receiver_policy\":\"%s\","
+            "\"receiver_reason\":\"%s\","
+            "\"receiver_service_name\":\"%s\","
+            "\"receiver_source_version\":\"%s\","
+            "\"receiver_pi_sha256\":\"%s\",\"receiver_pi_len\":%u,"
+            "\"listener_scope\":\"%s\",\"listener_owner\":\"%s\","
+            "\"listener_owner_allowed\":%s,"
             "\"rx_packets\":%u,\"rx_dropped\":%u,\"tx_chunks\":%u,"
             "\"auth_failures\":%u,\"session_failures\":%u,"
             "\"init_timeouts\":%u,\"drain_timeouts\":%u}\n",
-            ok ? "true" : "false", state, error,
-            ctx->broker.epoch, ctx->broker.peer,
+            ok ? "true" : "false", esc_state, esc_error,
+            ctx->broker.epoch, esc_peer,
             ctx->ap.on_air ? "true" : "false",
             ctx->usb_blocked ? "true" : "false",
+            ctx->receiver_ready ? "true" : "false",
+            ctx->receiver_ready ? (unsigned)ctx->cfg.airplay_port : 0u,
+            ctx->receiver.service_count,
+            ctx->receiver.resolved_count,
+            ctx->receiver.rejected_count,
+            cp_receiver_lookup_status_string(ctx->receiver_lookup_status),
+            ctx->receiver_policy_evaluated
+                ? cp_receiver_policy_status_string(ctx->receiver_policy_status)
+                : "not-evaluated",
+            esc_reason,
+            ctx->receiver_ready ? esc_service_name : "",
+            ctx->receiver_ready ? esc_source_version : "",
+            pi_hex,
+            ctx->receiver_ready ? (unsigned)ctx->accepted.pi_len : 0u,
+            listener_scope_string(&ctx->listener),
+            ctx->listener.owner_name[0] != '\0' ? esc_owner : "",
+            ctx->listener.owner_allowed ? "true" : "false",
             ctx->broker.stats.rx_packets, ctx->broker.stats.rx_dropped,
             ctx->broker.stats.tx_chunks, ctx->broker.stats.auth_failures,
             ctx->broker.stats.session_failures,
@@ -526,8 +846,35 @@ static int run_broker(broker_ctx_t *ctx)
 {
     char error[256] = "";
     int64_t now = monotonic_ms();
+    if (ctx->cfg.receiver_allow_unpinned_backend) {
+        /* The unpinned backend override is diagnostic-only.  Never let it
+         * weaken a runtime receiver attestation, even if the CLI flag was
+         * passed to the service binary by mistake. */
+        snprintf(error, sizeof(error),
+                 "unpinned DNS-SD backend is diagnostic-only; refusing runtime");
+        write_status(ctx, "receiver_incomplete", error);
+        fprintf(stderr, "%s\n", error);
+        return 3;
+    }
+    /*
+     * Receiver preflight runs before the RX socket is created.  Opening a
+     * listener for a receiver that policy refused would advertise more than
+     * the observation supports.
+     */
+    if (!receiver_preflight(ctx, true, error, sizeof(error))) {
+        write_status(ctx, "receiver_incomplete", error);
+        fprintf(stderr, "%s\n", error);
+        return receiver_check_exit_code(ctx);
+    }
     if (prepare_rx_socket(ctx, error, sizeof(error)) != 0) {
         write_status(ctx, "fatal", error);
+        return 2;
+    }
+    if (!build_session_config(ctx)) {
+        snprintf(error, sizeof(error), "session configuration incomplete");
+        write_status(ctx, "identity_incomplete", error);
+        fprintf(stderr, "%s\n", error);
+        cp_spp_socket_close(&ctx->rx);
         return 2;
     }
     cp_runtime_broker_config_t bc;
@@ -627,9 +974,99 @@ static int run_broker(broker_ctx_t *ctx)
     return 0;
 }
 
+static bool receiver_config_validate(broker_ctx_t *ctx, const char **reason)
+{
+    *reason = "ok";
+    ctx->receiver_have_pi_pin = false;
+    if (ctx->cfg.receiver_listener_owner[0] == '\0') {
+        *reason = "listener-owner-config";
+        return false;
+    }
+    if (ctx->cfg.receiver_pi_sha256[0] != '\0') {
+        if (!cp_receiver_policy_pin_parse(ctx->cfg.receiver_pi_sha256,
+                                          ctx->receiver_pi_pin)) {
+            *reason = "pi-pin-config";
+            return false;
+        }
+        ctx->receiver_have_pi_pin = true;
+    }
+    if (ctx->cfg.receiver_backend_library[0] != '\0' &&
+        ctx->cfg.receiver_allow_unpinned_backend == 0) {
+        *reason = "dns-sd-override-refused";
+        return false;
+    }
+    return true;
+}
+
+static void print_receiver_check(const broker_ctx_t *ctx)
+{
+    char esc_service[384];
+    char esc_owner[192];
+    char esc_reason[64];
+    char esc_source[128];
+    char pi_hex[CP_OEM_RECEIVER_SHA256_LEN * 2u + 1u];
+
+    pi_hex[0] = '\0';
+    if (ctx->receiver_ready) {
+        hex_encode(ctx->accepted.pi_sha256,
+                   sizeof(ctx->accepted.pi_sha256), pi_hex, sizeof(pi_hex));
+    }
+    (void)cp_receiver_json_escape(ctx->accepted.service_name, esc_service,
+                                  sizeof(esc_service));
+    (void)cp_receiver_json_escape(ctx->listener.owner_name, esc_owner,
+                                  sizeof(esc_owner));
+    (void)cp_receiver_json_escape(ctx->receiver_reason, esc_reason,
+                                  sizeof(esc_reason));
+    (void)cp_receiver_json_escape(ctx->accepted.source_version, esc_source,
+                                  sizeof(esc_source));
+    printf("{\"ok\":%s,\"receiver\":\"%s\","
+           "\"receiver_lookup\":\"%s\",\"receiver_policy\":\"%s\","
+           "\"receiver_port\":%u,\"receiver_service_count\":%u,"
+           "\"receiver_resolved_count\":%u,\"receiver_rejected_count\":%u,"
+           "\"receiver_service_name\":\"%s\","
+           "\"receiver_source_version\":\"%s\","
+           "\"receiver_pi_sha256\":\"%s\",\"receiver_pi_len\":%u,"
+           "\"listener\":\"%s\",\"listener_scope\":\"%s\","
+           "\"listener_owner\":\"%s\",\"listener_owner_allowed\":%s,"
+           "\"snapshot\":\"%s\"}\n",
+           ctx->receiver_ready ? "true" : "false", esc_reason,
+           cp_receiver_lookup_status_string(ctx->receiver_lookup_status),
+           ctx->receiver_policy_evaluated
+               ? cp_receiver_policy_status_string(ctx->receiver_policy_status)
+               : "not-evaluated",
+           ctx->receiver_ready ? (unsigned)ctx->accepted.port : 0u,
+           ctx->receiver.service_count,
+           ctx->receiver.resolved_count, ctx->receiver.rejected_count,
+           ctx->receiver_ready ? esc_service : "",
+           ctx->receiver_ready ? esc_source : "",
+           pi_hex,
+           ctx->receiver_ready ? (unsigned)ctx->accepted.pi_len : 0u,
+           cp_receiver_listener_status_string(ctx->listener.status),
+           listener_scope_string(&ctx->listener),
+           ctx->listener.owner_name[0] != '\0' ? esc_owner : "",
+           ctx->listener.owner_allowed ? "true" : "false",
+           ap_snapshot_state_string(classify_ap_snapshot(&ctx->cfg)));
+}
+
+static int receiver_check_exit_code(const broker_ctx_t *ctx)
+{
+    if (ctx->receiver_ready) {
+        return 0;
+    }
+    switch (ctx->receiver_lookup_status) {
+    case CP_RECEIVER_LOOKUP_NO_BACKEND:
+    case CP_RECEIVER_LOOKUP_BACKEND_PIN:
+    case CP_RECEIVER_LOOKUP_ARGUMENT:
+        return 3;
+    default:
+        return 2;
+    }
+}
+
 int main(int argc, char **argv)
 {
     bool check_ap = false;
+    bool check_receiver = false;
     memset(&g_ctx, 0, sizeof(g_ctx));
     copy_field(g_ctx.cfg.config_path, sizeof(g_ctx.cfg.config_path), CFG_PATH);
     copy_field(g_ctx.cfg.daemon_status_path,
@@ -641,9 +1078,17 @@ int main(int argc, char **argv)
                "/sys/bus/usb/devices");
     copy_field(g_ctx.cfg.service_name, sizeof(g_ctx.cfg.service_name),
                "SCOURGE-iAP");
+    copy_field(g_ctx.cfg.receiver_interface,
+               sizeof(g_ctx.cfg.receiver_interface), "wlan0");
+    copy_field(g_ctx.cfg.receiver_listener_owner,
+               sizeof(g_ctx.cfg.receiver_listener_owner), "AppProjection");
+    g_ctx.cfg.receiver_timeout_ms = 15000u;
+    g_ctx.cfg.receiver_settle_ms = 500u;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--check-ap")) {
             check_ap = true;
+        } else if (!strcmp(argv[i], "--check-receiver")) {
+            check_receiver = true;
         } else if (!strcmp(argv[i], "--config") && i + 1 < argc) {
             copy_field(g_ctx.cfg.config_path, sizeof(g_ctx.cfg.config_path),
                        argv[++i]);
@@ -659,11 +1104,40 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--usb-sysfs") && i + 1 < argc) {
             copy_field(g_ctx.cfg.usb_sysfs, sizeof(g_ctx.cfg.usb_sysfs),
                        argv[++i]);
+        } else if (!strcmp(argv[i], "--receiver-interface") && i + 1 < argc) {
+            copy_field(g_ctx.cfg.receiver_interface,
+                       sizeof(g_ctx.cfg.receiver_interface), argv[++i]);
+        } else if (!strcmp(argv[i], "--receiver-timeout-ms") && i + 1 < argc) {
+            g_ctx.cfg.receiver_timeout_ms =
+                (unsigned)strtoul(argv[++i], NULL, 0);
+        } else if (!strcmp(argv[i], "--receiver-settle-ms") && i + 1 < argc) {
+            g_ctx.cfg.receiver_settle_ms =
+                (unsigned)strtoul(argv[++i], NULL, 0);
+        } else if (!strcmp(argv[i], "--receiver-listener-owner") &&
+                   i + 1 < argc) {
+            copy_field(g_ctx.cfg.receiver_listener_owner,
+                       sizeof(g_ctx.cfg.receiver_listener_owner), argv[++i]);
+        } else if (!strcmp(argv[i], "--receiver-backend-root") &&
+                   i + 1 < argc) {
+            copy_field(g_ctx.cfg.receiver_backend_root,
+                       sizeof(g_ctx.cfg.receiver_backend_root), argv[++i]);
+        } else if (!strcmp(argv[i], "--dns-sd-library") && i + 1 < argc) {
+            copy_field(g_ctx.cfg.receiver_backend_library,
+                       sizeof(g_ctx.cfg.receiver_backend_library), argv[++i]);
+        } else if (!strcmp(argv[i], "--allow-unpinned-dns-sd")) {
+            g_ctx.cfg.receiver_allow_unpinned_backend = 1;
         } else {
             fprintf(stderr, "usage: %s [--config PATH] [--status PATH] "
                     "[--broker-status PATH] [--bus ADDRESS] "
-                    "[--usb-sysfs PATH] [--check-ap]\n", argv[0]);
-            return 2;
+                    "[--usb-sysfs PATH] [--receiver-interface NAME] "
+                    "[--receiver-timeout-ms N] [--receiver-settle-ms N] "
+                    "[--receiver-listener-owner NAME] "
+                    "[--check-ap] [--check-receiver]\n"
+                    "diagnostic-only: [--receiver-backend-root PATH] "
+                    "[--dns-sd-library PATH] [--allow-unpinned-dns-sd]\n"
+                    "exit codes: 0 ok, 2 refused/incomplete, "
+                    "3 backend/pin/usage\n", argv[0]);
+            return 3;
         }
     }
     struct sigaction sa;
@@ -691,12 +1165,43 @@ int main(int argc, char **argv)
         fprintf(stderr, "%s\n", error);
         return 2;
     }
+    {
+        const char *reason = "ok";
+        if (!receiver_config_validate(&g_ctx, &reason)) {
+            char error[128];
+            copy_field(g_ctx.receiver_reason, sizeof(g_ctx.receiver_reason),
+                       reason);
+            snprintf(error, sizeof(error), "receiver configuration refused: %s",
+                     reason);
+            if (check_receiver) {
+                print_receiver_check(&g_ctx);
+                fprintf(stderr, "%s\n", error);
+                return 3;
+            }
+            write_status(&g_ctx, "receiver_incomplete", error);
+            fprintf(stderr, "%s\n", error);
+            return 3;
+        }
+    }
     parse_languages(&g_ctx);
-    if (!build_session_config(&g_ctx)) {
-        char error[] = "unsupported AP security";
-        write_status(&g_ctx, "identity_incomplete", error);
-        fprintf(stderr, "%s\n", error);
-        return 2;
+    {
+        cp_wire_wifi_security security;
+        if (!map_security(g_ctx.cfg.ap_security, &security)) {
+            char error[] = "unsupported AP security";
+            write_status(&g_ctx, "identity_incomplete", error);
+            fprintf(stderr, "%s\n", error);
+            return 2;
+        }
+        (void)security;
+    }
+    if (check_receiver) {
+        char error[256] = "";
+        bool ok = receiver_preflight(&g_ctx, false, error, sizeof(error));
+        print_receiver_check(&g_ctx);
+        if (!ok && error[0] != '\0') {
+            fprintf(stderr, "%s\n", error);
+        }
+        return receiver_check_exit_code(&g_ctx);
     }
     return run_broker(&g_ctx);
 }

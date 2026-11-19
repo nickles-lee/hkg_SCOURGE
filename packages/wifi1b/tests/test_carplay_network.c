@@ -87,6 +87,38 @@ static int fixture_command(char *out, size_t n, const char *cmd)
     if (out && n) out[0] = '\0';
     if (g_fail_substring && strstr(cmd, g_fail_substring)) return 1;
     if (strstr(cmd, " -C ")) return 1; /* force idempotent inserts */
+    if (strstr(cmd, "__WIFI1B_V4__")) {
+        snprintf(out, n,
+                 "__WIFI1B_V4__\n"
+                 "-A INPUT -i wlan0 -j WIFI1B_APP_CP\n"
+                 "-A OUTPUT -o wlan0 -j WIFI1B_APP_CP\n"
+                 "-A WIFI1B_APP_CP -p udp -m udp --dport 67 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p udp -m udp --dport 5353 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p udp -m udp --dport 5020 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p udp -m udp --dport 6000 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p udp -m udp --dport 6003 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p udp -m udp --dport 6011 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p tcp -m tcp --dport 5000 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p tcp -m tcp --dport 5001 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p tcp -m tcp --dport 6030 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p tcp -m tcp --dport 7000 -j ACCEPT\n"
+                 "__WIFI1B_V6__\n"
+                 "-A INPUT -i wlan0 -j WIFI1B_APP_CP\n"
+                 "-A OUTPUT -o wlan0 -j WIFI1B_APP_CP\n"
+                 "-A WIFI1B_APP_CP -p udp -m udp --dport 547 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p udp -m udp --dport 5353 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p udp -m udp --dport 5020 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p udp -m udp --dport 6000 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p udp -m udp --dport 6003 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p udp -m udp --dport 6011 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p tcp -m tcp --dport 5000 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p tcp -m tcp --dport 5001 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p tcp -m tcp --dport 6030 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p tcp -m tcp --dport 7000 -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -p ipv6-icmp -j ACCEPT\n"
+                 "-A WIFI1B_APP_CP -d ff00::/8 -j ACCEPT\n");
+        return 0;
+    }
     if (strstr(cmd, "iw dev wlan0 info")) {
         if (!g_iw_fixture) return 1;
         snprintf(out, n, "%s", g_iw_fixture);
@@ -384,7 +416,7 @@ static void test_probe_readiness_and_status(void)
     assert(strstr(status, "\"ap_network_ready\":true"));
     assert(strstr(status, "\"carplay_ie_configured\":true"));
     assert(strstr(status, "\"carplay_ie_observed\":false"));
-    assert(strstr(status, "\"carplay_ie_observation\":\"unverified\""));
+    assert(strstr(status, "\"carplay_ie_observation\":\"ie_unverified\""));
     assert(strstr(status, "\"ap_security\":\"fixture-secret-passphrase\"") == NULL);
 }
 
@@ -1301,6 +1333,35 @@ static void test_dhcp_release_gates(void)
     assert(strstr(saved, "10.42.0.250") == NULL);
 }
 
+static void test_identity_gate(void)
+{
+    char saved_id[sizeof(g_cfg.cp_id)];
+    char saved_bt[sizeof(g_cfg.cp_btaddr)];
+    char status[8192];
+
+    str_copy(saved_id, sizeof(saved_id), g_cfg.cp_id);
+    str_copy(saved_bt, sizeof(saved_bt), g_cfg.cp_btaddr);
+    str_copy(g_cfg.cp_btaddr, sizeof(g_cfg.cp_btaddr), "AA:BB:CC:DD:EE:FF");
+
+    str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), "bad\"id\nnetwork={");
+    assert(!carplay_ie_on());
+    assert(!g_carplay_ie);
+    build_status(status, sizeof(status));
+    assert(strstr(status, "\"carplay_id\":\"\"") != NULL);
+
+    str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), "AA:BB:CC:DD:EE:FF");
+    assert(!carplay_ie_on());
+    assert(!g_carplay_ie);
+
+    str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), "AA:BB:CC:DD:EE:01");
+    assert(carplay_ie_on());
+    assert(g_carplay_ie);
+
+    str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), saved_id);
+    str_copy(g_cfg.cp_btaddr, sizeof(g_cfg.cp_btaddr), saved_bt);
+    g_carplay_ie = false;
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && !strcmp(argv[1], "--flush")) {
@@ -1341,6 +1402,7 @@ int main(int argc, char **argv)
     test_ipv6_failures();
     test_firewall_rules();
     test_services_and_flush();
+    test_identity_gate();
     test_carplay_control_ownership();
     test_apply_mode_unowned();
     test_client_leave_cleanup();

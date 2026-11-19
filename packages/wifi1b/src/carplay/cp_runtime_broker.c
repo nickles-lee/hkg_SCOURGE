@@ -201,6 +201,30 @@ static uint64_t drain_deadline_for(const cp_runtime_broker *broker,
     return deadline;
 }
 
+static void clear_early_rx(cp_runtime_broker *broker)
+{
+    broker->early_count = 0;
+    broker->early_replayed = 0;
+    for (size_t i = 0; i < CP_RUNTIME_BROKER_MAX_EARLY_RX; i++) {
+        memset(&broker->early[i], 0, sizeof(broker->early[i]));
+    }
+}
+
+static bool store_early_rx(cp_runtime_broker *broker, const cp_spp_packet *packet)
+{
+    if (broker->early_count >= CP_RUNTIME_BROKER_MAX_EARLY_RX)
+        return false;
+    cp_runtime_broker_early_rx_t *slot = &broker->early[broker->early_count];
+    if (packet->payload_length > sizeof(slot->bytes)) return false;
+    snprintf(slot->peer, sizeof(slot->peer), "%s", packet->peer);
+    slot->uuid_kind = packet->uuid_kind;
+    slot->length = (uint16_t)packet->payload_length;
+    memcpy(slot->bytes, packet->payload, packet->payload_length);
+    broker->early_count++;
+    broker->stats.early_rx++;
+    return true;
+}
+
 static void begin_drain(cp_runtime_broker *broker, uint64_t now_ms,
                         const char *peer)
 {
@@ -246,6 +270,10 @@ static bool drain_old_rx(cp_runtime_broker *broker, uint64_t now_ms)
             return true;
         }
         if (rc > 0) {
+            if (broker->preserve_early_rx && broker->spp != NULL &&
+                cp_spp_dbus_attached(broker->spp) &&
+                store_early_rx(broker, &packet))
+                continue;
             broker->stats.rx_dropped++;
             continue;
         }
@@ -463,6 +491,48 @@ static bool drain_active_rx(cp_runtime_broker *broker, uint64_t now_ms)
     return true;
 }
 
+static bool replay_early_rx(cp_runtime_broker *broker, uint64_t now_ms)
+{
+    while (broker->early_replayed < broker->early_count) {
+        cp_runtime_broker_early_rx_t *slot =
+            &broker->early[broker->early_replayed];
+        uint32_t dropped = broker->stats.rx_dropped;
+        int delivered = cp_spp_dbus_deliver_rx(broker->spp, slot->peer,
+            slot->uuid_kind, slot->bytes, slot->length);
+        if (broker->session_failed || broker->fatal) {
+            char why[sizeof(broker->error)];
+            snprintf(why, sizeof(why), "%s",
+                     broker->error[0] ? broker->error :
+                                        "rx_session_feed_failed");
+            cancel_internal(broker, now_ms, true, true, false, false, true,
+                            CP_RUNTIME_BROKER_FATAL, why);
+            clear_early_rx(broker);
+            return false;
+        }
+        broker->early_replayed++;
+        if (delivered == CP_SPP_DBUS_OK) {
+            if (broker->stats.rx_dropped == dropped)
+                broker->stats.rx_packets++;
+        } else if (delivered == CP_SPP_DBUS_ERR_REJECTED) {
+            broker->stats.rx_rejected++;
+        } else if (delivered == CP_SPP_DBUS_ERR_NOT_CONNECTED) {
+            broker->spp_connected = false;
+            broker->stats.spp_disconnects++;
+            cancel_internal(broker, now_ms, true, false, false, false, false,
+                            CP_RUNTIME_BROKER_BLOCKED, "spp_disconnected");
+            clear_early_rx(broker);
+            return false;
+        } else {
+            cancel_internal(broker, now_ms, true, true, false, false, false,
+                            CP_RUNTIME_BROKER_FATAL, "rx_delivery_failed");
+            clear_early_rx(broker);
+            return false;
+        }
+    }
+    clear_early_rx(broker);
+    return true;
+}
+
 static bool pump_tx(cp_runtime_broker *broker, uint64_t now_ms)
 {
     unsigned limit = broker->cfg.max_tx_chunks_per_tick ?
@@ -548,6 +618,9 @@ cp_session_error_t cp_runtime_broker_start(cp_runtime_broker *broker,
     broker->last_now_ms = now_ms;
     broker->init_deadline_ms = deadline_add(now_ms,
                                             broker->cfg.init_timeout_ms);
+    broker->preserve_early_rx = true;
+    broker->spp_connect_generation = 0u;
+    clear_early_rx(broker);
     if (!open_spp_real(broker, now_ms)) return CP_SESSION_ERR_LINK;
     if (broker->fatal) {
         if (broker->spp != NULL) {
@@ -597,6 +670,12 @@ cp_session_error_t cp_runtime_broker_restart(cp_runtime_broker *broker,
     broker->last_now_ms = now_ms;
     broker->init_deadline_ms = deadline_add(now_ms,
                                             broker->cfg.init_timeout_ms);
+    /* Drop bytes that belong to the connection being replaced, then keep
+     * preserving pre-session frames for the new epoch.  A frame that arrives
+     * after this restart but before the session starts must not be lost. */
+    clear_early_rx(broker);
+    broker->preserve_early_rx = true;
+    broker->spp_connect_generation = 0u;
     clear_peer(broker);
     if (!open_spp_real(broker, now_ms)) return CP_SESSION_ERR_LINK;
     if (broker->fatal) {
@@ -839,10 +918,22 @@ cp_session_error_t cp_runtime_broker_tick(cp_runtime_broker *broker,
         return CP_SESSION_ERR_LINK;
     }
     if (spp_state != CP_SPP_DBUS_STATE_CONNECTED) {
+        /* No early buffer may survive the connection it was read from. */
+        clear_early_rx(broker);
         if (broker->session_inited) {
             broker->stats.spp_disconnects++;
-            cancel_internal(broker, now_ms, true, false, false, false, false,
-                            CP_RUNTIME_BROKER_BLOCKED, "spp_disconnected");
+            cancel_internal(broker, now_ms, false, false, false, false, false,
+                            CP_RUNTIME_BROKER_WAIT_SPP, "spp_disconnected");
+            /* The driver keeps the listener; a later connected confirmation
+             * advances its connection generation and starts a clean epoch. */
+            broker->restart_required = false;
+            broker->terminal_gate = false;
+            broker->fatal = false;
+            broker->policy_blocked = false;
+            broker->auth_failed = false;
+            broker->session_failed = false;
+            clear_peer(broker);
+            broker->draining = false;
         } else {
             broker->state = broker->restart_required ?
                 CP_RUNTIME_BROKER_BLOCKED : CP_RUNTIME_BROKER_WAIT_SPP;
@@ -855,6 +946,31 @@ cp_session_error_t cp_runtime_broker_tick(cp_runtime_broker *broker,
         broker->stats.rx_rejected++;
         return CP_SESSION_OK;
     }
+    uint32_t connect_generation =
+        cp_spp_dbus_connect_generation(broker->spp);
+    if (connect_generation != 0u &&
+        broker->spp_connect_generation != 0u &&
+        connect_generation != broker->spp_connect_generation &&
+        broker->session_inited) {
+        /* A fresh connected confirmation invalidates every per-connection
+         * byte/sequence/auth fact, even when the peer MAC is unchanged. */
+        uint64_t init_deadline = broker->init_deadline_ms;
+        cancel_internal(broker, now_ms, false, false, false, false, false,
+                        CP_RUNTIME_BROKER_IDLE, "spp_reconnected");
+        clear_early_rx(broker);
+        broker->init_deadline_ms = init_deadline;
+        broker->restart_required = false;
+        broker->terminal_gate = false;
+        broker->policy_blocked = false;
+        broker->auth_failed = false;
+        broker->session_failed = false;
+        broker->fatal = false;
+        clear_peer(broker);
+        broker->draining = false;
+        broker->stats.spp_reconnects++;
+    }
+    if (connect_generation != 0u)
+        broker->spp_connect_generation = connect_generation;
     if (!broker->spp_connected) {
         broker->spp_connected = true;
         broker->stats.spp_connects++;
@@ -889,6 +1005,7 @@ cp_session_error_t cp_runtime_broker_tick(cp_runtime_broker *broker,
         cp_session_error_t error = start_session(broker, now_ms);
         if (error != CP_SESSION_OK) return error;
     }
+    if (!replay_early_rx(broker, now_ms)) return CP_SESSION_ERR_LINK;
     if (!drain_active_rx(broker, now_ms)) return CP_SESSION_ERR_LINK;
     if (!pump_tx(broker, now_ms)) return CP_SESSION_ERR_LINK;
     if (broker->session_failed) {

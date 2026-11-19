@@ -43,6 +43,9 @@ SCENARIOS = (
     "disconnect",
     "close_inflight",
     "close_fatal",
+    "attach_existing",
+    "reconnect",
+    "close_owned",
 )
 
 
@@ -188,7 +191,8 @@ def main() -> int:
         compile_test(asan, cflags, libs, sanitize=True)
         for scenario in ("basic", "wrong_case", "owner", "impostor",
                          "listen_timeout", "bad_status_signature", "send_timeout",
-                         "disconnect", "close_inflight", "close_fatal"):
+                         "disconnect", "close_inflight", "close_fatal",
+                         "attach_existing", "reconnect", "close_owned"):
             run_scenario(asan, scenario, sanitize=True)
             print(f"PASS: cp_spp_dbus ASan/UBSan scenario {scenario}")
 

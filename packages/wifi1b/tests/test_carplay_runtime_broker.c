@@ -243,7 +243,7 @@ static void mock_serial_service(const char *path, char *out, size_t cap)
 }
 
 static void mock_child(const char *address, int ready_fd, int data_fd,
-                       int cmd_fd, bool no_connect)
+                       int cmd_fd, bool no_connect, bool attach_only)
 {
     DBusError error;
     dbus_error_init(&error);
@@ -273,10 +273,12 @@ static void mock_child(const char *address, int ready_fd, int data_fd,
     if (request != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER) _exit(7);
     dbus_error_free(&error);
     dbus_error_init(&error);
-    request = dbus_bus_request_name(conn, service2,
-        DBUS_NAME_FLAG_DO_NOT_QUEUE, &error);
-    if (request != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER) _exit(8);
-    dbus_error_free(&error);
+    if (!attach_only) {
+        request = dbus_bus_request_name(conn, service2,
+            DBUS_NAME_FLAG_DO_NOT_QUEUE, &error);
+        if (request != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER) _exit(8);
+        dbus_error_free(&error);
+    }
     char ready = 'R';
     (void)write(ready_fd, &ready, 1);
     close(ready_fd);
@@ -301,6 +303,11 @@ static void mock_child(const char *address, int ready_fd, int data_fd,
             }
             if (command == 'D') mock.send_delay = 200;
             if (command == 'C') mock.no_connect = false;
+            if (command == 'R') {
+                mock_emit_status(conn, mock.serial_path, "disconnected");
+                usleep(50000);
+                mock_emit_status(conn, mock.serial_path, "connected");
+            }
         }
         if (mock.pending_reply != NULL) {
             if (--mock.pending_delay <= 0) {
@@ -310,7 +317,8 @@ static void mock_child(const char *address, int ready_fd, int data_fd,
             }
         }
         (void)dbus_connection_read_write_dispatch(conn, 20);
-        if (mock.listener && !mock.emitted && !mock.no_connect) {
+        if (mock.listener && !mock.emitted && !mock.no_connect &&
+            !attach_only) {
             mock_emit_status(conn, mock.serial_path, "connected");
             mock.emitted = true;
         }
@@ -405,6 +413,7 @@ static bool g_ignore_phone_data;
 static bool g_tolerate_link_errors;
 static bool g_phone_auth_fail;
 static bool g_mock_no_connect;
+static bool g_mock_attach_only;
 static uint32_t g_restart_epoch_target;
 
 static cp_boot_consent runtime_consent(void *context, uint64_t now_ms)
@@ -451,7 +460,7 @@ static void start_mock(const char *address)
     if (g_child == 0) {
         close(g_ready[0]); close(g_data[0]); close(g_cmd[1]);
         mock_child(address, g_ready[1], g_data[1], g_cmd[0],
-                   g_mock_no_connect);
+                   g_mock_no_connect, g_mock_attach_only);
         _exit(6);
     }
     close(g_ready[1]); close(g_data[1]); close(g_cmd[0]);
@@ -682,6 +691,8 @@ int main(int argc, char **argv)
         strcmp(scenario, "delayed") == 0 ||
         strcmp(scenario, "drain_boundary") == 0)
         g_mock_no_connect = true;
+    if (strcmp(scenario, "attach_early") == 0)
+        g_mock_attach_only = true;
     if (strcmp(scenario, "epoch_pending_feed") == 0 ||
         strcmp(scenario, "epoch_pending_rx") == 0)
         g_helper_paused = true;
@@ -774,6 +785,11 @@ int main(int argc, char **argv)
     phone_init(&g_phone, 32u, 8u, true, true, g_phone_auth_fail);
     g_phone.sent_challenge = true;
     g_challenge_sent = false;
+    if (strcmp(scenario, "attach_early") == 0) {
+        /* Queue the phone's first link frame before the broker starts reading.
+         * Attach must preserve it rather than discarding it as stale. */
+        send_phone_output();
+    }
     CHECK(cp_runtime_broker_start(&g_broker, g_now) == CP_SESSION_OK);
 
     if (strcmp(scenario, "no_connect") == 0) {
@@ -1022,6 +1038,21 @@ int main(int argc, char **argv)
     CHECK(cp_runtime_broker_epoch(&g_broker) >= 1u);
     CHECK(cp_session_auth_state(&g_broker.session) ==
           CP_BOOT_AUTH_SUCCEEDED);
+    if (strcmp(scenario, "attach_early") == 0) {
+        CHECK(g_broker.stats.early_rx >= 1u);
+        CHECK(g_broker.stats.rx_packets > 0u);
+        CHECK(cp_spp_dbus_attached(g_broker.spp) == 1);
+        /* The replayed buffer is gone, and a restart for a new epoch must
+         * clear the old connection's bytes but keep preserving new ones. */
+        CHECK(g_broker.early_count == 0u);
+        CHECK(cp_runtime_broker_restart(&g_broker, g_now + 100u) ==
+              CP_SESSION_OK);
+        CHECK(g_broker.preserve_early_rx);
+        CHECK(g_broker.early_count == 0u);
+        cleanup();
+        puts("PASS: runtime broker preserves early RX and resets on restart");
+        return 0;
+    }
     CHECK(cp_session_receiver_active(&g_broker.session) == false);
     CHECK(cp_session_projection_active(&g_broker.session) == false);
     CHECK(cp_runtime_broker_set_receiver_active(&g_broker, g_now,
@@ -1032,6 +1063,27 @@ int main(int argc, char **argv)
     CHECK(g_broker.stats.tx_chunks > 0u);
     CHECK(g_broker.stats.rx_packets > 0u);
     CHECK(!g_broker.fatal);
+    if (strcmp(scenario, "reconnect_same") == 0) {
+        uint32_t old_epoch = g_broker.epoch;
+        uint32_t old_sessions = g_broker.stats.sessions;
+        char command = 'R';
+        reset_phone();
+        CHECK(write(g_cmd[1], &command, 1) == 1);
+        for (unsigned i = 0; i < 4000; i++) {
+            runtime_pump(1);
+            if (g_broker.epoch == old_epoch + 1u &&
+                g_broker.state != CP_RUNTIME_BROKER_FATAL)
+                break;
+            CHECK(g_broker.state != CP_RUNTIME_BROKER_FATAL);
+        }
+        CHECK(cp_runtime_broker_epoch(&g_broker) == old_epoch + 1u);
+        CHECK(!strcmp(cp_runtime_broker_peer(&g_broker), TEST_PEER));
+        CHECK(g_broker.stats.sessions > old_sessions);
+        CHECK(g_broker.stats.spp_disconnects > 0u);
+        cleanup();
+        puts("PASS: same-peer reconnect resets per-connection state");
+        return 0;
+    }
     {
         struct pollfd too_many[CP_RUNTIME_BROKER_MAX_POLLFDS + 1u];
         memset(too_many, 0, sizeof(too_many));

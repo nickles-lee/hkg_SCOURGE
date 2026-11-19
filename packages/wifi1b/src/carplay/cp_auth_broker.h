@@ -12,6 +12,10 @@
 typedef struct {
     bool initialized;
     bool pending;
+    /* Helper/provider reported busy (for example a semaphore timeout).  This
+     * is never authentication success and never releases credentials. */
+    bool busy;
+    uint32_t busy_retries;
     cp_session_t *session;
     cp_oem_auth_async helper;
     cp_boot_auth_request request;
@@ -24,6 +28,9 @@ cp_session_error_t cp_auth_broker_service(cp_auth_broker *broker,
     short helper_revents, uint64_t now_ms);
 int cp_auth_broker_pollfd(const cp_auth_broker *broker, struct pollfd *pfd);
 uint64_t cp_auth_broker_next_deadline(const cp_auth_broker *broker);
+/* True while the provider refused a request as busy.  Busy is pending work,
+ * not an authentication result; the caller must not release credentials. */
+bool cp_auth_broker_busy(const cp_auth_broker *broker);
 /* Destroy before destroying the borrowed session; pending auth is failed,
  * never silently switched back to a synchronous provider. */
 void cp_auth_broker_destroy(cp_auth_broker *broker, uint64_t now_ms);

@@ -29,15 +29,23 @@
  * The finite init deadline is armed by start()/restart() before the private
  * bus is opened and covers waiting for SPP, draining stale hook RX, session
  * init and auth.  It is never refreshed by a late session start or a late
- * auth success.  Any policy/consent/USB cancel, SPP disconnect/fatal/owner
- * loss, auth or session failure closes the SPP connection (discarding its
- * local queues), cancels the session/helper and raises a restart gate.  No
- * new epoch starts until the caller explicitly restarts and the old hook RX
- * queue is drained to EAGAIN or the bounded drain deadline fails closed.  A
- * new peer or a reconnect always requires that drain; peer bytes have no
- * auth generation.  The runtime epoch is the caller's trust scope: receiver
- * observations and external hook feeds must present the current epoch.
- * Epoch exhaustion is fatal and never wraps.
+ * auth success.  Any policy/consent/USB cancel, SPP fatal/owner loss, auth or
+ * session failure closes the SPP connection (discarding its local queues),
+ * cancels the session/helper and raises a restart gate.  An ordinary SPP
+ * disconnect keeps the owned listener: the session is cancelled and the broker
+ * waits for a fresh connected confirmation, whose monotonically increasing
+ * connection generation discards all old per-connection state (even when the
+ * same phone reconnects).  Pre-session hook frames are preserved in a bounded
+ * buffer and replayed after the session starts: on initial attach, and for
+ * frames that arrive after a restart for the new epoch.  Frames from the
+ * replaced connection are cleared on disconnect, reconnect or restart
+ * because the hook wire format carries no connection generation.  No new
+ * epoch starts until the
+ * caller explicitly restarts and the old hook RX queue is drained to EAGAIN or
+ * the bounded drain deadline fails closed.  A new peer or a reconnect always
+ * requires that drain; peer bytes have no auth generation.  The runtime epoch
+ * is the caller's trust scope: receiver observations and external hook feeds
+ * must present the current epoch.  Epoch exhaustion is fatal and never wraps.
  *
  * TX consumes cp_session output only after cp_spp_dbus_send() accepts the
  * local queue.  A stub ACK is never treated as remote delivery or projection.
@@ -60,6 +68,11 @@
 #define CP_RUNTIME_BROKER_MAX_INIT_MS 120000u
 #define CP_RUNTIME_BROKER_MAX_DRAIN_MS 10000u
 #define CP_RUNTIME_BROKER_MAX_POLLFDS 3u
+/* Bounded pre-session RX preserved for the initial attach and for frames
+ * arriving after a restart.  The buffer is cleared on disconnect, reconnect
+ * and restart so bytes from the replaced connection are never replayed; the
+ * hook wire format carries no connection generation. */
+#define CP_RUNTIME_BROKER_MAX_EARLY_RX 4u
 
 typedef enum {
     CP_RUNTIME_BROKER_IDLE = 0,
@@ -76,6 +89,8 @@ typedef struct {
     uint32_t sessions;
     uint32_t spp_connects;
     uint32_t spp_disconnects;
+    uint32_t spp_reconnects;
+    uint32_t early_rx;
     uint32_t drains;
     uint32_t drain_timeouts;
     uint32_t rx_packets;
@@ -135,6 +150,13 @@ typedef struct {
  * default limits) plus the 24 KiB SPP storage; allocate it statically or on
  * the heap, never on a small task stack. */
 typedef struct {
+    char peer[18];
+    uint8_t uuid_kind;
+    uint16_t length;
+    uint8_t bytes[CP_SPP_SOCKET_MAX_PAYLOAD];
+} cp_runtime_broker_early_rx_t;
+
+typedef struct {
     bool initialized;
     bool started;
     bool fatal;
@@ -160,6 +182,11 @@ typedef struct {
     uint64_t last_now_ms;
     uint64_t init_deadline_ms;
     uint64_t drain_deadline_ms;
+    uint32_t spp_connect_generation;
+    bool preserve_early_rx;
+    uint8_t early_count;
+    uint8_t early_replayed;
+    cp_runtime_broker_early_rx_t early[CP_RUNTIME_BROKER_MAX_EARLY_RX];
     char peer[18];
     char bound_peer[18];
     char error[192];

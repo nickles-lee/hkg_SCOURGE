@@ -14,13 +14,13 @@ CarPlay spinner never completes. In stock `vbtd` the receive callback drops
 the event and the listener/projection state callbacks are empty. The
 SerialPort registration chain itself is present: `VBTSppConnectCfm` ->
 `SetSerialPortConnectionStatus` -> `AddSerialPortList` -> CommonAPI
-registration. During the earlier connection window no vendor SerialPort
-object was observed, but a snapshot **during** a live connection is still
-missing (see `DEFERRED-CAR-PROBES.md` §1). The first-party broker needs the
-RX hook for inbound bytes and a `ListenSPP` orchestration test for the
-vendor TX object; it is not yet car-verified. Live 2026-11-18: the stock
-SerialPort object appeared and `SendData` returned a stub ACK; see
-[`VALIDATION.md`](VALIDATION.md) and [`TEST-PLAN.md`](TEST-PLAN.md).
+registration. An earlier check after a connection had closed saw no vendor
+SerialPort object; a snapshot **during** the live connection was observed on
+2026-11-18 (see `DEFERRED-CAR-PROBES.md` §1). The first-party broker still
+needs the RX hook for inbound bytes; the vendor TX object now exists, but
+byte delivery is unproven (four-step ladder in `TEST-PLAN.md` §4). Live
+2026-11-18: the SerialPort object appeared with `status="connected"` and
+`SendData` returned a stub ACK; see [`VALIDATION.md`](VALIDATION.md).
 
 Identify the exact running binary first:
 
@@ -51,7 +51,7 @@ file offset, true function length and preimage SHA-256 in
 | `PersistenceInterface::GetSupportWirelessCP` | wireless capability | Stock returns false; first-party path bypasses it |
 | `ENABLE_WIRELESS_CARPLAY` | JSON key | Parsed into the `VBTConfig` map; **no consumer queries it in 260128**; not an activation switch |
 | `iAP2Service` identification selector | vendor wireless builder (4/9) | Dormant; vendor fallback is NO-GO |
-| `CarPlayAppFrameworkStart` / AppProjection | vendor AirPlay receiver | Only projection fallback; large live Qt binary |
+| `CarPlayAppFrameworkStart` / AppProjection | vendor AirPlay receiver | Stock caller confirmed; see [projection trace](STOCK-PROJECTION.md) |
 
 ## Finding functions in a different hash
 

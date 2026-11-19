@@ -322,6 +322,13 @@ typedef struct {
     bool async_auth;
     cp_boot_auth_request auth_request;
     uint64_t next_auth_token;
+    /* Auth messages may arrive before 1D02; they are decoded and buffered, not
+     * answered, until identification succeeds.  Credentials and 0x4301 stay
+     * gated on AA05 after this buffer is serviced. */
+    bool pending_auth_cert;
+    bool have_pending_auth_challenge;
+    size_t pending_auth_challenge_len;
+    uint8_t pending_auth_challenge[CP_BOOT_MAX_AUTH_BLOB];
     bool projection_active; /* invariant: false */
 } cp_bootstrap;
 

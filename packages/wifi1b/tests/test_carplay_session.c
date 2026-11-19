@@ -121,7 +121,8 @@ static const char *const k_4e0e =
     "404000264e0e0016000041413a42423a43433a44443a45453a464600000a000175"
     "73622d3100";
 static const char *const k_aa00 = "40400006aa00";
-static const char *const k_aa02 = "4040000eaa020008000001020304";
+static const char *const k_aa02 = "4040001eaa0200180000"
+    "0102030405060708090a0b0c0d0e0f1011121314";
 static const char *const k_aa04 = "40400006aa04";
 static const char *const k_aa05 = "40400006aa05";
 static const char *const k_4300_wireless =

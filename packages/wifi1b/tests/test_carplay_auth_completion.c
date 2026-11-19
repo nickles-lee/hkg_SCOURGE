@@ -45,8 +45,14 @@ int main(void)
         true, blob, sizeof(blob), ++now, out, sizeof(out)).error == CP_BOOT_ERR_ORDER);
     assert(feed(&s, k_aa02, ++now, out, sizeof(out)).event == CP_BOOT_EV_AUTH_PENDING);
     assert(cp_bootstrap_auth_request(&s, &req));
-    assert(req.op == CP_BOOT_AUTH_OP_SIGNATURE && req.challenge_len == 4);
-    assert(!memcmp(req.challenge, blob, sizeof(blob)));
+    assert(req.op == CP_BOOT_AUTH_OP_SIGNATURE && req.challenge_len == 20);
+    {
+        static const uint8_t challenge[20] = {
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+            0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+            0x11, 0x12, 0x13, 0x14};
+        assert(!memcmp(req.challenge, challenge, sizeof(challenge)));
+    }
     assert(feed(&s, k_aa02, ++now, out, sizeof(out)).event == CP_BOOT_EV_AUTH_PENDING);
     result = cp_bootstrap_auth_complete(&s, req.generation, req.token, req.op,
         true, blob, sizeof(blob), ++now, out, sizeof(out));
@@ -76,6 +82,51 @@ int main(void)
     assert(cp_bootstrap_auth_complete(&s, req.generation, req.token, req.op,
         false, NULL, 0, ++now, out, sizeof(out)).event == CP_BOOT_EV_AUTH_FAILED);
     assert(s.auth_state == CP_BOOT_AUTH_FAILED);
+
+    /* The certificate/blob cap is enforced before any reply is encoded. */
+    {
+        static uint8_t oversized[CP_BOOT_MAX_AUTH_BLOB + 1u];
+        async_identify(&s, &now);
+        assert(feed(&s, k_aa00, ++now, out, sizeof(out)).event ==
+               CP_BOOT_EV_AUTH_PENDING);
+        assert(cp_bootstrap_auth_request(&s, &req));
+        assert(cp_bootstrap_auth_complete(&s, req.generation, req.token,
+            req.op, true, oversized, sizeof(oversized), ++now, out,
+            sizeof(out)).error == CP_BOOT_ERR_AUTH_PROVIDER);
+        assert(s.auth_state == CP_BOOT_AUTH_FAILED);
+    }
+    /* Auth-first works with the deferred helper path as well. */
+    {
+        cp_bootstrap s2;
+        cp_boot_config cfg2 = base_config();
+        cp_boot_auth_request req2;
+        uint64_t now2 = 1u;
+        assert(cp_bootstrap_init(&s2, &cfg2) == CP_BOOT_OK);
+        assert(cp_bootstrap_set_async_auth(&s2, true) == CP_BOOT_OK);
+        assert(feed(&s2, k_aa00, ++now2, out, sizeof(out)).event ==
+               CP_BOOT_EV_AUTH_PENDING);
+        assert(feed(&s2, k_1d00, ++now2, out, sizeof(out)).event ==
+               CP_BOOT_EV_IDENTIFICATION_SENT);
+        assert(feed(&s2, k_1d02, ++now2, out, sizeof(out)).event ==
+               CP_BOOT_EV_IDENTIFIED);
+        assert(cp_bootstrap_tick(&s2, ++now2, out, sizeof(out)).event ==
+               CP_BOOT_EV_AUTH_PENDING);
+        assert(cp_bootstrap_auth_request(&s2, &req2));
+        assert(req2.op == CP_BOOT_AUTH_OP_CERTIFICATE);
+        assert(cp_bootstrap_auth_complete(&s2, req2.generation, req2.token,
+            req2.op, true, blob, sizeof(blob), ++now2, out,
+            sizeof(out)).event == CP_BOOT_EV_AUTH_CERT_SENT);
+        assert(feed(&s2, k_aa02, ++now2, out, sizeof(out)).event ==
+               CP_BOOT_EV_AUTH_PENDING);
+        assert(cp_bootstrap_auth_request(&s2, &req2));
+        assert(req2.op == CP_BOOT_AUTH_OP_SIGNATURE);
+        assert(cp_bootstrap_auth_complete(&s2, req2.generation, req2.token,
+            req2.op, true, blob, sizeof(blob), ++now2, out,
+            sizeof(out)).event == CP_BOOT_EV_AUTH_RESPONSE_SENT);
+        assert(feed(&s2, k_aa05, ++now2, out, sizeof(out)).event ==
+               CP_BOOT_EV_AUTHENTICATED);
+        assert(!cp_bootstrap_projection_active(&s2));
+    }
     puts("PASS: deferred authentication completion, tokens, timeout, reset and phone-only success");
     return 0;
 }

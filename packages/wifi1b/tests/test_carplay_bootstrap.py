@@ -357,9 +357,9 @@ def verify_downlink_fixtures() -> None:
     values = parse_tlvs(parse_frame(rejected)[1])
     assert unique(values, 0) == b"" and unique(values, 17) == b""
 
-    challenge = frame(0xAA02, tlv(0, bytes([1, 2, 3, 4])))
+    challenge = frame(0xAA02, tlv(0, bytes(range(1, 21))))
     values = parse_tlvs(parse_frame(challenge)[1])
-    assert unique(values, 0) == bytes([1, 2, 3, 4])
+    assert unique(values, 0) == bytes(range(1, 21))
 
 
 def run(command: list[str], **kwargs) -> subprocess.CompletedProcess:

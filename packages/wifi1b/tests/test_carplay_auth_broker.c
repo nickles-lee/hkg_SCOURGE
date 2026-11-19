@@ -154,6 +154,39 @@ int main(void)
     CHECK(broker.pending);
     cp_auth_broker_destroy(&broker, g_now);
     CHECK(cp_session_auth_state(&g_session) == CP_BOOT_AUTH_FAILED);
+
+    /* A busy provider is pending, never authentication success. */
+    setup_broker(&broker, path);
+    CHECK(cp_oem_auth_async_begin_certificate(&broker.helper, 99u, g_now,
+                                              g_now + 5000u) ==
+          CP_OEM_AUTH_ASYNC_OK);
+    bool saw_request = false;
+    for (unsigned i = 0; i < 1000 && !saw_request; i++) {
+        cp_boot_auth_request busy_req;
+        pump_step(&g_session, &g_phone, 64u, true);
+        CHECK(cp_auth_broker_service(&broker, 0, g_now) == CP_SESSION_OK);
+        if (cp_session_auth_request(&g_session, &busy_req)) saw_request = true;
+    }
+    CHECK(saw_request);
+    CHECK(cp_auth_broker_busy(&broker));
+    CHECK(broker.busy_retries > 0u);
+    CHECK(!broker.pending);
+    CHECK(cp_session_auth_state(&g_session) != CP_BOOT_AUTH_SUCCEEDED);
+    {
+        cp_oem_auth_async_completion completion;
+        CHECK(cp_oem_auth_async_cancel(&broker.helper, 99u) ==
+              CP_OEM_AUTH_ASYNC_OK);
+        CHECK(cp_oem_auth_async_take_completion(&broker.helper, &completion));
+        CHECK(completion.error == CP_OEM_AUTH_ASYNC_ERR_CANCELLED);
+    }
+    for (unsigned i = 0; i < 1000 && !broker.pending; i++) {
+        pump_step(&g_session, &g_phone, 64u, true);
+        CHECK(cp_auth_broker_service(&broker, 0, g_now) == CP_SESSION_OK);
+    }
+    CHECK(broker.pending);
+    CHECK(!cp_auth_broker_busy(&broker));
+    CHECK(cp_session_auth_state(&g_session) != CP_BOOT_AUTH_SUCCEEDED);
+    cp_auth_broker_destroy(&broker, g_now);
     close(listener);
     CHECK(unlink(path) == 0 && rmdir(directory) == 0);
     puts("PASS: async helper/session integration preserves link service and cancels stale work");

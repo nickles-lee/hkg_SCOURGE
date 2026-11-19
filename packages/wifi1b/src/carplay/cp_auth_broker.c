@@ -20,6 +20,7 @@ static void retire(cp_auth_broker *broker)
     memset(&completion, 0, sizeof(completion));
     memset(&broker->request, 0, sizeof(broker->request));
     broker->pending = false;
+    broker->busy = false;
     broker->request_id = 0u;
 }
 
@@ -67,10 +68,20 @@ cp_session_error_t cp_auth_broker_service(cp_auth_broker *broker,
             cp_oem_auth_async_begin_signature(&broker->helper,
                 request.generation, request.challenge, request.challenge_len,
                 now_ms, request.deadline_ms);
-        if (helper_error != CP_OEM_AUTH_ASYNC_OK)
+        if (helper_error != CP_OEM_AUTH_ASYNC_OK) {
+            if (helper_error == CP_OEM_AUTH_ASYNC_ERR_BUSY) {
+                /* Provider/semaphore busy is a pending condition, never a
+                 * success and never an immediate credential failure.  Retry
+                 * until the generation-bound request deadline expires. */
+                broker->busy = true;
+                broker->busy_retries++;
+                return CP_SESSION_OK;
+            }
             return cp_session_auth_complete(broker->session, &request, false,
                                              NULL, 0u, now_ms);
+        }
         broker->pending = true;
+        broker->busy = false;
         broker->request = request;
         broker->request_id = broker->helper.request_id;
         helper_revents = 0; /* poll events cannot belong to a newly opened fd */
@@ -108,6 +119,11 @@ uint64_t cp_auth_broker_next_deadline(const cp_auth_broker *broker)
     if (broker->pending && broker->request.deadline_ms < deadline)
         deadline = broker->request.deadline_ms;
     return deadline;
+}
+
+bool cp_auth_broker_busy(const cp_auth_broker *broker)
+{
+    return broker != NULL && broker->initialized && broker->busy;
 }
 
 void cp_auth_broker_destroy(cp_auth_broker *broker, uint64_t now_ms)

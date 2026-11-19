@@ -63,6 +63,8 @@ SCENARIOS = (
     "feedfail_hook",
     "feedfail_socket",
     "overflow",
+    "attach_early",
+    "reconnect_same",
 )
 
 

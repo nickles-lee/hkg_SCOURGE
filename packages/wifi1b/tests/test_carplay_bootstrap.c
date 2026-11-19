@@ -217,7 +217,8 @@ static const char *k_start_readback =
 static const char *k_aa01 = "4040000daa01000700000102ff";
 static const char *k_aa03 = "4040000eaa0300080000deadbeef";
 static const char *k_aa00 = "40400006aa00";
-static const char *k_aa02 = "4040000eaa020008000001020304";
+static const char *k_aa02 = "4040001eaa0200180000"
+    "0102030405060708090a0b0c0d0e0f1011121314";
 static const char *k_aa04 = "40400006aa04";
 static const char *k_aa05 = "40400006aa05";
 static const char *k_1d00 = "404000061d00";
@@ -1180,17 +1181,25 @@ static void test_inbound_decoding(void)
     CHECK_EQ(cp_wire_decode_challenge_request(&view, &challenge,
                                               &challenge_len),
              CP_WIRE_OK);
-    CHECK_EQ(challenge_len, 4u);
+    CHECK_EQ(challenge_len, 20u);
     CHECK_EQ(challenge[0], 1u);
-    CHECK_EQ(challenge[3], 4u);
+    CHECK_EQ(challenge[19], 0x14u);
     {
         static const uint8_t empty_challenge[6] = {
             0x40u, 0x40u, 0x00u, 0x06u, 0xAAu, 0x02u};
+        static const uint8_t short_challenge[10] = {
+            0x40u, 0x40u, 0x00u, 0x0Au, 0xAAu, 0x02u,
+            0x00u, 0x04u, 0x00u, 0x00u};
         CHECK_EQ(cp_wire_open(empty_challenge, sizeof(empty_challenge), &view),
                  CP_WIRE_OK);
         CHECK_EQ(cp_wire_decode_challenge_request(&view, &challenge,
                                                   &challenge_len),
                  CP_WIRE_ERR_MISSING);
+        CHECK_EQ(cp_wire_open(short_challenge, sizeof(short_challenge), &view),
+                 CP_WIRE_OK);
+        CHECK_EQ(cp_wire_decode_challenge_request(&view, &challenge,
+                                                  &challenge_len),
+                 CP_WIRE_ERR_RANGE);
     }
     frame_len = unhex(k_aa00, frame, sizeof(frame));
     CHECK_EQ(cp_wire_open(frame, frame_len, &view), CP_WIRE_OK);
@@ -1293,9 +1302,12 @@ static void test_inbound_decoding(void)
                  CP_WIRE_ERR_TRUNCATED);
     }
     {
-        static const uint8_t challenge_unknown[19] = {
-            0x40u, 0x40u, 0x00u, 0x13u, 0xAAu, 0x02u,
-            0x00u, 0x08u, 0x00u, 0x00u, 0x01u, 0x02u, 0x03u, 0x04u,
+        static const uint8_t challenge_unknown[35] = {
+            0x40u, 0x40u, 0x00u, 0x23u, 0xAAu, 0x02u,
+            0x00u, 0x18u, 0x00u, 0x00u,
+            0x01u, 0x02u, 0x03u, 0x04u, 0x05u, 0x06u, 0x07u, 0x08u,
+            0x09u, 0x0Au, 0x0Bu, 0x0Cu, 0x0Du, 0x0Eu, 0x0Fu, 0x10u,
+            0x11u, 0x12u, 0x13u, 0x14u,
             0x00u, 0x05u, 0x00u, 0x03u, 0xFFu};
         static const uint8_t challenge_unknown_only[11] = {
             0x40u, 0x40u, 0x00u, 0x0Bu, 0xAAu, 0x02u,
@@ -1306,9 +1318,9 @@ static void test_inbound_decoding(void)
         CHECK_EQ(cp_wire_decode_challenge_request(&view, &challenge,
                                                   &challenge_len),
                  CP_WIRE_OK);
-        CHECK_EQ(challenge_len, 4u);
+        CHECK_EQ(challenge_len, 20u);
         CHECK_EQ(challenge[0], 1u);
-        CHECK_EQ(challenge[3], 4u);
+        CHECK_EQ(challenge[19], 0x14u);
         CHECK_EQ(cp_wire_open(challenge_unknown_only,
                               sizeof(challenge_unknown_only), &view),
                  CP_WIRE_OK);
@@ -1791,20 +1803,53 @@ static void test_authentication(void)
     install_policy(&session, &policy, CP_BOOT_CONSENT_GRANTED, false);
     install_auth(&session, &auth);
     result = feed(&session, k_aa00, now, out, sizeof(out));
-    CHECK_EQ(result.event, CP_BOOT_EV_START_REFUSED);
-    CHECK_EQ(result.error, CP_BOOT_ERR_ORDER);
+    CHECK_EQ(result.event, CP_BOOT_EV_AUTH_PENDING);
+    CHECK_EQ(result.error, CP_BOOT_OK);
+    CHECK_EQ(result.out_len, 0u);
     CHECK_EQ(auth.cert_calls, 0);
     result = feed(&session, k_1d00, now, out, sizeof(out));
     CHECK_EQ(result.event, CP_BOOT_EV_IDENTIFICATION_SENT);
     result = feed(&session, k_1d02, now, out, sizeof(out));
     CHECK_EQ(result.event, CP_BOOT_EV_IDENTIFIED);
-
+    CHECK_EQ(auth.cert_calls, 0);
+    result = cp_bootstrap_tick(&session, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_AUTH_CERT_SENT);
+    CHECK(frame_equals(out, result.out_len, k_aa01));
+    CHECK_EQ(auth.cert_calls, 1);
     result = feed(&session, k_aa02, now, out, sizeof(out));
-    CHECK_EQ(result.event, CP_BOOT_EV_AUTH_FAILED);
-    CHECK_EQ(result.error, CP_BOOT_ERR_ORDER);
-    CHECK_EQ(result.out_len, 0u);
-    CHECK_EQ(cp_bootstrap_auth_state(&session), CP_BOOT_AUTH_FAILED);
-    CHECK_EQ(cp_bootstrap_state(&session), CP_BOOT_STATE_FAILED);
+    CHECK_EQ(result.event, CP_BOOT_EV_AUTH_RESPONSE_SENT);
+    CHECK(frame_equals(out, result.out_len, k_aa03));
+    result = feed(&session, k_aa05, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_AUTHENTICATED);
+    CHECK_EQ(cp_bootstrap_auth_state(&session), CP_BOOT_AUTH_SUCCEEDED);
+
+    /* Interleaved auth-first order: both AA00 and AA02 arrive before 1D02.
+     * Both are buffered, answered in protocol order after identification, and
+     * credentials still wait for the phone's AA05. */
+    memset(&auth, 0, sizeof(auth));
+    cfg = base_config();
+    CHECK_EQ(cp_bootstrap_init(&session, &cfg), CP_BOOT_OK);
+    install_policy(&session, &policy, CP_BOOT_CONSENT_GRANTED, false);
+    install_auth(&session, &auth);
+    CHECK_EQ(feed(&session, k_aa02, now, out, sizeof(out)).event,
+             CP_BOOT_EV_AUTH_PENDING);
+    CHECK_EQ(feed(&session, k_aa00, now, out, sizeof(out)).event,
+             CP_BOOT_EV_AUTH_PENDING);
+    CHECK_EQ(auth.cert_calls, 0);
+    CHECK_EQ(feed(&session, k_1d00, now, out, sizeof(out)).event,
+             CP_BOOT_EV_IDENTIFICATION_SENT);
+    CHECK_EQ(feed(&session, k_1d02, now, out, sizeof(out)).event,
+             CP_BOOT_EV_IDENTIFIED);
+    CHECK_EQ(auth.cert_calls, 0);
+    result = cp_bootstrap_tick(&session, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_AUTH_CERT_SENT);
+    CHECK_EQ(auth.cert_calls, 1);
+    result = cp_bootstrap_tick(&session, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_AUTH_RESPONSE_SENT);
+    CHECK_EQ(auth.signature_calls, 1);
+    CHECK_EQ(cp_bootstrap_auth_state(&session), CP_BOOT_AUTH_RESPONSE_SENT);
+    CHECK_EQ(feed(&session, k_aa05, now, out, sizeof(out)).event,
+             CP_BOOT_EV_AUTHENTICATED);
 
     cfg = base_config();
     CHECK_EQ(cp_bootstrap_init(&session, &cfg), CP_BOOT_OK);

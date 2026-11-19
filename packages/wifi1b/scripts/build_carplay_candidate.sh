@@ -29,6 +29,7 @@ cp "$WIFI1B/artifacts/systemd/carplay-broker.service" \
 cp "$WIFI1B/artifacts/carplay/carplay-broker.conf.example" "$OUT/payload/"
 cp "$REPO/docs/wireless-carplay/TEST-PLAN.md" \
     "$REPO/docs/wireless-carplay/VALIDATION.md" \
+    "$REPO/docs/wireless-carplay/STOCK-PROJECTION.md" \
     "$REPO/docs/wireless-carplay/REPRODUCTION.md" \
     "$REPO/docs/wireless-carplay/VBT-SPP-HOOK-PORTING.md" \
     "$REPO/docs/wireless-carplay/DEFERRED-CAR-PROBES.md" "$OUT/payload/"
@@ -38,7 +39,8 @@ cp "$WIFI1B/artifacts/carplay/README.md" "$OUT/payload/INSTALL.md"
     sha256sum vbtd-51.spp-rx.patched carplay-broker carplay-native-auth \
         carplay-broker.service scourge-carplay-auth.service \
         carplay-broker.conf.example INSTALL.md TEST-PLAN.md VALIDATION.md \
-        REPRODUCTION.md VBT-SPP-HOOK-PORTING.md DEFERRED-CAR-PROBES.md > SHA256SUMS
+        STOCK-PROJECTION.md REPRODUCTION.md VBT-SPP-HOOK-PORTING.md \
+        DEFERRED-CAR-PROBES.md > SHA256SUMS
     sha256sum -c SHA256SUMS
 )
 printf 'Private WIP candidate (not car-validated): %s/payload\n' "$OUT"

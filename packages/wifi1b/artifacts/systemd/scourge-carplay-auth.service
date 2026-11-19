@@ -22,6 +22,11 @@ ConditionPathExists=/rw_data/wifi1b/carplay-native-auth
 Type=simple
 UMask=0077
 Environment=PATH=/bin:/sbin:/usr/bin:/usr/sbin
+# The pinned libCoreUtils.so lives in /app/lib.  The helper dlopens the exact
+# hashed inode, but its own DT_NEEDED dependencies resolve through the loader;
+# an explicit target-only directory avoids a missing-library failure without
+# inheriting an arbitrary search path (the helper rejects other values).
+Environment=LD_LIBRARY_PATH=/app/lib
 ExecStart=/rw_data/wifi1b/carplay-native-auth --serve --experimental
 Restart=on-failure
 RestartSec=5

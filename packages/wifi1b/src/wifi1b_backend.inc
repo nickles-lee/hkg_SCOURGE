@@ -492,40 +492,113 @@ static void fetch_bt_address_if_needed(void)
     }
 }
 
+static bool carplay_id_allowed(const char *id)
+{
+    size_t n;
+    if (id == NULL || id[0] == '\0') return false;
+    n = strlen(id);
+    if (n > 63u) return false;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)id[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == ':' || c == '.' ||
+              c == '_' || c == '-'))
+            return false;
+    }
+    return true;
+}
+
+static bool carplay_id_equals_bt(void)
+{
+    uint8_t id[6], bt[6];
+
+    if (g_cfg.cp_id[0] == '\0' || g_cfg.cp_btaddr[0] == '\0') return false;
+    if (!parse_mac6(g_cfg.cp_id, id) || !parse_mac6(g_cfg.cp_btaddr, bt))
+        return false;
+    return memcmp(id, bt, sizeof(id)) == 0;
+}
+
+static bool carplay_id_from_stock(void)
+{
+    char buf[256];
+    char *nl;
+    if (read_file("/app/data/AppProjection/USBSerial.txt", buf, sizeof(buf)) > 0 ||
+        read_file("/rw_data/app_data/AppProjection/USBSerial.txt", buf,
+                  sizeof(buf)) > 0) {
+        nl = strchr(buf, '\n');
+        if (nl) *nl = 0;
+        if (carplay_id_allowed(trim(buf))) {
+            str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), trim(buf));
+            return true;
+        }
+        if (buf[0])
+            log_msg("CarPlay identity: stock serial contains unsupported characters; omitted");
+    }
+    if (json_get_string_value("/app/data/vbt/VBTConfig.json",
+                              "CarPlayDeviceId", buf, sizeof(buf)) ||
+        json_get_string_value("/rw_data/app_data/vbt/VBTConfig.json",
+                              "CarPlayDeviceId", buf, sizeof(buf))) {
+        if (carplay_id_allowed(buf)) {
+            str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), buf);
+            return true;
+        }
+        if (buf[0])
+            log_msg("CarPlay identity: stock device id contains unsupported characters; omitted");
+    }
+    return false;
+}
+
+/* Preserve a distinct AP/carplay identity.  The Bluetooth MAC is a different
+ * role and is never copied into carplay_id.  An explicit configured value is
+ * kept verbatim; only an empty value is seeded from the stock accessory
+ * identity.  If no safe explicit identity exists, carplay_id is omitted rather
+ * than invented or injected into the supplicant config. */
 static void prepare_carplay_identity(void)
 {
     unsigned char mac[6];
-    char formatted[32];
     fetch_bt_address_if_needed();
-    if (parse_mac6(g_cfg.cp_btaddr, mac)) {
-        format_mac6(mac, formatted, sizeof(formatted));
-        str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), formatted);
-        return;
+    if (g_cfg.cp_id[0]) {
+        if (parse_mac6(g_cfg.cp_id, mac)) {
+            char formatted[32];
+            format_mac6(mac, formatted, sizeof(formatted));
+            str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), formatted);
+        } else if (!carplay_id_allowed(g_cfg.cp_id)) {
+            /* Keep the configured value for diagnostics; write_ap_conf omits
+             * it instead of emitting a malformed/injectable line. */
+            log_msg("CarPlay identity: configured value has unsupported characters; carplay_id omitted");
+        }
+    } else {
+        (void)carplay_id_from_stock();
     }
-    if (parse_mac6(g_cfg.cp_id, mac)) {
-        format_mac6(mac, formatted, sizeof(formatted));
-        str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), formatted);
-        return;
-    }
-    if (!g_cfg.cp_id[0]) {
-        unsigned char rnd[6];
-        int fd = open("/dev/urandom", O_RDONLY);
-        if (fd >= 0) { (void)read(fd, rnd, sizeof(rnd)); close(fd); }
-        else memset(rnd, 0x42, sizeof(rnd));
-        rnd[0] = (unsigned char)((rnd[0] & 0xfc) | 0x02);
-        format_mac6(rnd, g_cfg.cp_id, sizeof(g_cfg.cp_id));
-        config_save();
-    }
-    log_msg("CarPlay identity: bt=%s id=%s", g_cfg.cp_btaddr, g_cfg.cp_id);
+    if (carplay_id_equals_bt())
+        log_msg("CarPlay identity: configured id equals the Bluetooth MAC; carplay_id omitted");
+    log_msg("CarPlay identity: bt=%s id=%s", g_cfg.cp_btaddr,
+            carplay_id_allowed(g_cfg.cp_id) && !carplay_id_equals_bt()
+                ? g_cfg.cp_id : "");
 }
 
 static bool write_ap_conf(void)
 {
     char ssid[512], psk[512], name[256];
+    char id_line[160] = "";
+    char vendor_line[128] = "";
     conf_quote(ssid, sizeof(ssid), g_cfg.cp_ssid);
     conf_quote(psk, sizeof(psk), g_cfg.cp_psk);
     conf_quote(name, sizeof(name), g_cfg.cp_name);
     int freq = channel_to_freq();
+    if (g_cfg.cp_id[0] && carplay_id_allowed(g_cfg.cp_id) &&
+        !carplay_id_equals_bt())
+        snprintf(id_line, sizeof(id_line), "carplay_id=%s\n", g_cfg.cp_id);
+    /* app_info=1 supplies Interworking; it is not the Apple Device IE.  The
+     * candidate DD IE is written only when the owner explicitly opts in and
+     * remains unverified until read back from the running AP or captured on
+     * air.  Default off because target support/readback is unproven. */
+    if (g_cfg.cp_vendor_ie) {
+        snprintf(vendor_line, sizeof(vendor_line),
+                 "ap_vendor_elements=%s\n",
+                 freq >= 5000 ? "dd0800a0400000020021"
+                              : "dd0800a0400000020022");
+    }
     char buf[8192];
     snprintf(buf, sizeof(buf),
              "# Wifi1b static AP (vendor wpa_supplicant AP mode)\n"
@@ -537,7 +610,8 @@ static bool write_ap_conf(void)
              "max_num_sta=%d\n"
              "app_info=1\n"
              "carplay_name=\"%s\"\n"
-             "carplay_id=%s\n"
+             "%s"
+             "%s"
              "manufacturer=\"Hyundai\"\n"
              "model_name=\"Ioniq 5\"\n"
              "model_number=\"260128\"\n"
@@ -554,7 +628,7 @@ static bool write_ap_conf(void)
              "    auth_alg=OPEN\n"
              "    ignore_broadcast_ssid=%d\n"
              "}\n",
-             g_cfg.cp_max_sta, name, g_cfg.cp_id, name,
+             g_cfg.cp_max_sta, name, id_line, vendor_line, name,
              ssid, freq, psk, g_cfg.cp_hidden ? 1 : 0);
     if (write_supplicant_config(buf)) return true;
     set_msg("cannot write AP supplicant config");
@@ -1402,6 +1476,14 @@ static bool ap_start(void)
         set_msg("CarPlay AP requires a 1-32 byte SSID and an 8-63 character key");
         return false;
     }
+    prepare_carplay_identity();
+    if (!carplay_id_allowed(g_cfg.cp_id) || carplay_id_equals_bt()) {
+        /* Do not start (or keep reporting) an AP that cannot carry a valid,
+         * distinct carplay_id.  The identity comes from explicit config or
+         * stock data; it is never invented and the BT MAC is a different role. */
+        set_msg("CarPlay AP identity missing, invalid or equal to the Bluetooth MAC; refusing AP start");
+        return false;
+    }
     if (!ensure_wifi_ready()) return false;
 
     ap_probe_t p;
@@ -1427,8 +1509,6 @@ static bool ap_start(void)
         log_msg("CarPlay AP: iw reg set GB failed; 5 GHz may be rejected");
     else
         log_msg("CarPlay AP: regulatory domain GB");
-    prepare_carplay_identity();
-
     char failure[256] = "";
     for (int attempt = 0; attempt < 2 && !g_stop; attempt++) {
         if (attempt) {
@@ -4369,10 +4449,21 @@ static bool ssh_start(void)
 static bool carplay_ie_on(void)
 {
     prepare_carplay_identity();
-    /* The AP config carries app_info/carplay_name/carplay_id.  The vendor
-     * supplicant builds the Apple IE from those fields. */
+    if (!carplay_id_allowed(g_cfg.cp_id) || carplay_id_equals_bt()) {
+        /* No valid, distinct explicit or stock identity: the AP config would
+         * omit carplay_id.  Never report the identity gate as configured. */
+        g_carplay_ie = false;
+        set_msg("CarPlay AP identity missing, invalid or equal to the Bluetooth MAC; carplay_id omitted (IE unverified)");
+        return false;
+    }
+    /* AP identity fields are present in the written config.  app_info=1 only
+     * supplies Interworking; neither the vendor supplicant nor this daemon has
+     * a readback that proves the Apple Device IE is on air. */
     g_carplay_ie = true;
-    set_msg("CarPlay IE fields present in AP config (id=%s)", g_cfg.cp_id);
+    if (g_cfg.cp_vendor_ie)
+        set_msg("CarPlay AP identity fields configured; vendor IE requested (unverified)");
+    else
+        set_msg("CarPlay AP identity fields configured; IE unverified");
     return true;
 }
 

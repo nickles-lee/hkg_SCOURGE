@@ -75,6 +75,7 @@
 #define WPA_LOG        APP_DIR "/wpa_supplicant.log"
 #define WPA_PIDFILE    APP_DIR "/wpa_supplicant.pid"
 #define APPLY_RESULT   APP_DIR "/apply.result"
+#define CARPLAY_STATE  APP_DIR "/carplay.state"
 #define SCAN_RESULT    APP_DIR "/scan.json"
 #define BT_STATE       APP_DIR "/bt.state"
 #define SSH_BOUND      APP_DIR "/ssh.bound"
@@ -134,6 +135,11 @@ typedef struct {
     char cp_name[64];
     char cp_id[64];
     char cp_btaddr[32];
+    /* Explicit opt-in only: write the candidate Apple Device IE through the
+     * vendor supplicant's ap_vendor_elements option.  Default off because
+     * support/readback on the target is unproven; no status path may report it
+     * as observed. */
+    bool cp_vendor_ie;
 
     bool ssh_enabled;
     int  ssh_port;
@@ -152,7 +158,11 @@ static bool g_shutdown_cleanup;
 static bool g_log_stderr = true;   /* one-shot CLI mode; daemon redirects stderr into the same log file */
 static bool g_pure_query;
 static int g_apply_gen;            /* increments per apply; stale children cannot publish */
-static bool g_carplay_ie;          /* IE fields configured in the AP config (not a wire observation) */
+static bool g_carplay_ie;          /* AP identity fields configured (not a wire observation) */
+static bool g_carplay_fw_ok;       /* last explicit owned-chain verification */
+static bool g_carplay_last_apply_ok;
+static bool g_carplay_last_apply_fw_ok;
+static int64_t g_carplay_last_apply_at;
 static const char *g_status_path = STATUS_PATH;
 static char g_last_msg[256] = "starting";
 static int64_t g_last_apply_ms;
@@ -261,6 +271,9 @@ typedef struct {
 typedef struct {
     int gen;
     bool driver, associated, ap_on, carplay_svc, mdns_svc, ssh_ours;
+    bool carplay_fw_ok;
+    bool broker_observed;
+    char broker_state[24];
     ap_probe_t ap;
     bool vendor_ssh_22, debug_console;
     int signal, clients, secure_console;
@@ -272,6 +285,7 @@ static int64_t g_observed_ms;
 static void home_monitor_tick(void);
 static void apply_reap(void);
 static void probe_tick(void);
+static void carplay_state_save(void);
 
 /* ------------------------------------------------------------------ */
 /* small helpers                                                       */
@@ -1302,6 +1316,8 @@ static void config_load(void)
             str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), v);
         } else if (!strcmp(k, "carplay_btaddr")) {
             str_copy(g_cfg.cp_btaddr, sizeof(g_cfg.cp_btaddr), v);
+        } else if (!strcmp(k, "carplay_vendor_ie")) {
+            g_cfg.cp_vendor_ie = atoi(v) != 0;
         } else if (!strcmp(k, "ssh")) {
             g_cfg.ssh_enabled = atoi(v) != 0;
         } else if (!strcmp(k, "carplay_control")) {
@@ -1358,6 +1374,7 @@ static bool config_save(void)
              "carplay_name=%s\n"
              "carplay_id=%s\n"
              "carplay_btaddr=%s\n"
+             "carplay_vendor_ie=%d\n"
              "ssh=%d\n"
              "ssh_port=%d\n"
              "client_route_policy=%s\n"
@@ -1375,6 +1392,7 @@ static bool config_save(void)
              g_cfg.cp_channel, g_cfg.cp_hidden ? 1 : 0, g_cfg.cp_max_sta,
              g_cfg.cp_manufacturer, g_cfg.cp_model, g_cfg.cp_name,
              g_cfg.cp_id, g_cfg.cp_btaddr,
+             g_cfg.cp_vendor_ie ? 1 : 0,
              g_cfg.ssh_enabled ? 1 : 0, g_cfg.ssh_port,
              g_cfg.client_route_policy == CLIENT_ROUTE_FALLBACK
                  ? "fallback" : "modem_safe",
@@ -3634,6 +3652,101 @@ static bool fw_port_add(const char *proto, int port)
            sh("%s -I WIFI1B_APP_CP -p %s --dport %d -j ACCEPT 2>/dev/null", tool, proto, port) == 0;
 }
 
+static bool fw_rule_line_has(const char *line, const char *chain,
+                             const char *proto, int port)
+{
+    char chain_tag[64], port_tag[32], proto_tag[16];
+    snprintf(chain_tag, sizeof(chain_tag), "-A %s ", chain);
+    snprintf(port_tag, sizeof(port_tag), "--dport %d ", port);
+    snprintf(proto_tag, sizeof(proto_tag), "-p %s ", proto);
+    return strstr(line, chain_tag) != NULL &&
+           strstr(line, proto_tag) != NULL &&
+           strstr(line, port_tag) != NULL &&
+           strstr(line, "-j ACCEPT") != NULL;
+}
+
+static bool fw_block_has_port(const char *block, const char *chain,
+                              const char *proto, int port)
+{
+    char copy[16384];
+    str_copy(copy, sizeof(copy), block);
+    char *save = NULL;
+    for (char *line = strtok_r(copy, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        if (fw_rule_line_has(line, chain, proto, port)) return true;
+    }
+    return false;
+}
+
+/* Read-only contract check for the owned chains.  The IPv4 and IPv6 lists are
+ * compared with markers so a combined dump still proves each family
+ * separately; no rule is added here. */
+static bool carplay_fw_text_ok(const char *text)
+{
+    const char *v4 = strstr(text, "__WIFI1B_V4__");
+    const char *v6 = strstr(text, "__WIFI1B_V6__");
+    if (v4 == NULL || v6 == NULL || v6 < v4) return false;
+    const char *v4_end = v6;
+    char block4[8192], block6[8192];
+    size_t len4 = (size_t)(v4_end - v4);
+    if (len4 >= sizeof(block4)) return false;
+    memcpy(block4, v4, len4);
+    block4[len4] = '\0';
+    str_copy(block6, sizeof(block6), v6);
+    const int udp[] = {67, 5353, 5020, 6000, 6003, 6011};
+    const int tcp[] = {5000, 5001, 6030, 7000};
+    const int udp6[] = {547, 5353, 5020, 6000, 6003, 6011};
+    const int tcp6[] = {5000, 5001, 6030, 7000};
+    if (!strstr(block4, "-A INPUT -i wlan0 -j WIFI1B_APP_CP") ||
+        !strstr(block4, "-A OUTPUT -o wlan0 -j WIFI1B_APP_CP") ||
+        !strstr(block6, "-A INPUT -i wlan0 -j WIFI1B_APP_CP") ||
+        !strstr(block6, "-A OUTPUT -o wlan0 -j WIFI1B_APP_CP"))
+        return false;
+    for (size_t i = 0; i < sizeof(udp) / sizeof(udp[0]); i++)
+        if (!fw_block_has_port(block4, "WIFI1B_APP_CP", "udp", udp[i]))
+            return false;
+    for (size_t i = 0; i < sizeof(tcp) / sizeof(tcp[0]); i++)
+        if (!fw_block_has_port(block4, "WIFI1B_APP_CP", "tcp", tcp[i]))
+            return false;
+    for (size_t i = 0; i < sizeof(udp6) / sizeof(udp6[0]); i++)
+        if (!fw_block_has_port(block6, "WIFI1B_APP_CP", "udp", udp6[i]))
+            return false;
+    for (size_t i = 0; i < sizeof(tcp6) / sizeof(tcp6[0]); i++)
+        if (!fw_block_has_port(block6, "WIFI1B_APP_CP", "tcp", tcp6[i]))
+            return false;
+    if (!strstr(block6, "-p ipv6-icmp -j ACCEPT") ||
+        !strstr(block6, "-d ff00::/8 -j ACCEPT"))
+        return false;
+    return true;
+}
+
+static bool carplay_fw_readback(char *out, size_t n)
+{
+    char tool[256], tool6[256], cmd[1400];
+    if (out == NULL || n == 0) return false;
+    out[0] = '\0';
+    fw_tool(tool, sizeof(tool));
+    fw6_tool(tool6, sizeof(tool6));
+    snprintf(cmd, sizeof(cmd),
+             "{ echo __WIFI1B_V4__; "
+             "%s -S INPUT 2>/dev/null; %s -S OUTPUT 2>/dev/null; "
+             "%s -S WIFI1B_APP_CP 2>/dev/null; "
+             "echo __WIFI1B_V6__; "
+             "%s -S INPUT 2>/dev/null; %s -S OUTPUT 2>/dev/null; "
+             "%s -S WIFI1B_APP_CP 2>/dev/null; }",
+             tool, tool, tool, tool6, tool6, tool6);
+    return sh_out(out, n, "%s", cmd) == 0;
+}
+
+static bool carplay_fw_verify(void)
+{
+    char text[16384];
+    bool ok = carplay_fw_readback(text, sizeof(text)) &&
+              carplay_fw_text_ok(text);
+    g_carplay_fw_ok = ok;
+    return ok;
+}
+
 static bool carplay_fw_open(void)
 {
     /* AirPlay / CarPlay / DHCP / mDNS on the AP interface.  The stock
@@ -3661,7 +3774,13 @@ static bool carplay_fw_open(void)
     fw6_tool(tool6, sizeof(tool6));
     if (!fw_rule_add(tool6, "WIFI1B_APP_CP", "-p ipv6-icmp -j ACCEPT")) ok = false;
     if (!fw_rule_add(tool6, "WIFI1B_APP_CP", "-d ff00::/8 -j ACCEPT")) ok = false;
-    return ok;
+    /* A vendor firewall reload can silently remove our hooks/rules.  Do not
+     * report success until the live chain and both families agree. */
+    if (!ok || !carplay_fw_verify()) {
+        g_carplay_fw_ok = false;
+        return false;
+    }
+    return true;
 }
 
 static void carplay_fw_close(void)
@@ -3669,6 +3788,7 @@ static void carplay_fw_close(void)
     char tool[256];
     fw_tool(tool, sizeof(tool)); fw_chain_close(tool, "WIFI1B_APP_CP");
     fw6_tool(tool, sizeof(tool)); fw_chain_close(tool, "WIFI1B_APP_CP");
+    g_carplay_fw_ok = false;
 }
 
 static bool line_prefix_present(const char *path, const char *prefix)
@@ -4281,6 +4401,7 @@ static bool accept_apply_result(char *buf)
     int lease_updated = 0, lease_valid = 0, lease_route_ok = 0;
     int lease_cleanup_pending = 0, lease_fs_unconfirmed = 0;
     int lease_prefix = 0, lease_s = 0, lease_t1 = 0, lease_t2 = 0;
+    int child_fw_ok = 0;
     int lease_wifi_default = 0, lease_modem_ipv4 = 0;
     int lease_modem_unknown = 0, lease_legacy_removed = 0;
     bool have_wifi_default = false;
@@ -4299,8 +4420,12 @@ static bool accept_apply_result(char *buf)
         else if (!strcmp(line, "bt_discoverable")) g_bt_discoverable = v == 1;
         else if (!strcmp(line, "bt_pairable")) g_bt_pairable = v == 1;
         else if (!strcmp(line, "pair_stop_ok") && v == 1) g_pairing_stop_requested = false;
-        else if (!strcmp(line, "bt_address")) str_copy(g_cfg.cp_btaddr, sizeof(g_cfg.cp_btaddr), eq);
-        else if (!strcmp(line, "cp_id")) str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), eq);
+        else if (!strcmp(line, "bt_address")) { /* child observation only */ }
+        /* Child-derived identity/hardware observations are never persisted by
+         * the parent; the AP identity is an explicit user/stock value and the
+         * Bluetooth address is refreshed by the parent itself. */
+        else if (!strcmp(line, "cp_id")) { }
+        else if (!strcmp(line, "carplay_fw_ok")) child_fw_ok = v == 1;
         else if (!strcmp(line, "pair_message")) str_copy(g_pair_msg, sizeof(g_pair_msg), eq);
         else if (!strcmp(line, "dhcp_tx")) g_dhcp_tx = v;
         else if (!strcmp(line, "dhcp_rx_offer")) g_dhcp_rx_offer = v;
@@ -4436,6 +4561,12 @@ static bool accept_apply_result(char *buf)
         set_msg("State applied, but preferences could not be saved; they may revert at reboot");
     }
     if (g_work_kind != WORK_DHCP) bt_state_save();
+    if (g_work_kind == WORK_MODE) {
+        g_carplay_last_apply_ok = !g_apply_failed;
+        g_carplay_last_apply_fw_ok = child_fw_ok == 1 && !g_apply_failed;
+        g_carplay_last_apply_at = (int64_t)time(NULL);
+        carplay_state_save();
+    }
     return true;
 }
 
@@ -4632,7 +4763,7 @@ static void start_pending_work(void)
         if (g_dhcp_lease.gateway) w2_ip4_str(g_dhcp_lease.gateway, lease_gateway, sizeof(lease_gateway));
         char buf[4096];
         snprintf(buf, sizeof(buf), "%d %d\n%s\ncp_band=%d\ncp_channel=%d\n"
-                 "ssh_port=%d\ncarplay_ie=%d\nssh_active_port=%d\nssh_fallback=%d\n"
+                 "ssh_port=%d\ncarplay_ie=%d\ncarplay_fw_ok=%d\nssh_active_port=%d\nssh_fallback=%d\n"
                  "bt_discoverable=%d\nbt_pairable=%d\npair_stop_ok=%d\nbt_address=%s\ncp_id=%s\npair_message=%s\n"
                  "dhcp_tx=%d\ndhcp_rx_offer=%d\ndhcp_rx_ack=%d\ndhcp_attempts=%d\n"
                  "dhcp_bssid=%s\ndhcp_error=%s\n"
@@ -4650,7 +4781,8 @@ static void start_pending_work(void)
                  "client_route_proto=%u\nclient_lease_iface=%s\n",
                  g_apply_gen, ok ? 1 : 0, g_last_msg,
                  g_cfg.cp_band, g_cfg.cp_channel, g_cfg.ssh_port,
-                 g_carplay_ie, g_ssh_active_port, g_ssh_port_fallback,
+                 g_carplay_ie, g_carplay_fw_ok ? 1 : 0,
+                 g_ssh_active_port, g_ssh_port_fallback,
                  g_bt_discoverable, g_bt_pairable, g_pair_stop_confirmed,
                  g_cfg.cp_btaddr, g_cfg.cp_id, g_pair_msg,
                  g_dhcp_tx, g_dhcp_rx_offer, g_dhcp_rx_ack, g_dhcp_attempts,
@@ -4968,6 +5100,14 @@ static void watchdog(void)
             apply_mode(false);
             return;
         }
+        if (g_observed_ms > 0 && now - g_observed_ms < 15000 &&
+            g_observed.gen == g_apply_gen && !g_observed.carplay_fw_ok) {
+            /* A vendor firewall reload can remove our owned hooks.  The next
+             * apply reconciles the chain; readiness stays false meanwhile. */
+            log_msg("watchdog: owned CarPlay firewall chain missing; re-applying");
+            apply_mode(false);
+            return;
+        }
     } else if (g_cfg.mode == MODE_CLIENT) {
         char ip[64];
         /* The built-in DHCP client is a one-shot inside the apply; the
@@ -4996,6 +5136,70 @@ static const char *mode_name(void)
     return g_cfg.mode == MODE_CARPLAY ? "carplay" : "client";
 }
 
+#ifndef CARPLAY_BROKER_STATUS
+#define CARPLAY_BROKER_STATUS "/run/wifi1b/broker-status.json"
+#endif
+
+/* Broker runtime state is the only source for a session observation.  It is
+ * never derived from AP/services or a hardcoded constant, and a stale status
+ * file is not evidence. */
+static void observe_broker_status(observation_t *o)
+{
+    o->broker_observed = false;
+    o->broker_state[0] = '\0';
+    int fd = open(CARPLAY_BROKER_STATUS,
+                  O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        st.st_size >= 16384 ||
+        (uint32_t)st.st_uid != (uint32_t)geteuid() ||
+        (st.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        close(fd);
+        return;
+    }
+    char text[16384];
+    ssize_t n = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (n <= 0 || n != (ssize_t)st.st_size) return;
+    text[n] = '\0';
+    time_t now = time(NULL);
+    if (now <= 0 || st.st_mtime <= 0 || now - st.st_mtime > 5 ||
+        st.st_mtime - now > 5)
+        return;
+    const char *state = strstr(text, "\"state\":\"");
+    if (state != NULL) {
+        state += strlen("\"state\":\"");
+        size_t i = 0;
+        while (i + 1 < sizeof(o->broker_state) &&
+               state[i] != '"' && state[i] != '\0') {
+            o->broker_state[i] = state[i];
+            i++;
+        }
+        o->broker_state[i] = '\0';
+    }
+    const char *peer_key = "\"peer\":\"";
+    const char *peer = strstr(text, peer_key);
+    char peer_text[18] = "";
+    unsigned char peer_mac[6];
+    if (peer != NULL) {
+        peer += strlen(peer_key);
+        if (strcspn(peer, "\"") == 17u) {
+            memcpy(peer_text, peer, 17);
+            peer_text[17] = '\0';
+        }
+    }
+    const char *rx = strstr(text, "\"rx_packets\":");
+    unsigned long rx_packets = 0;
+    if (rx != NULL) rx_packets = strtoul(rx + strlen("\"rx_packets\":"),
+                                         NULL, 10);
+    o->broker_observed =
+        strstr(text, "\"state\":\"running\"") != NULL &&
+        strstr(text, "\"receiver_observed\":true") != NULL &&
+        strstr(text, "\"ap_on_air\":true") != NULL &&
+        parse_mac6(peer_text, peer_mac) && rx_packets > 0u;
+}
+
 static void collect_observation(observation_t *o)
 {
     memset(o, 0, sizeof(*o));
@@ -5013,6 +5217,10 @@ static void collect_observation(observation_t *o)
     if (o->associated) wlan_link(o->ssid, sizeof(o->ssid), &o->signal);
     o->carplay_svc = sh("systemctl is-active --quiet carplay_iAP2.service 2>/dev/null") == 0;
     o->mdns_svc = sh("systemctl is-active --quiet carplay_mdnsd.service 2>/dev/null") == 0;
+    o->carplay_fw_ok = false;
+    if (g_cfg.mode == MODE_CARPLAY && g_cfg.wlan_on && o->ap_on)
+        o->carplay_fw_ok = carplay_fw_verify();
+    observe_broker_status(o);
     o->ssh_ours = ssh_running();
     o->vendor_ssh_22 = port_listening(22) && !(o->ssh_ours && g_ssh_active_port == 22);
     o->debug_console = file_exists("/tmp/secure_console_disable");
@@ -5065,6 +5273,69 @@ static void probe_tick(void)
     g_probe_pid = pid; g_probe_fd = fds[0]; g_probe_start_ms = now;
 }
 
+static void carplay_state_load(void)
+{
+    char text[512];
+    g_carplay_last_apply_ok = false;
+    g_carplay_last_apply_fw_ok = false;
+    g_carplay_last_apply_at = 0;
+    if (read_file(CARPLAY_STATE, text, sizeof(text)) <= 0) return;
+    char *save = NULL;
+    for (char *line = strtok_r(text, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq++ = 0;
+        if (!strcmp(line, "last_apply_ok")) g_carplay_last_apply_ok = atoi(eq) == 1;
+        else if (!strcmp(line, "last_apply_fw_ok")) g_carplay_last_apply_fw_ok = atoi(eq) == 1;
+        else if (!strcmp(line, "last_apply_at")) g_carplay_last_apply_at = atoll(eq);
+    }
+}
+
+/* Persist the last accepted apply result so a restart can report the prior
+ * outcome honestly.  Readiness still requires a fresh probe; a stored success
+ * alone never sets carplay_ready. */
+static void carplay_state_save(void)
+{
+    char text[256];
+    snprintf(text, sizeof(text),
+             "version=1\nlast_apply_ok=%d\nlast_apply_fw_ok=%d\n"
+             "last_apply_at=%lld\n",
+             g_carplay_last_apply_ok ? 1 : 0,
+             g_carplay_last_apply_fw_ok ? 1 : 0,
+             (long long)g_carplay_last_apply_at);
+    (void)write_file_atomic(CARPLAY_STATE, text, 0600);
+}
+
+static const char *carplay_gate_name(bool mode_carplay, bool wlan_on,
+                                     bool network_failed, bool fresh,
+                                     bool ap_on, bool fw_ok, bool identity,
+                                     bool iap2, bool mdns, bool broker,
+                                     int clients, bool *components_ok,
+                                     bool *session_observed)
+{
+    /* A broker-published session with no associated client is contradictory
+     * or stale; never let it make carplay_ready true while the association
+     * gate is still failing. */
+    *session_observed = mode_carplay && wlan_on && fresh && ap_on && fw_ok &&
+                        broker && clients > 0;
+    *components_ok = mode_carplay && wlan_on && !network_failed && fresh &&
+                     ap_on && fw_ok && identity && iap2 && mdns;
+    if (mode_carplay && wlan_on && !network_failed) {
+        if (!fresh) return "ap-snapshot";
+        if (!ap_on) return "ap-readback";
+        if (!fw_ok) return "firewall";
+        if (!identity) return "identity";
+        if (!iap2) return "iap2";
+        if (!mdns) return "mdns";
+        if (!broker) return "spp";
+        if (clients == 0) return "association";
+        return "projection";
+    }
+    if (mode_carplay && network_failed) return "apply";
+    return "inactive";
+}
+
 static void build_status(char *out, size_t n)
 {
     bool fresh = g_observed_ms > 0 && now_ms() - g_observed_ms < 15000 &&
@@ -5083,6 +5354,7 @@ static void build_status(char *out, size_t n)
     char imp_e[512], cps_e[256], cpsk_e[256], bt_e[128], id_e[128];
     char client_e[256], pair_e[512];
     char dhcp_bssid_e[64], dhcp_error_e[256];
+    char broker_e[64];
     char ap_sec_e[96], ap_ll_e[160], ap_v6e_e[256];
     char client_gw_e[64], client_lease_ip[32] = "";
     char radio_owner[32];
@@ -5109,13 +5381,20 @@ static void build_status(char *out, size_t n)
     } else if (g_dhcp_lease.ip && g_client_expiry_at_ms > 0) {
         client_lease_state = "expired";
     }
-    /* Local service state is not a CarPlay session. Until a discovery,
-     * iAP2 and projection handshake is actually observed, "ready" must
-     * stay false and the UI reports the components separately. */
-    const bool carplay_session_observed = false;
-    const bool carplay_components_ok =
-        g_cfg.mode == MODE_CARPLAY && g_cfg.wlan_on && !g_network_failed &&
-        o->ap_on && g_carplay_ie && o->carplay_svc && o->mdns_svc;
+    /* Local service state is not a CarPlay session.  A session observation
+     * comes only from a fresh broker status file; readiness requires the live
+     * owned firewall chain and a fresh AP snapshot as well. */
+    bool carplay_components_ok = false;
+    bool carplay_session_observed = false;
+    const char *carplay_gate =
+        carplay_gate_name(g_cfg.mode == MODE_CARPLAY, g_cfg.wlan_on,
+                          g_network_failed, fresh, o->ap_on,
+                          o->carplay_fw_ok, g_carplay_ie,
+                          o->carplay_svc, o->mdns_svc, o->broker_observed,
+                          o->clients, &carplay_components_ok,
+                          &carplay_session_observed);
+    long long carplay_apply_age = g_carplay_last_apply_at > 0
+        ? (long long)time(NULL) - (long long)g_carplay_last_apply_at : -1;
     if (!radio_record_name(radio_owner, sizeof(radio_owner))) radio_owner[0] = 0;
     json_escape(ssid_e, sizeof(ssid_e), o->ssid);
     json_escape(ip_e, sizeof(ip_e), effective_ip);
@@ -5125,7 +5404,10 @@ static void build_status(char *out, size_t n)
     json_escape(cps_e, sizeof(cps_e), g_cfg.cp_ssid);
     json_escape(cpsk_e, sizeof(cpsk_e), g_cfg.cp_psk);
     json_escape(bt_e, sizeof(bt_e), g_cfg.cp_btaddr);
-    json_escape(id_e, sizeof(id_e), g_cfg.cp_id);
+    json_escape(id_e, sizeof(id_e),
+                carplay_id_allowed(g_cfg.cp_id) &&
+                        !carplay_id_equals_bt()
+                    ? g_cfg.cp_id : "");
     json_escape(client_e, sizeof(client_e), g_cfg.ssid);
     json_escape(pair_e, sizeof(pair_e), g_pair_msg);
     json_escape(dhcp_bssid_e, sizeof(dhcp_bssid_e), g_dhcp_bssid);
@@ -5133,6 +5415,7 @@ static void build_status(char *out, size_t n)
     json_escape(ap_sec_e, sizeof(ap_sec_e), o->ap.security);
     json_escape(ap_ll_e, sizeof(ap_ll_e), o->ap.linklocal);
     json_escape(ap_v6e_e, sizeof(ap_v6e_e), o->ap.ipv6_error);
+    json_escape(broker_e, sizeof(broker_e), o->broker_state);
     char gateway_text[32] = "";
     if (g_dhcp_lease.gateway) w2_ip4_str(g_dhcp_lease.gateway, gateway_text, sizeof(gateway_text));
     json_escape(client_gw_e, sizeof(client_gw_e), gateway_text);
@@ -5195,10 +5478,18 @@ static void build_status(char *out, size_t n)
              "\"carplay_ready\":%s,"
              "\"carplay_components_ok\":%s,"
              "\"carplay_session_observed\":%s,"
+             "\"carplay_session_source\":\"%s\","
+             "\"carplay_gate\":\"%s\","
+             "\"carplay_firewall_ok\":%s,"
+             "\"carplay_broker_state\":\"%s\","
+             "\"carplay_last_apply_ok\":%s,"
+             "\"carplay_last_apply_fw_ok\":%s,"
+             "\"carplay_last_apply_age_s\":%lld,"
              "\"carplay_ap_up\":%s,"
              "\"carplay_ie_configured\":%s,"
              "\"carplay_ie_observed\":false,"
-             "\"carplay_ie_observation\":\"unverified\","
+             "\"carplay_ie_observation\":\"ie_unverified\","
+             "\"carplay_vendor_ie_requested\":%s,"
              "\"carplay_control\":\"%s\","
              "\"carplay_ie\":%s,"
              "\"carplay_iap2\":%s,"
@@ -5263,13 +5554,21 @@ static void build_status(char *out, size_t n)
              o->ap.state == AP_READY ? "true" : "false",
              o->ap.channel_matches_config ? "true" : "false",
              ap_v6e_e,
-             /* "ready" requires an observed CarPlay session. The local
-              * AP/IE/service checks are reported separately. */
+             /* Ready requires fresh AP/firewall state plus a fresh broker
+              * session observation; a stored apply result is diagnostic only. */
              (carplay_components_ok && carplay_session_observed) ? "true" : "false",
              carplay_components_ok ? "true" : "false",
              carplay_session_observed ? "true" : "false",
+             carplay_session_observed ? "broker" : "none",
+             carplay_gate,
+             o->carplay_fw_ok ? "true" : "false",
+             broker_e,
+             g_carplay_last_apply_ok ? "true" : "false",
+             g_carplay_last_apply_fw_ok ? "true" : "false",
+             carplay_apply_age,
              o->ap_on ? "true" : "false",
              g_carplay_ie ? "true" : "false",
+             g_cfg.cp_vendor_ie ? "true" : "false",
              g_cfg.carplay_control ? "stock" : "wifi1b",
              g_carplay_ie ? "true" : "false",
              o->carplay_svc ? "true" : "false",
@@ -7157,6 +7456,7 @@ int main(int argc, char **argv)
         unlink(BT_STATE);
     }
     config_load();
+    carplay_state_load();
     /* Shared wlan0 contract: our peer is the WiFi app. Before any worker. */
     radio_configure("wifi_daemon", "/rw_data/wifi/status.json");
     int instance_fd = -1;
@@ -7177,6 +7477,7 @@ int main(int argc, char **argv)
             random_psk(g_cfg.cp_psk, sizeof(g_cfg.cp_psk));
             config_save();
         }
+        prepare_carplay_identity();
     }
 
     signal(SIGINT, on_signal);

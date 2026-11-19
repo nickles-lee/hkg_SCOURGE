@@ -108,15 +108,20 @@ struct cp_spp_dbus {
     bool status_pending;
     bool list_invalid;
     bool list_adapter_found;
+    bool attach_pending;
+    bool attached;
     uint8_t list_serial_count;
     uint8_t listen_args;
+    uint8_t stop_args;
     uint8_t match_done;
     uint8_t owner_wait;
+    uint32_t connect_generation;
     cp_spp_dbus_state state;
     uint64_t last_now_ms;
     uint64_t validation_deadline_ms;
     uint64_t send_deadline_ms;
     uint32_t send_serial;
+    uint32_t ignored_send_serial;
     uint32_t inflight_len;
     uint32_t expected_owner_uid;
     uint32_t control_timeout_ms;
@@ -139,6 +144,8 @@ struct cp_spp_dbus {
     char pending_path[CP_SPP_DBUS_MAX_PATH];
     char status_path[CP_SPP_DBUS_MAX_PATH];
     char status_value[CP_SPP_DBUS_MAX_VALUE];
+    char attach_path[CP_SPP_DBUS_MAX_PATH];
+    char attach_service[CP_SPP_DBUS_MAX_SERVICE];
     char status_signature[3];
     char serial_status_signature[3];
     char rx_peer[18];
@@ -291,6 +298,72 @@ static bool serial_identity(cp_spp_dbus *engine, const char *path,
     if (n < 0 || n >= (int)CP_SPP_DBUS_MAX_SERVICE) return false;
     for (char *p = service; *p; p++) if (*p == '/') *p = '.';
     return bounded_name(service, CP_SPP_DBUS_MAX_SERVICE - 1u);
+}
+
+/* Reverse of the well-known name derivation: the registered SerialPort
+ * service name carries the same peer and CAFF UUID as its object path.  The
+ * object is registered by SetSerialPortConnectionStatus(..., CONNECTED), so a
+ * well-known name present at validation is the only attach-time evidence the
+ * bus exposes.  It is still revalidated by serial_identity() and by the
+ * service owner before use. */
+static bool copy_bounded(char *dst, size_t cap, const char *src);
+static void fatal(cp_spp_dbus *engine, const char *fmt, ...);
+
+static bool serial_path_from_service(cp_spp_dbus *engine, const char *service,
+                                     char *path, size_t cap)
+{
+    size_t prefix_len = strlen(engine->serial_prefix);
+    size_t n;
+    if (service == NULL || strncmp(service, engine->serial_prefix,
+                                   prefix_len) != 0)
+        return false;
+    const char *suffix = service + prefix_len;
+    n = strlen(suffix);
+    if (n == 0u || n + 2u > cap) return false;
+    path[0] = '/';
+    for (size_t i = 0; i < n; i++) {
+        char c = suffix[i];
+        path[i + 1u] = c == '.' ? '/' : c;
+    }
+    path[n + 1u] = '\0';
+    return bounded_path(path, cap - 1u);
+}
+
+static void select_attach_candidate(cp_spp_dbus *engine)
+{
+    char peer[18];
+    char service[CP_SPP_DBUS_MAX_SERVICE];
+    char path[CP_SPP_DBUS_MAX_PATH];
+    unsigned candidates = 0;
+    engine->attach_pending = false;
+    engine->attach_path[0] = '\0';
+    engine->attach_service[0] = '\0';
+    for (uint8_t i = 0; i < engine->list_serial_count; i++) {
+        if (strcmp(engine->serial_owner[i], engine->unique_owner) != 0)
+            continue;
+        if (!serial_path_from_service(engine, engine->list_serial[i], path,
+                                      sizeof(path)))
+            continue;
+        if (!serial_identity(engine, path, peer, service))
+            continue;
+        if (strcmp(service, engine->list_serial[i]) != 0) continue;
+        candidates++;
+        if (!copy_bounded(engine->attach_path, sizeof(engine->attach_path),
+                          path) ||
+            !copy_bounded(engine->attach_service,
+                          sizeof(engine->attach_service), service)) {
+            fatal(engine, "attach_path_too_long");
+            return;
+        }
+    }
+    if (candidates > 1u) {
+        /* More than one registered SerialPort name is not itself proof that
+         * all are connected; wait for an explicit status signal instead of
+         * guessing which object the phone is using. */
+        engine->attach_pending = false;
+        return;
+    }
+    engine->attach_pending = candidates == 1u;
 }
 
 static bool copy_bounded(char *dst, size_t cap, const char *src)
@@ -619,14 +692,24 @@ static bool introspect_listen(const char *xml, size_t length,
     return false;
 }
 
-static bool introspect_stop(const char *xml, size_t length, const char *interface)
+static bool introspect_stop(const char *xml, size_t length, const char *interface,
+                            uint8_t *args_out)
 {
     char ins[16] = "", outs[16] = "";
     if (!introspect_method(xml, length, interface,
                             "StopListenSPP", ins, sizeof(ins), outs,
                             sizeof(outs), false))
         return false;
-    return strcmp(ins, "ss") == 0 && strcmp(outs, "i") == 0;
+    if (strcmp(outs, "i") != 0) return false;
+    if (strcmp(ins, "ss") == 0) {
+        *args_out = 2;
+        return true;
+    }
+    if (strcmp(ins, "s") == 0) {
+        *args_out = 1;
+        return true;
+    }
+    return false;
 }
 
 static bool introspect_send(const char *xml, size_t length, const char *interface)
@@ -716,6 +799,13 @@ static void handle_reply(cp_spp_dbus *engine, DBusMessage *message)
     bool is_error = dbus_message_get_type(message) ==
                     DBUS_MESSAGE_TYPE_ERROR;
     bool is_send = engine->send_inflight && serial == engine->send_serial;
+    if (!is_send && engine->ignored_send_serial != 0u &&
+        serial == engine->ignored_send_serial) {
+        /* A disconnect already retired this SendData.  Its late ACK/error is
+         * consumed as stale, never as delivery or a new protocol error. */
+        engine->ignored_send_serial = 0u;
+        return;
+    }
     if (is_send) {
         kind = CP_SPP_DBUS_PK_SEND;
     } else {
@@ -1131,25 +1221,49 @@ static void process_xml_adapter(cp_spp_dbus *engine, cp_spp_dbus_reply *reply,
         return;
     }
     uint8_t args = 0;
+    uint8_t stop_args = 0;
     if (!introspect_listen(xml, (size_t)length, engine->adapter_interface, &args) ||
-        !introspect_stop(xml, (size_t)length, engine->adapter_interface)) {
+        !introspect_stop(xml, (size_t)length, engine->adapter_interface,
+                         &stop_args)) {
         fatal(engine, "adapter_method_signature");
         return;
     }
     engine->listen_args = args;
+    engine->stop_args = stop_args;
     engine->adapter_validated = true;
     engine->validation_deadline_ms = 0;
+    select_attach_candidate(engine);
+    if (engine->state == CP_SPP_DBUS_STATE_FATAL) return;
     set_state(engine, CP_SPP_DBUS_STATE_LISTENING);
     if (engine->cb.on_validated)
         engine->cb.on_validated(engine->user);
     (void)now_ms;
 }
 
-static void process_listen(cp_spp_dbus *engine, cp_spp_dbus_reply *reply)
+static void process_listen(cp_spp_dbus *engine, cp_spp_dbus_reply *reply,
+                           uint64_t now_ms)
 {
     engine->listen_pending = false;
     if (reply->ival == 0) {
         engine->listener_owned = true;
+        /* A SerialPort object that already existed at validation is attached
+         * only now: our own listener owns the transport, and the owner lookup
+         * is repeated before the object can become CONNECTED. */
+        if (engine->attach_pending) {
+            if (!copy_bounded(engine->pending_path,
+                              sizeof(engine->pending_path),
+                              engine->attach_path) ||
+                !copy_bounded(engine->connected_service,
+                              sizeof(engine->connected_service),
+                              engine->attach_service)) {
+                fatal(engine, "attach_path_too_long");
+                return;
+            }
+            engine->serial_pending = true;
+            if (!send_owner(engine, engine->attach_service,
+                            CP_SPP_DBUS_PK_OWNER_CONNECTED, now_ms))
+                fatal(engine, "connected_owner_query_failed");
+        }
         return;
     }
     /* Never assume ownership of a foreign/duplicate listener. */
@@ -1181,6 +1295,7 @@ static void process_xml_serial(cp_spp_dbus *engine, cp_spp_dbus_reply *reply,
 {
     const char *xml = NULL;
     int length = 0;
+    bool was_attach = engine->attach_pending;
     if (!engine->serial_pending ||
         strcmp(reply->aux, engine->pending_path) != 0) {
         /* A late reply for an object that disconnected or was superseded. */
@@ -1203,8 +1318,19 @@ static void process_xml_serial(cp_spp_dbus *engine, cp_spp_dbus_reply *reply,
     if (!introspect_send(xml, (size_t)length, engine->serial_interface) ||
         !introspect_method(xml, (size_t)length, engine->serial_interface,
             CP_SPP_DBUS_SERIAL_SIGNAL_STATUS, signal_in, sizeof(signal_in),
-            signal_out, sizeof(signal_out), true) || signal_in[0] ||
-        strcmp(signal_out, engine->status_signature)) {
+            signal_out, sizeof(signal_out), true) || signal_in[0]) {
+        fatal(engine, "senddata_method_signature");
+        return;
+    }
+    /* Attach has no status signal to learn the signature from; the object's
+     * own introspection is the source.  A later signal must match it. */
+    if (engine->status_signature[0] == '\0') {
+        if (!copy_bounded(engine->status_signature,
+                          sizeof(engine->status_signature), signal_out)) {
+            fatal(engine, "serial_signal_too_long");
+            return;
+        }
+    } else if (strcmp(signal_out, engine->status_signature) != 0) {
         fatal(engine, "senddata_method_signature");
         return;
     }
@@ -1214,7 +1340,14 @@ static void process_xml_serial(cp_spp_dbus *engine, cp_spp_dbus_reply *reply,
         return;
     }
     engine->serial_pending = false;
+    engine->attach_pending = false;
+    engine->attached = was_attach;
     engine->connected = true;
+    if (engine->connect_generation == UINT32_MAX) {
+        fatal(engine, "connect_generation_exhausted");
+        return;
+    }
+    engine->connect_generation++;
     (void)copy_bounded(engine->serial_status_signature,
                        sizeof(engine->serial_status_signature), signal_out);
     if (!serial_identity(engine, engine->connected_path, engine->rx_peer,
@@ -1294,7 +1427,7 @@ static bool process_replies(cp_spp_dbus *engine, uint64_t now_ms)
             process_xml_adapter(engine, &reply, now_ms);
             break;
         case CP_SPP_DBUS_PK_LISTEN:
-            process_listen(engine, &reply);
+            process_listen(engine, &reply, now_ms);
             break;
         case CP_SPP_DBUS_PK_STOP:
             process_stop(engine, &reply);
@@ -1375,9 +1508,21 @@ static void process_status(cp_spp_dbus *engine, uint64_t now_ms)
             engine->connected = false;
             engine->rx_peer[0] = '\0';
             engine->connected_path[0] = '\0';
+            engine->connected_service[0] = '\0';
+            if (engine->send_inflight)
+                engine->ignored_send_serial = engine->send_serial;
+            engine->tx_count = 0;
+            engine->tx_head = 0;
+            engine->send_inflight = false;
+            engine->inflight_len = 0;
+            engine->send_deadline_ms = 0;
             if (engine->cb.on_removed)
                 engine->cb.on_removed(engine->user, path);
-            fatal(engine, "serial_disconnected");
+            /* A disconnect is a normal end of one connection, not a reason to
+             * discard the listener.  A later connected confirmation advances
+             * connect_generation so the caller can reset per-connection state
+             * even when the same phone reconnects. */
+            set_state(engine, CP_SPP_DBUS_STATE_LISTENING);
         }
         return;
     }
@@ -1721,23 +1866,37 @@ int cp_spp_dbus_listen(cp_spp_dbus *engine, uint64_t now_ms)
     return CP_SPP_DBUS_OK;
 }
 
+static bool send_stop_call(cp_spp_dbus *engine, uint64_t now_ms,
+                           cp_spp_dbus_pk kind)
+{
+    if (engine->stop_args == 2u) {
+        return send_string_call(engine, engine->unique_owner,
+                                engine->adapter_path,
+                                engine->adapter_interface, "StopListenSPP",
+                                engine->uuid_accessory, engine->service_name,
+                                kind, now_ms, NULL);
+    }
+    return send_string_call(engine, engine->unique_owner, engine->adapter_path,
+                            engine->adapter_interface, "StopListenSPP",
+                            engine->service_name, NULL, kind, now_ms, NULL);
+}
+
 int cp_spp_dbus_stop(cp_spp_dbus *engine, uint64_t now_ms)
 {
     if (engine == NULL || !engine->opened)
         return CP_SPP_DBUS_ERR_INVALID;
     if (engine->state == CP_SPP_DBUS_STATE_FATAL)
         return CP_SPP_DBUS_ERR_STATE;
+    /* Idempotent: a second/foreign stop never emits a method call.  Only a
+     * listener this process created is ever stopped. */
     if (!engine->listener_owned || engine->stop_pending)
-        return CP_SPP_DBUS_ERR_STATE;
+        return CP_SPP_DBUS_OK;
     if (now_ms < engine->last_now_ms)
         return CP_SPP_DBUS_ERR_INVALID;
     engine->last_now_ms = now_ms;
     if (engine->send_inflight || engine->tx_count || engine->serial_pending)
         return CP_SPP_DBUS_ERR_STATE;
-    if (!send_string_call(engine, engine->unique_owner, engine->adapter_path,
-                         engine->adapter_interface, "StopListenSPP",
-                         engine->uuid_accessory, engine->service_name,
-                         CP_SPP_DBUS_PK_STOP, now_ms, NULL))
+    if (!send_stop_call(engine, now_ms, CP_SPP_DBUS_PK_STOP))
         return CP_SPP_DBUS_ERR_STATE;
     engine->stop_pending = true;
     engine->connected = false;
@@ -1858,6 +2017,16 @@ int cp_spp_dbus_listener_owned(const cp_spp_dbus *engine)
     return engine != NULL && engine->listener_owned ? 1 : 0;
 }
 
+uint32_t cp_spp_dbus_connect_generation(const cp_spp_dbus *engine)
+{
+    return engine != NULL ? engine->connect_generation : 0u;
+}
+
+int cp_spp_dbus_attached(const cp_spp_dbus *engine)
+{
+    return engine != NULL && engine->attached ? 1 : 0;
+}
+
 size_t cp_spp_dbus_tx_queued(const cp_spp_dbus *engine)
 {
     if (engine == NULL) return 0;
@@ -1887,6 +2056,7 @@ void cp_spp_dbus_close(cp_spp_dbus *engine)
          * On fatal/cancelled or outstanding TX, closing the private connection
          * discards its unsent queue. Remote listener shutdown is unconfirmed. */
         if (engine->listener_owned && !engine->owner_lost &&
+            !engine->stop_pending &&
             engine->state != CP_SPP_DBUS_STATE_FATAL &&
             !engine->send_inflight && engine->tx_count == 0) {
             DBusMessage *message = dbus_message_new_method_call(
@@ -1897,10 +2067,18 @@ void cp_spp_dbus_close(cp_spp_dbus *engine)
                 dbus_message_set_no_reply(message, TRUE);
                 const char *name = engine->service_name;
                 const char *uuid = engine->uuid_accessory;
-                if (dbus_message_append_args(message, DBUS_TYPE_STRING, &name,
-                    DBUS_TYPE_STRING, &uuid, DBUS_TYPE_INVALID))
+                bool appended;
+                if (engine->stop_args == 2u)
+                    appended = dbus_message_append_args(message,
+                        DBUS_TYPE_STRING, &uuid, DBUS_TYPE_STRING, &name,
+                        DBUS_TYPE_INVALID);
+                else
+                    appended = dbus_message_append_args(message,
+                        DBUS_TYPE_STRING, &name, DBUS_TYPE_INVALID);
+                if (appended)
                     dbus_connection_send(engine->conn, message, NULL);
                 dbus_message_unref(message);
+                dbus_connection_flush(engine->conn);
                 (void)dbus_connection_read_write(engine->conn, 0);
             }
         }

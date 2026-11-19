@@ -25,10 +25,48 @@ language=en
 languages=en
 transport_name=
 
-# Bluetooth identity.  Use the head unit's own Bluetooth address/device ID.
-# These are persistent vehicle identifiers; keep them out of Git.
+# Bluetooth identity.  Use the head unit's own Bluetooth address.  The stock
+# receiver derives its advertised deviceid from this address by incrementing
+# the last byte; the broker checks that relationship below.  These are
+# persistent vehicle identifiers; keep them out of Git.
 bt_mac=
+
+# Receiver discovery.  Before opening the session bus or RX socket, the
+# broker resolves each distinct stock receiver _airplay._tcp SRV/TXT on this
+# interface.  It evaluates every resolved candidate, requires exactly one
+# passing identity, a deviceid consistent with bt_mac (last byte +1) unless
+# device_id pins an exact value, and a local LISTEN socket on the advertised
+# port whose owning process is allowlisted.  The observed values are what go
+# into the wireless start message.
+receiver_interface=wlan0
+receiver_timeout_ms=15000
+
+# Quiet window after the first valid candidate and the last DNS-SD event.
+# Bounded by receiver_timeout_ms; the deadline is never extended.
+receiver_settle_ms=500
+
+# Stock process allowed to own the receiver LISTEN socket (comma separated
+# for more than one).  Blank is refused, not treated as "any owner".  A
+# wildcard or receiver-interface address is required; a loopback-only
+# listener is refused as listener-scope.
+receiver_listener_owner=AppProjection
+
+# Optional pairing-identifier pin: 64 hex characters, SHA-256 of the raw TXT
+# pi value.  Only the hash is compared and only the hash is reported; blank
+# means "require pi to be present but accept its value".  A malformed value
+# refuses the whole configuration.
+receiver_pi_sha256=
+
+# Optional consistency pins.  Blank/0 means "derive or accept the observed
+# value" as described below; a set value must match exactly.
+# device_id is the receiver's advertised deviceid (normally the Bluetooth MAC
+# with the last byte incremented), not the Bluetooth MAC.  When blank, the
+# broker derives it from bt_mac (+1) and requires an exact match.
+# airplay_port=0 means "use the observed SRV port"; 7000 is not guaranteed.
+# source_version blank means "require srcvers to be present, accept its value".
 device_id=
+airplay_port=0
+source_version=
 
 # AP bootstrap values.  They must identify the AP the daemon actually runs.
 # Fill in the actual SSID, channel, security mode and link-local address
@@ -40,9 +78,6 @@ ap_psk=
 ap_channel=0
 ap_security=WPA2
 link_local=
-
-# AirPlay receiver port.  The vendor receiver currently listens on 7000.
-airplay_port=7000
 
 # Optional; omit to read DBUS_SESSION_BUS_ADDRESS from
 # /tmp/session_appmgr.env.
