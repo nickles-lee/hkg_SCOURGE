@@ -149,6 +149,11 @@ req=urllib.request.Request("http://127.0.0.1:18091/set?disclaimer_auto=0&disclai
 d=json.load(urllib.request.urlopen(req, timeout=3))
 assert d["disclaimer_auto"] == 0 and d["disclaimer_timeout_ms"] == 3000
 assert d["auto_dst"] == 0 and d["dst_zone"] == "Europe/Dublin" and d["ota_block"] == 0
+# Disclaimer delay: 0 is valid, the rest is quantized to 0.25 s steps.
+for val, expected in ((0,0),(250,250),(260,250),(9990,10000)):
+    req=urllib.request.Request("http://127.0.0.1:18091/set?disclaimer_timeout_ms=%d" % val, method="POST")
+    d=json.load(urllib.request.urlopen(req, timeout=3))
+    assert d["disclaimer_timeout_ms"] == expected, (val, d)
 # /set must not be able to point the root-exec'd helper at an arbitrary path,
 # and a rejected key must not rewrite the config (mtime marker at epoch 0).
 os.utime(cfg,(0,0))
@@ -339,6 +344,159 @@ cmp -s "$TMP/rw7/config.conf" "$TMP/rw7/config.before" || {
     exit 1
 }
 
+# BLF active (status=1, auto window around now) + deep_red=1 + no
+# projection: deep red must apply without waiting for CarPlay, and the
+# cluster status/level must be asserted.
+nowmin=$(python3 -c 'import time; t=time.localtime(); print(t.tm_hour*60+t.tm_min)')
+pstart=$(( (nowmin - 60 + 1440) % 1440 ))
+pend=$(( (nowmin + 60) % 1440 ))
+mkdir -p "$TMP/rw8"
+cat > "$TMP/fake-persist-on" <<EOF
+#!/bin/sh
+case "\$1" in
+read)
+    echo "APP_SETTING_DISP_BLUE_LIGHT_STATUS=1"
+    echo "APP_SETTING_DISP_BLUE_LIGHT_WARM_LEVEL=5"
+    echo "APP_SETTING_DISP_BLUE_LIGHT_START_TIME=$pstart"
+    echo "APP_SETTING_DISP_BLUE_LIGHT_END_TIME=$pend"
+    echo "APP_SETTING_DISP_BLUE_LIGHT_LAST_SETTING_MODE=0"
+    echo "APP_SETTING_DISP_GAMMA_R_G_B=128:128:128"
+    echo "APP_SETTING_DISP_BRIGHTNESS_R_G_B=128:116:104"
+    ;;
+esac
+EOF
+chmod +x "$TMP/fake-persist-on"
+cat > "$TMP/rw8/config.conf" <<EOF
+cluster_fix=1
+infotainment_fix=1
+cluster_crtc=2
+main_crtc=1
+deep_red=1
+poll_ms=1000
+wrandr_path=$TMP/fake-wrandr
+persist_helper=$TMP/fake-persist-on
+tzdata_dir=/usr/share/zoneinfo
+tzdata_version_file=$TMP/rw8/tzdata_version
+offline_status_path=$TMP/offline-dr
+dbus_send_path=$TMP/fake-dbus
+can_service=$TMP/fake-can-service
+EOF
+echo 2026f > "$TMP/rw8/tzdata_version"
+rm -f "$TMP/rw8/projection_state"
+: > "$TMP/can.log"
+: > "$TMP/wrandr.log"
+out=$("$BIN" --rw-dir "$TMP/rw8" --once --no-dbus)
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["filter_active"] == 1, d; assert d["blf_mode"] == 0, d; assert d["blf_in_window"] == 1, d; assert d["deep_red"] == 1, d; assert d["night_forced"] == 0, d; assert d["projection_active"] == 0, d; assert d["blu_status_sent"] == 2, d; assert d["blu_level_sent"] == 9, d; assert d["can_source"] == "service", d'
+grep -q -- '--crtc=1 --brightness=128:32:16' "$TMP/wrandr.log"
+grep -q '^fixed 0x06 0x3f 26 2 2$' "$TMP/can.log"
+grep -q '^fixed 0x06 0x3f 12 4 9$' "$TMP/can.log"
+
+# Auto mode outside the configured window: BLF is enabled (status=1) but not
+# active now, so deep red and the cluster force must stay off.
+nstart=$(( (nowmin + 120) % 1440 ))
+nend=$(( (nowmin + 180) % 1440 ))
+mkdir -p "$TMP/rw9"
+cat > "$TMP/fake-persist-auto-off" <<EOF
+#!/bin/sh
+case "\$1" in
+read)
+    echo "APP_SETTING_DISP_BLUE_LIGHT_STATUS=1"
+    echo "APP_SETTING_DISP_BLUE_LIGHT_WARM_LEVEL=5"
+    echo "APP_SETTING_DISP_BLUE_LIGHT_START_TIME=$nstart"
+    echo "APP_SETTING_DISP_BLUE_LIGHT_END_TIME=$nend"
+    echo "APP_SETTING_DISP_BLUE_LIGHT_LAST_SETTING_MODE=0"
+    echo "APP_SETTING_DISP_GAMMA_R_G_B=128:128:128"
+    echo "APP_SETTING_DISP_BRIGHTNESS_R_G_B=128:116:104"
+    ;;
+esac
+EOF
+chmod +x "$TMP/fake-persist-auto-off"
+sed "s|persist_helper=.*|persist_helper=$TMP/fake-persist-auto-off|" "$TMP/rw8/config.conf" > "$TMP/rw9/config.conf"
+echo 2026f > "$TMP/rw9/tzdata_version"
+: > "$TMP/can.log"
+: > "$TMP/wrandr.log"
+out=$("$BIN" --rw-dir "$TMP/rw9" --once --no-dbus)
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["filter_active"] == 0, d; assert d["blf_mode"] == 0, d; assert d["blf_in_window"] == 0, d; assert d["deep_red"] == 1, d; assert d["projection_active"] == 0, d; assert d["blu_status_sent"] == 0, d; assert d["blu_level_sent"] == 0, d'
+! grep -q -- '--brightness=128:32:16' "$TMP/wrandr.log"
+test ! -s "$TMP/can.log"
+
+# Manual mode (last setting mode 1) uses the on/off state, not the schedule,
+# so it still applies deep red even outside the auto window.
+mkdir -p "$TMP/rw10"
+sed 's/LAST_SETTING_MODE=0/LAST_SETTING_MODE=1/' "$TMP/fake-persist-auto-off" > "$TMP/fake-persist-manual"
+chmod +x "$TMP/fake-persist-manual"
+sed "s|persist_helper=.*|persist_helper=$TMP/fake-persist-manual|" "$TMP/rw8/config.conf" > "$TMP/rw10/config.conf"
+echo 2026f > "$TMP/rw10/tzdata_version"
+: > "$TMP/can.log"
+: > "$TMP/wrandr.log"
+out=$("$BIN" --rw-dir "$TMP/rw10" --once --no-dbus)
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["filter_active"] == 1, d; assert d["blf_mode"] == 1, d; assert d["blf_in_window"] == 0, d; assert d["deep_red"] == 1, d; assert d["blu_level_sent"] == 9, d'
+grep -q -- '--crtc=1 --brightness=128:32:16' "$TMP/wrandr.log"
+grep -q '^fixed 0x06 0x3f 12 4 9$' "$TMP/can.log"
+
+# Auto mode, status off, but the current time is inside the window:
+# blf_in_window must still be true, while filter_active stays off.
+mkdir -p "$TMP/rw11"
+sed 's/STATUS=1/STATUS=0/' "$TMP/fake-persist-on" > "$TMP/fake-persist-disabled"
+chmod +x "$TMP/fake-persist-disabled"
+sed "s|persist_helper=.*|persist_helper=$TMP/fake-persist-disabled|" "$TMP/rw8/config.conf" > "$TMP/rw11/config.conf"
+echo 2026f > "$TMP/rw11/tzdata_version"
+: > "$TMP/can.log"
+: > "$TMP/wrandr.log"
+out=$("$BIN" --rw-dir "$TMP/rw11" --once --no-dbus)
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["filter_active"] == 0, d; assert d["blf_mode"] == 0, d; assert d["blf_in_window"] == 1, d; assert d["blf_schedule_off"] == 0, d; assert d["projection_active"] == 0, d; assert d["blu_status_sent"] == 0, d'
+! grep -q -- '--brightness=128:32:16' "$TMP/wrandr.log"
+test ! -s "$TMP/can.log"
+
+# A zero-length Auto window is invalid: fall back to the on/off flag.  This
+# is explicit so an empty schedule cannot silently pin deep red forever.
+mkdir -p "$TMP/rw12"
+sed -e 's/START_TIME=.*/START_TIME=600/' -e 's/END_TIME=.*/END_TIME=600/' \
+    "$TMP/fake-persist-on" > "$TMP/fake-persist-empty-window"
+chmod +x "$TMP/fake-persist-empty-window"
+sed "s|persist_helper=.*|persist_helper=$TMP/fake-persist-empty-window|" "$TMP/rw8/config.conf" > "$TMP/rw12/config.conf"
+echo 2026f > "$TMP/rw12/tzdata_version"
+: > "$TMP/can.log"
+: > "$TMP/wrandr.log"
+out=$("$BIN" --rw-dir "$TMP/rw12" --once --no-dbus)
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["filter_active"] == 1, d; assert d["blf_mode"] == 0, d; assert d["blf_in_window"] == 0, d; assert d["blf_schedule_off"] == 0, d; assert d["blu_level_sent"] == 9, d'
+
+# Empty/malformed schedule keys must not become 0/0; they are unknown (-1)
+# and fall back to the on/off flag without a schedule claim.
+mkdir -p "$TMP/rw13"
+cat > "$TMP/fake-persist-malformed" <<'EOF'
+#!/bin/sh
+case "$1" in
+read)
+    echo "APP_SETTING_DISP_BLUE_LIGHT_STATUS=1"
+    echo "APP_SETTING_DISP_BLUE_LIGHT_WARM_LEVEL=5"
+    echo "APP_SETTING_DISP_BLUE_LIGHT_START_TIME="
+    echo "APP_SETTING_DISP_BLUE_LIGHT_END_TIME="
+    echo "APP_SETTING_DISP_BLUE_LIGHT_LAST_SETTING_MODE="
+    echo "APP_SETTING_DISP_GAMMA_R_G_B=128:128:128"
+    echo "APP_SETTING_DISP_BRIGHTNESS_R_G_B=128:116:104"
+    ;;
+esac
+EOF
+chmod +x "$TMP/fake-persist-malformed"
+sed "s|persist_helper=.*|persist_helper=$TMP/fake-persist-malformed|" "$TMP/rw8/config.conf" > "$TMP/rw13/config.conf"
+echo 2026f > "$TMP/rw13/tzdata_version"
+out=$("$BIN" --rw-dir "$TMP/rw13" --once --no-dbus)
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["filter_active"] == 1, d; assert d["blf_mode"] == -1, d; assert d["blf_start"] == -1, d; assert d["blf_end"] == -1, d; assert d["blf_in_window"] == 0, d; assert d["blf_schedule_off"] == 0, d'
+
+# Projection outside the Auto window must not force night mode/deep red:
+# the schedule is the effective user intent.
+mkdir -p "$TMP/rw14"
+sed "s|persist_helper=.*|persist_helper=$TMP/fake-persist-auto-off|" "$TMP/rw8/config.conf" > "$TMP/rw14/config.conf"
+echo 2026f > "$TMP/rw14/tzdata_version"
+echo 1 > "$TMP/rw14/projection_state"
+: > "$TMP/can.log"
+: > "$TMP/wrandr.log"
+out=$("$BIN" --rw-dir "$TMP/rw14" --once --no-dbus)
+echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["projection_active"] == 1, d; assert d["filter_active"] == 0, d; assert d["blf_schedule_off"] == 1, d; assert d["night_forced"] == 0, d; assert d["blu_status_sent"] == 0, d'
+! grep -q -- '--brightness=128:32:16' "$TMP/wrandr.log"
+test ! -s "$TMP/can.log"
+
 # ---- new controls: disclaimer, auto-DST, OTA block ---------------------
 mkdir -p "$TMP/rw2" "$TMP/update2"
 cat > "$TMP/rw2/persist" <<EOF
@@ -490,8 +648,10 @@ grep -q "did not persist" "$TMP/usb/tweaks_failures.log" 2>/dev/null || true
 test -f "$TMP/rw2/dst_write_failed"
 sed -i "s|^persist_helper=.*|persist_helper=$TMP/rw2/persist|" "$TMP/rw2/config.conf"
 
-"$BIN" --rw-dir "$TMP/rw2" --set disclaimer_timeout_ms=900 >/dev/null
-test "$(cat "$TMP/rw2/disclaimer_timeout_ms")" = "1000"
+"$BIN" --rw-dir "$TMP/rw2" --set disclaimer_timeout_ms=0 >/dev/null
+test "$(cat "$TMP/rw2/disclaimer_timeout_ms")" = "0"
+"$BIN" --rw-dir "$TMP/rw2" --set disclaimer_timeout_ms=260 >/dev/null
+test "$(cat "$TMP/rw2/disclaimer_timeout_ms")" = "250"
 "$BIN" --rw-dir "$TMP/rw2" --set disclaimer_auto=0 >/dev/null
 test "$(cat "$TMP/rw2/disclaimer_auto")" = "0"
 
@@ -664,5 +824,16 @@ assert d["ok"] is True and d["crtc"] == 1, d
 PY
 kill "$pidi" 2>/dev/null || true
 wait "$pidi" 2>/dev/null || true
+
+# daemon.log is capped at 1 MiB (the unit redirects stderr into it).
+dd if=/dev/zero of="$TMP/rw/daemon.log" bs=1024 count=1536 2>/dev/null
+"$BIN" --rw-dir "$TMP/rw" --once --no-dbus >/dev/null
+test "$(wc -c < "$TMP/rw/daemon.log")" -lt 1048576
+
+# The cap never follows a symlinked log.
+dd if=/dev/zero of="$TMP/rw/real-log" bs=1024 count=1536 2>/dev/null
+ln -sf "$TMP/rw/real-log" "$TMP/rw/daemon.log"
+"$BIN" --rw-dir "$TMP/rw" --once --no-dbus >/dev/null
+test "$(wc -c < "$TMP/rw/real-log")" -gt 1048576
 
 echo "PASS: daemon smoke test"

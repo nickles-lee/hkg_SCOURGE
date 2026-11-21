@@ -193,6 +193,11 @@ VM-validated (vendor kernel):
   `0x2b0` steering) and Gen2 fallbacks (`0x56e`, `0x55a`), clamps, range
   guards, bulk retention and reset; not a vendor DBC or stock vehicle
   fidelity
+- host-built static-musl Rust app package (`rust-app`): install, static
+  linking, HTTP `/status`, SIGTERM shutdown, SMACK exec/process labels,
+  idempotent reinstall and data-preserving restore; the sample daemon is
+  started directly because the research boot has no systemd (unit install
+  is checked, systemd start is not exercised)
 
 VM-validated (compat kernel):
 

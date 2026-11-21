@@ -21,7 +21,8 @@
 3. Expose both as independent switches in a new Tweaks home-screen app.
 4. Follow the vehicle's existing blue-light filter setting and Hyundai gamma
    table.
-5. Auto-accept the boot safety disclaimer after a configurable 1–10 seconds;
+5. Auto-accept the boot safety disclaimer after a configurable 0–10 seconds
+   in 0.25 s steps;
    any touch cancels it for that boot.
 6. Keep the vehicle DST flag in sync with a selected IANA timezone using
    bundled, freshly compiled tzdata.
@@ -98,9 +99,22 @@ Brightness is kept at `128:128:128`.
   (2=on, 1=off), level bit 12 / 4 bits (1–9), sent with the vendor's own
   `SetCANFixedMicomRecv` call (system bus, `com.lge.car.micom`, `/Can`,
   `com.lge.car.micom.can`).
-- While the cluster fix is on and night mode is effective, the daemon asserts
-  the vehicle's level; deep-red night mode asserts level 9. Disabling the
-  override restores the vehicle's status and level.
+- The official filter state is read through PCL as the `TimeManager` app;
+  other app names (including `AppSetup`) initialize but their key reads return
+  `-6` on 260128. In **Auto** mode
+  (`APP_SETTING_DISP_BLUE_LIGHT_LAST_SETTING_MODE=0`) the daemon evaluates the
+  configured `START_TIME`/`END_TIME` in local time, including overnight
+  windows; in **Manual** mode (`1`) it follows the on/off status. The
+  effective result is `filter_active`.
+- While the filter is active, deep red applies even without projection. The
+  cluster tint is **binary** (status bit 26 on/off); level bit 12/4 is sent for
+  protocol parity but has no dash effect. Disabling the filter restores the
+  vendor state. An Auto window is authoritative: outside it, projection does
+  not force night mode/deep red. A zero-length window (`start == end`) or
+  missing/malformed schedule is invalid and falls back to the on/off state.
+- `status.json` exposes `blf_mode` (`0` auto, `1` manual, `-1` unknown),
+  `blf_start`/`blf_end` (minutes since midnight), `blf_in_window`,
+  `blf_schedule_off`, and the effective `filter_active`.
 - The send goes through the Battery-provided micom helper
   (`can_service`, default `/rw_data/battery/bin/micom-send`; installer
   falls back to a local `/rw_data/tweaks/bin/micom-send`). The vendor micom
@@ -161,7 +175,8 @@ Brightness is kept at `128:128:128`.
   `Screen_AppStandbyClock_Confirm*.qml` screens.
 - `main.qml` holds per-boot `disclaimerAutoCancelled`/`disclaimerAutoDone`
   state and a pass-through touch guard.
-- The confirm screen starts a 1–10 second timer from
+- The confirm screen starts a 0–10 second timer (0.25 s steps, 0 = immediate)
+  from
   `/rw_data/tweaks/disclaimer_auto` and
   `/rw_data/tweaks/disclaimer_timeout_ms`.
 - On timeout it confirms the last-used driver, except when the vehicle is

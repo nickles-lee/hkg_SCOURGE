@@ -71,7 +71,7 @@ def parse_ver(text: str) -> dict:
     fields = lines[0].split('|')
     if len(fields) != VER_HEADER_FIELDS or fields[0] != '+':
         problems.append('package map header must be +|package-id|version|'
-                        'region|product|number|flag')
+                        'brand|product|number|flag')
     else:
         try:
             package_id = int(fields[1])
@@ -84,9 +84,9 @@ def parse_ver(text: str) -> dict:
             except ValueError:
                 problems.append(f'package map header {label} is not an integer: {value}')
         header = {'package_id': package_id, 'version': fields[2],
-                  'region': fields[3], 'product': fields[4]}
-        if not all(header[key] for key in ('version', 'region', 'product')):
-            problems.append('package map header has an empty version/region/product')
+                  'brand': fields[3], 'product': fields[4]}
+        if not all(header[key] for key in ('version', 'brand', 'product')):
+            problems.append('package map header has an empty version/brand/product')
     product = str(header.get('product') or '')
     seen: set[tuple[str, str]] = set()
     for lineno, line in enumerate(lines[1:], 2):
@@ -127,7 +127,7 @@ def parse_ver(text: str) -> dict:
         relative = (f'{rel}/{filename}' if rel else filename) \
             if rel is not None else None
         entries.append({'line': lineno, 'path': path, 'filename': filename,
-                        'relative': relative,
+                        'relative': relative, 'crc': check,
                         'declared_size': declared, 'id': ident, 'flag': flag})
     if not entries:
         problems.append('package map has no entries')

@@ -174,6 +174,14 @@ def main():
         assert st["ok"] is True and "battery test log marker" in st["log"], st
         st = http("/logs?source=install")
         assert st["ok"] is True and "install test marker" in st["log"], st
+        # daemon.log is capped at 1 MiB on the 1 s tick: the unit redirects
+        # stderr into it, so unbounded growth is what filled /rw_data.
+        with open("/tmp/daemon.log", "wb") as f:
+            f.write(b"x" * (1536 * 1024))
+        deadline = time.time() + 6
+        while time.time() < deadline and os.path.getsize("/tmp/daemon.log") > 1024 * 1024:
+            time.sleep(0.2)
+        assert os.path.getsize("/tmp/daemon.log") <= 1024 * 1024
         r = http("/logs/dump", "POST")
         assert r.get("ok") is True, r
         st = None

@@ -36,6 +36,7 @@ test: payload
 	sh tests/test_installer.sh hello_battery
 	sh tests/test_installer.sh battery_tile
 	sh tests/test_installer.sh hello_battery_tile
+	sh tests/test_installer.sh retention
 
 clean:
 	$(MAKE) -C src clean

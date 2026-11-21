@@ -56,10 +56,27 @@ This is likely readily adaptable to other cars & environments, but I am noting t
 | TOCTOU delivery + stage-1 root firmware (sideloading, failsafe) | Validated on the target car |
 | Updater signature-check bypass baked into the firmware (unsigned normal-USB update) | Validated on the target car (2026-11-15); see `docs/17-usb-update-confirmed.md` |
 | Battery / WiFi+SSH / Tweaks (incl. Reboot) app packages | Work-in-progress; the WiFi package is VM-validated on the vendor kernel/Qt (on-car retest pending). Reboot's clean path and daemon endpoint are host/QML-tested; the micom hard-reset fallback is host-tested with a fake D-Bus helper and derived from the vendor script (car pending) |
+| Rust apps/daemons (host-built static musl) | WIP — host build/package path offline-validated; sample `scourge-statusd` VM-validated on the vendor kernel; car pending. No Rust toolchain or runtime is installed on the unit; see `docs/19-rust-apps.md` |
 | Tweaks: safety-disclaimer auto-accept | Working reliably |
-| Anything beyond the exact firmware above (`NE_E.EUR.S5W_L.001.001.260128`, EU) | Untested — see the porting runbook before trying |
+| Kia EV6 MY22–24 (EU, Gen5W_L), `CV_E.EUR.S5W_L.001.001.260128` | Fixture captured; payload byte-identical to the Ioniq 5 260128 package. Target wiring/build is WIP — not car-validated (docs/20) |
+| Any other firmware, region or vehicle | Untested — see the porting runbook before trying |
 
 No claims are made about other vehicles or platforms (including S5W_M/Android units, which are a fundamentally different architecture, or models whose update schemes are known to differ).
+
+### Firmware package warnings
+
+`scripts/01_stage_inputs.sh` audits the downloaded package before any build.
+HMG's update server sometimes republishes the same firmware with a new
+package-id counter in the `.ver` header; every row is identical, but the
+file's size/hash changes. That is a **warning** (`ver.sha ... but header
+identity and rows verify`), not a stop — a package-map variant, not a bad
+download. A **row** that disagrees with its file or a lock pin is an error,
+and the audit names the stale pin. Do not re-download or edit the package to
+silence it. Inspect by hand with:
+
+```sh
+scripts/01b_audit_inputs.py --layout package --root /path/to/IONIQ5_EU
+```
 
 ## Quick Installation Guidance
 
@@ -110,7 +127,7 @@ If a markdown file in this repo is handwritten, I will highlight that. The READM
 
 | Path | What |
 |---|---|
-| `docs/01–17` | The runbooks: TOCTOU explainer, firmware format, stage-1 build, Pi rig, car install, failsafe/packages, post-root updates (confirmed), porting, Ghidra re-derivation, troubleshooting, safety/legal, upstream references, VM lab (WIP), the micom command surface, the micom MCU images, and the unsigned normal-USB update confirmation |
+| `docs/01–19` | The runbooks: TOCTOU explainer, firmware format, stage-1 build, Pi rig, car install, failsafe/packages, post-root updates (confirmed), porting, Ghidra re-derivation, troubleshooting, safety/legal, upstream references, VM lab (WIP), MICOM research, unsigned normal-USB update confirmation, a tentative writable-data reference, and host-built Rust apps/daemons (WIP) |
 | `docs/ui/` | The Gen5W UI/UX research: styleguide, deployment modes (A–L), UX behavior patterns, design tokens, component library, glossary, and 15 evidence reports |
 | `scripts/` | The build pipeline (fetch → stage → decrypt → patch → repack → verify → package → image → preflight → Pi deploy) |
 | `payload/` | What gets baked into the rootfs: the failsafe, the eleven-stub patch tables, the sample run_stuff.sh |

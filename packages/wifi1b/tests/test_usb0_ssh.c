@@ -61,6 +61,18 @@ static int write_marker(const char *path)
     return write_bytes(path, "");
 }
 
+static void self_comm(char *out, size_t n)
+{
+    out[0] = 0;
+    FILE *f = fopen("/proc/self/comm", "r");
+    if (!f) return;
+    if (fgets(out, (int)n, f)) {
+        char *nl = strchr(out, '\n');
+        if (nl) *nl = 0;
+    }
+    fclose(f);
+}
+
 static bool file_text_is(const char *path, const char *text)
 {
     char buf[4096];
@@ -799,6 +811,82 @@ static int test_full_owner_records(void)
     return 0;
 }
 
+/* Regression: a foreign wlan0 reservation must not block the usb0 SSH worker.
+ * Dropbear and the USB firewall rule do not touch wlan0. */
+static int test_ssh_worker_ignores_foreign_radio_owner(void)
+{
+    config_defaults();
+    g_cfg.mode = MODE_CLIENT;
+    g_cfg.wlan_on = true;
+    g_cfg.ssh_enabled = true;
+    g_cfg.ssh_port = 2224;
+    test_command = fixture_command;
+    live_reset();
+    ssh_stop();
+    if (owned_dropbear_pid() > 0) return 1;
+    if (write_marker(WIFI1B_USB0_SYSFS) != 0) return 2;
+
+    g_work_kind = WORK_MODE;
+    g_pending_kind = WORK_MODE;
+    g_work_pending = false;
+    g_apply_pid = 0;
+    g_pairing_stop_requested = false;
+    char comm[32] = {0};
+    self_comm(comm, sizeof(comm));
+    char owner[96];
+    snprintf(owner, sizeof(owner), "%s:%d", comm, (int)getpid());
+    if (write_bytes(RADIO_OWNER_PATH, owner) != 0) return 3;
+    request_work(WORK_SSH, false);
+    for (int i = 0; i < 60 && owned_dropbear_pid() <= 0; i++) usleep(50000);
+    if (owned_dropbear_pid() <= 0) return 4;
+    if (g_apply_pid > 0) {
+        waitpid(g_apply_pid, NULL, 0);
+        g_apply_pid = 0;
+    }
+    ssh_stop();
+    unlink(RADIO_OWNER_PATH);
+    unlink(WIFI1B_USB0_SYSFS);
+    return 0;
+}
+
+/* Regression for the field failure: in WiFi client mode with the association
+ * down, the WiFi health branches return early.  The USB-SSH ensure must run
+ * before them so the Pi management link is restored without waiting for WiFi. */
+static int test_watchdog_usb_before_wifi_early_return(void)
+{
+    config_defaults();
+    g_cfg.mode = MODE_CLIENT;
+    g_cfg.wlan_on = true;
+    g_cfg.ssh_enabled = true;
+    g_cfg.ssh_port = 2224;
+    test_command = fixture_command;
+    live_reset();
+    ssh_stop();
+    if (ssh_running()) return 1;
+    if (write_marker(WIFI1B_USB0_SYSFS) != 0) return 2;
+    if (!usb0_present()) return 3;
+
+    g_work_kind = WORK_MODE;
+    g_pending_kind = WORK_MODE;
+    g_work_pending = false;
+    g_apply_pid = 0;
+    g_network_failed = false;
+    g_boot_dumped = true;
+    g_last_watchdog_ms = now_ms() - 60000;
+    watchdog();
+    /* request_work() dispatches immediately, so the proof is the selected
+     * work kind and the forked worker, not a still-pending flag. */
+    if (g_work_kind != WORK_SSH || g_apply_pid <= 0) return 4;
+    if (g_pending_pair) return 5;
+    if (waitpid(g_apply_pid, NULL, 0) != g_apply_pid) return 6;
+    g_apply_pid = 0;
+    g_work_kind = WORK_MODE;
+    g_pending_kind = WORK_MODE;
+    g_work_pending = false;
+    unlink(WIFI1B_USB0_SYSFS);
+    return 0;
+}
+
 int main(void)
 {
     int rc;
@@ -831,6 +919,8 @@ int main(void)
     if ((rc = test_credential_parent_refusal()) != 0) return rc;
     if ((rc = test_incomplete_readbacks()) != 0) return rc;
     if ((rc = test_full_owner_records()) != 0) return rc;
+    if ((rc = test_watchdog_usb_before_wifi_early_return()) != 0) return 300 + rc;
+    if ((rc = test_ssh_worker_ignores_foreign_radio_owner()) != 0) return 320 + rc;
 
     /* Leave a known exact file set and no live state for the Python harness. */
     remove_usb0_files();

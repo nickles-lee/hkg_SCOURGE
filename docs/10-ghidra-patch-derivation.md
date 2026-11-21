@@ -96,10 +96,11 @@ enforces the new gates mechanically. Bench-test before any car session.
 ## Data patches (no Ghidra needed)
 
 - **Boot message:** parse the new firmware's
-  `AppStandbyClock/localization/{ts,qm}/translation_en-*` for the
-  `SAFETY_OBEY` keys; the message must fit the shortest translation
-  (206 chars on 260128); the patch is length-preserving UTF-16BE with
-  U+0020 padding.
+  `AppStandbyClock/localization/{ts,qm}/translation_*` for the
+  `SAFETY_OBEY` keys; add every locale to `config/messages.json`. The
+  patcher locates each entry by the Qt key hash and the message must fit
+  that locale's stock slot (the tightest on 260128 is `zh-cmn`, 64 UTF-16
+  units); the patch is length-preserving UTF-16BE with U+0020 padding.
 - **`.ver` rows:** find rows by `mango-rootfs.tar.gz` / `AppUpgrade`
   filename; recompute CRCs with `tools/patch_ver*.py`.
 - **QML bases:** register the new stock QML hashes in the package

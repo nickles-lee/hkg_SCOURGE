@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=SCOURGE sample Rust status daemon
+After=network.target
+ConditionPathExists=/rw_data/apps/scourge-statusd/bin/scourge-statusd
+
+[Service]
+Type=simple
+ExecStart=/rw_data/apps/scourge-statusd/bin/scourge-statusd --listen 127.0.0.1:18088 --status /rw_data/apps/scourge-statusd/status.json
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

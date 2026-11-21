@@ -64,6 +64,16 @@ Copy the contents to the root of a FAT/exFAT stick, plug it in, read
 `run_stuff_result.txt`. Restore: `MODE=restore` (combo) or rename
 `run_stuff_restore.sh` over `run_stuff.sh` (single package).
 
+Installers keep a bounded backup history: `backup/latest` is the restore
+point, and the two newest timestamped snapshots are kept next to it — older
+ones are pruned at the start of the next install (`prune:` line in the
+install log). A stick left in the car re-runs on every power-on (the
+loader's md5 gate lives in `/run`), so this bound is what keeps `/rw_data`
+from filling up. The Wi-Fi daemons likewise cap `daemon.log` and
+`wpa_supplicant.log` at 1 MiB each. Retention and the log caps are
+offline-validated (installer sandbox for retention; daemon smoke tests);
+car validation is pending.
+
 ## Validating without the car
 
 Three cheap gates catch most package regressions before a stick reaches the
@@ -97,6 +107,16 @@ binary built on a modern host dies on-car. Policy:
 | `dropbearmulti` | **static musl** (pinned Alpine container or musl-gcc; `packages/wifi/scripts/build_dropbear.sh`) | `file` must report statically linked; sha256 recorded; `--help` smoke test |
 | battery/wifi/tweaks daemons | static via host gcc (validated on the vendor kernel in the VM; no NSS-dependent calls by design) | same static gate |
 | `tweaks_persist` | **deliberately dynamic** against vendor glibc 2.25 + `libpersistence_client_library.so.7` (it must call the vendor PCL); links against the extracted vendor rootfs (`SCOURGE_ROOTFS`) | vendor-interpreter check; pinned to 260128 |
+| Rust apps/daemons | **static musl** via the pinned host toolchain and `tools/rust/scripts/package_app.sh`; the unit gets only the binary + unit, never rustc/cargo | `readelf`: no `PT_INTERP`/`DT_NEEDED`; VM `rust-app` scenario |
+
+## Rust apps/daemons (WIP)
+
+Rust is a host-build language, not a head-unit runtime. The unit receives a
+self-contained static-musl binary and a systemd unit through the normal USB
+installer; there is no Cargo or `libstd` package on the car. The sample
+`scourge-statusd` and the `rust-app` VM scenario are WIP/VM-validated on the
+vendor kernel; car validation is pending. Build/package quickstart and the
+static-vs-shared rationale: `docs/19-rust-apps.md`.
 
 ## Networking notes (WiFi package)
 

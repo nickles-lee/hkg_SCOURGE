@@ -46,7 +46,9 @@ Item {
     property string lastError: ""
 
     readonly property string daemonBase: "http://127.0.0.1:8091"
-    readonly property int disclaimerSeconds: Math.round(disclaimerTimeout / 1000)
+    function formatDisclaimerSeconds(ms) {
+        return String(Math.round(ms / 10) / 100)
+    }
 
     function applyStatus(d) {
         serviceOk = true
@@ -150,7 +152,7 @@ Item {
     }
 
     function setDisclaimerTimeout(ms) {
-        var next = Math.max(1000, Math.min(10000, Math.round(ms / 1000) * 1000))
+        var next = Math.max(0, Math.min(10000, Math.round(ms / 250) * 250))
         disclaimerTimeout = next
         post("/set?disclaimer_timeout_ms=" + next)
     }
@@ -183,7 +185,7 @@ Item {
 
     function disclaimerText() {
         if (!disclaimerAuto) return "Off"
-        return "Auto-accepts after " + disclaimerSeconds + "s \u00b7 touch cancels"
+        return "Auto-accepts after " + formatDisclaimerSeconds(disclaimerTimeout) + "s \u00b7 touch cancels"
     }
 
     function dstText() {
@@ -542,14 +544,14 @@ Item {
                     width: 48
                     height: 38
                     label: "\u2212"
-                    buttonEnabled: root.serviceOk && root.disclaimerAuto && root.disclaimerTimeout > 1000
-                    onClicked: root.setDisclaimerTimeout(root.disclaimerTimeout - 1000)
+                    buttonEnabled: root.serviceOk && root.disclaimerAuto && root.disclaimerTimeout > 0
+                    onClicked: root.setDisclaimerTimeout(root.disclaimerTimeout - 250)
                 }
 
                 QText {
                     width: 54
                     height: 38
-                    text: root.disclaimerSeconds + "s"
+                    text: root.formatDisclaimerSeconds(root.disclaimerTimeout) + "s"
                     font.pixelSize: 22
                     color: root.disclaimerAuto ? "#FFFFFF" : "#666666"
                     horizontalAlignment: Text.AlignHCenter
@@ -561,7 +563,7 @@ Item {
                     height: 38
                     label: "+"
                     buttonEnabled: root.serviceOk && root.disclaimerAuto && root.disclaimerTimeout < 10000
-                    onClicked: root.setDisclaimerTimeout(root.disclaimerTimeout + 1000)
+                    onClicked: root.setDisclaimerTimeout(root.disclaimerTimeout + 250)
                 }
             }
         }

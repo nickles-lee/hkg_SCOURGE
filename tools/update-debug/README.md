@@ -36,9 +36,20 @@ stick.
 
 ## Watcher
 
-The 45-minute watcher (process transitions + `/tmp/AppUpgrade` capture) is
+The 45-minute (at least) watcher (process transitions + `/tmp/AppUpgrade` capture) is
 a `nohup` process, **not** a systemd service: a head-unit reboot kills it.
 Do not reboot between starting it and the update attempt.
+
+It logs only process transitions (`+pid`/`-pid` with the command line), not a
+full `ps -ef` snapshot per change, and caps `update_watch.log` at 2 MiB
+(`UPDATE_WATCH_MAX_BYTES`, 200-byte lines via `UPDATE_WATCH_MAX_LINE`,
+32 KB kept tail via `UPDATE_WATCH_KEEP_BYTES`). The
+earlier watcher appended a full snapshot every 2 seconds and reached ~100 MB
+in one window, which filled a 1.2 GB `/rw_data`. Delete an old oversized log
+before deploying; the new watcher trims it on start. If the rootfs lacks
+`awk` or `comm`, the watcher degrades to a full snapshot per transition
+(still capped) instead of logging nothing. The bounded watcher
+is offline-tested only; car validation is pending.
 
 TARGET: Ioniq 5 Gen5W_L, firmware NE_E.EUR.S5W_L.001.001.260128 (EU).
 All embedded hashes/offsets are pinned to that firmware — see

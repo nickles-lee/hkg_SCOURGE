@@ -1442,6 +1442,30 @@ Multi-User in about 16 seconds with `micommanager` and `nua.service` still
 failing. This is **not stock boot**: the fan/micom gate is bypassed, not
 emulated, and the fstab/runtime layout is a lab fixture.
 
+## Rust app package (Mode V)
+
+Host-built Rust apps/daemons are static-musl binaries packaged with the
+generic SMACK-aware installer (`docs/19-rust-apps.md`). The unit never gets
+`rustc` or `cargo`.
+
+```sh
+bash scripts/00_fetch_rust.sh
+bash tools/rust/scripts/package_app.sh \
+    tools/rust/examples/scourge-statusd --fetch \
+    --out third_party/rust/out/scourge-statusd-usb
+cd tools/vm
+python3 -B launch.py run --scenario rust-app \
+    --payload ../../third_party/rust/out/scourge-statusd-usb \
+    --timeout 300 --memory 1024 --smp 1 --label rust-app
+```
+
+The scenario installs the package from the payload stick, checks static
+linking, starts `scourge-statusd`, verifies `GET /status` and the SMACK
+exec/process labels, sends SIGTERM, re-runs the installer (idempotent) and
+restores (data preserved). The research boot has no systemd, so the daemon
+is started directly; the unit file is installed/checked but the systemd
+start path is not exercised here.
+
 ## Troubleshooting
 
 | Symptom | Action |

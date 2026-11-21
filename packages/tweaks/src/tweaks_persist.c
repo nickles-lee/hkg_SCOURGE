@@ -32,8 +32,12 @@ extern int pclKeyWriteData(unsigned int ldbid, const char *resource_id,
                            unsigned int user_no, unsigned int seat_no,
                            unsigned char *buffer, int buffer_size);
 
-static const char *READ_APPS[] = {"AppSetup", "AppMediaPlayer", "ApplicationManager",
-                                  "AppHomeScreen", "tweaks_daemon", NULL};
+/* TimeManager is the PCL owner that can read the display/blue-light keys on
+ * 260128; the other names are fallbacks.  A successful pclInitLibrary is not
+ * enough: other apps initialize but pclKeyReadData returns -6. */
+static const char *READ_APPS[] = {"TimeManager", "AppSetup", "AppMediaPlayer",
+                                  "ApplicationManager", "AppHomeScreen",
+                                  "tweaks_daemon", NULL};
 /* Owners to try for writes, most likely first. */
 static const char *WRITE_APPS[] = {"AppSetup", "TimeManager", "ApplicationManager",
                                    "AppHomeScreen", "AppMediaPlayer",
@@ -94,50 +98,70 @@ static void write_cached_app(const char *app)
     fclose(f);
 }
 
-static int read_key(const char *key)
+static int read_key_buf(const char *key, unsigned char *buf, size_t size)
 {
-    unsigned char buf[512];
     int n;
-    memset(buf, 0, sizeof(buf));
-    n = pclKeyReadData(0, key, 0, 0, buf, (int)sizeof(buf) - 1);
-    if (n < 0) {
-        printf("%s=\n", key);
-        return -1;
-    }
-    if (n >= (int)sizeof(buf))
-        n = (int)sizeof(buf) - 1;
+    memset(buf, 0, size);
+    n = pclKeyReadData(0, key, 0, 0, buf, (int)size - 1);
+    if (n < 0)
+        return n;
+    if (n >= (int)size)
+        n = (int)size - 1;
     buf[n] = 0;
     /* Strip trailing CR/LF. */
     while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
         buf[--n] = 0;
+    return n;
+}
+
+static int read_key(const char *key)
+{
+    unsigned char buf[512];
+    int n = read_key_buf(key, buf, sizeof(buf));
+    if (n < 0) {
+        printf("%s=\n", key);
+        return -1;
+    }
     printf("%s=%s\n", key, buf);
     return 0;
 }
 
 static int do_read(void)
 {
-    int r = -1;
+    unsigned char probe[512];
+
     for (int i = 0; READ_APPS[i]; i++) {
-        r = pclInitLibrary(READ_APPS[i], 0);
-        if (r >= 0) {
-            fprintf(stderr, "pcl read app=%s\n", READ_APPS[i]);
-            break;
+        int r = pclInitLibrary(READ_APPS[i], 0);
+        if (r < 0) {
+            fprintf(stderr, "pclInitLibrary(%s) failed: %d\n", READ_APPS[i], r);
+            continue;
         }
-        fprintf(stderr, "pclInitLibrary(%s) failed: %d\n", READ_APPS[i], r);
+        int n = read_key_buf("APP_SETTING_DISP_BLUE_LIGHT_STATUS", probe,
+                             sizeof(probe));
+        /* Init success alone is not enough: the wrong app returns 0 or -6.
+         * Only a real on/off value proves this app can serve the keys. */
+        if (n <= 0 || (probe[0] != '0' && probe[0] != '1')) {
+            fprintf(stderr, "pcl read app=%s status rc=%d; trying next\n",
+                    READ_APPS[i], n);
+            pclDeinitLibrary();
+            continue;
+        }
+        fprintf(stderr, "pcl read app=%s\n", READ_APPS[i]);
+        printf("APP_SETTING_DISP_BLUE_LIGHT_STATUS=%s\n", probe);
+        read_key("APP_SETTING_DISP_BLUE_LIGHT_WARM_LEVEL");
+        read_key("APP_SETTING_DISP_BLUE_LIGHT_START_TIME");
+        read_key("APP_SETTING_DISP_BLUE_LIGHT_END_TIME");
+        read_key("APP_SETTING_DISP_BLUE_LIGHT_LAST_SETTING_MODE");
+        read_key("APP_SETTING_DISP_GAMMA_R_G_B");
+        read_key("APP_SETTING_DISP_BRIGHTNESS_R_G_B");
+        read_key("APP_SETTING_CLOCK_DAYLIGHTSAVETIME");
+        read_key("APP_SETTING_CLOCK_TIMEZONE");
+        read_key("APP_SETTING_CLOCK_GPS");
+        read_key("APP_TIMEMANAGER_GPS_OFFSET");
+        return 0;
     }
-    if (r < 0) {
-        fprintf(stderr, "pclInitLibrary failed for every candidate\n");
-        return 3;
-    }
-    read_key("APP_SETTING_DISP_BLUE_LIGHT_STATUS");
-    read_key("APP_SETTING_DISP_BLUE_LIGHT_WARM_LEVEL");
-    read_key("APP_SETTING_DISP_GAMMA_R_G_B");
-    read_key("APP_SETTING_DISP_BRIGHTNESS_R_G_B");
-    read_key("APP_SETTING_CLOCK_DAYLIGHTSAVETIME");
-    read_key("APP_SETTING_CLOCK_TIMEZONE");
-    read_key("APP_SETTING_CLOCK_GPS");
-    read_key("APP_TIMEMANAGER_GPS_OFFSET");
-    return 0;
+    fprintf(stderr, "pcl read failed for every candidate\n");
+    return 3;
 }
 
 static int do_write(const char *key, const char *value)
@@ -210,6 +234,12 @@ static int do_write(const char *key, const char *value)
     return 4;
 }
 
+#ifdef TWEAKS_PERSIST_TEST
+int persist_test_read(void)
+{
+    return do_read();
+}
+#else
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -231,3 +261,4 @@ int main(int argc, char **argv)
     fprintf(stderr, "usage: %s read|write <key> <value>\n", argv[0]);
     return 2;
 }
+#endif

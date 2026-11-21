@@ -35,6 +35,8 @@ sys.path.insert(0, os.path.join(HERE, "payload"))
 from patch_validators import (ENGINE_PATCHES, SCDM_PATCHES,  # noqa: E402
                               DMCLIENT_PATCHES, LAUNCHER_PATCHES,
                               LAUNCHER_STUB)
+from boot_message import (load_messages, qm_entry,  # noqa: E402
+                          read_qm_messages, safety_keys, ts_entry)
 
 FIRMWARE_ID = "NE_E.EUR.S5W_L.001.001.260128"
 GEN_SIZE = 879126179
@@ -48,10 +50,6 @@ NEW_FILES = [
     "./etc/systemd/system/initial-root-failsafe.service",
     "./etc/systemd/system/multi-user.target.wants/initial-root-failsafe.service",
     "./etc/smack_permissive",
-]
-QM_FILES = [
-    "./app/share/AppStandbyClock/localization/qm/translation_en-gb.qm",
-    "./app/share/AppStandbyClock/localization/qm/translation_en-au.qm",
 ]
 EXPECTED_EXTRA = {"BUILD.txt", "MANIFEST.sha256"}
 
@@ -213,11 +211,14 @@ def main():
 
     tmp = tempfile.mkdtemp(prefix="scourge_verify_")
     try:
+        messages = load_messages(os.path.join(HERE, "config/messages.json"))
+        qm_files = [qm_entry(loc) for loc in messages]
+        ts_files = [ts_entry(loc) for loc in messages]
         subprocess.run(["tar", "-xzf", plain, "-C", tmp,
                         "./app/bin/AppUpgrade", "./app/bin/AppScomoDM",
                         "./app/bin/AppDMClient", "./app/bin/AppLauncher",
                         "./etc/smack_setup.sh", "./etc/smack_permissive"]
-                       + QM_FILES,
+                       + qm_files + ts_files,
                        check=True)
         data = open(os.path.join(tmp, "app/bin/AppUpgrade"), "rb").read()
         for name, off, _expect in ENGINE_PATCHES:
@@ -236,12 +237,19 @@ def main():
             check(ldata[off:off + len(LAUNCHER_STUB)] == LAUNCHER_STUB,
                   "%s bytes at %d = %s" % (name, off,
                                            ldata[off:off + len(LAUNCHER_STUB)].hex()))
-        msg = open(os.path.join(HERE, "config/message.txt"),
-                   encoding="utf-8").read().strip("\n")
-        msg_b = msg.encode("utf-16be")
-        for qm in QM_FILES:
-            d = open(os.path.join(tmp, qm.lstrip("./")), "rb").read()
-            check(msg_b in d, "%s carries the message" % os.path.basename(qm))
+        for locale, text in sorted(messages.items()):
+            qm = qm_entry(locale).lstrip("./")
+            ts = ts_entry(locale).lstrip("./")
+            try:
+                keys = safety_keys(os.path.join(tmp, ts))
+                with open(os.path.join(tmp, qm), "rb") as f:
+                    got = read_qm_messages(f.read(), keys)
+                values = [v.rstrip(" ") for vals in got.values() for v in vals]
+                check(bool(values) and all(v == text for v in values),
+                      "%s carries the %s message" %
+                      (os.path.basename(qm), locale))
+            except ValueError as e:
+                check(False, "%s: %s" % (os.path.basename(qm), e))
 
         smack = open(os.path.join(tmp, "etc/smack_setup.sh"), encoding="utf-8").read()
         flag = open(os.path.join(tmp, "etc/smack_permissive"), encoding="utf-8").read()

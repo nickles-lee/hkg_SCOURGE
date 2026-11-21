@@ -10,14 +10,24 @@ fourth **Reboot** overlay, plus the shared daemon.
   blue-light setting off when CarPlay/Android Auto takes over.
 - **Infotainment Night Mode Fix** — applies the same Hyundai warmth to the
   CarPlay / Android Auto screen.
-- **Deep red night mode** (optional toggle, off by default) — while night
-  mode is effective, the front/projection display gets a fixed deep red
-  (`128:32:16`) via the wrandr brightness channel and the instrument cluster
-  is driven to blue-light level 9 (the vendor maximum) through the same
-  CAN 0x063F signal the stock setting uses.
+- **Deep red night mode** (optional toggle, off by default) — whenever the
+  official Blue Light Filter is active, the front/projection display gets a
+  fixed deep red (`128:32:16`) via the wrandr brightness channel and the
+  instrument cluster is asserted on through the same CAN 0x063F status signal
+  the stock setting uses. The cluster tint itself is binary (amber on/off);
+  the warmth level affects only the front display.
 
 Both follow the vehicle's existing **Setup > Display > Blue Light Filter**
 setting and use Hyundai's own gamma table. There is no new warmth slider.
+The daemon reads the official state through PCL under the `TimeManager` app
+(the only owner that can read the display keys on 260128). In **Auto** mode
+it evaluates `APP_SETTING_DISP_BLUE_LIGHT_START_TIME` /
+`..._END_TIME` in local time; in **Manual** mode it follows the on/off flag.
+Deep red therefore applies without CarPlay when the filter is active, and
+turns off outside the configured schedule (projection does not override an
+explicit Auto window). A zero-length window (`start == end`) is treated as
+invalid and falls back to the on/off state. A missing/empty schedule reports
+`blf_mode=-1` and also falls back to the on/off state.
 The daemon must run on the SMACK floor label `_` (the installer stamps it
 that way); `Privileged` has no rule for the system bus or micom service, which
 silently blocks every cluster CAN write while the front display still works.
@@ -25,7 +35,8 @@ silently blocks every cluster CAN write while the front display still works.
 **Startup, time and updates:**
 
 - **Safety disclaimer auto-accept** — accepts the boot disclaimer after a
-  selectable 1–10 second delay. Any touch before the timeout cancels it for
+  selectable 0–10 second delay in 0.25 s steps. Any touch before the timeout
+  cancels it for
   that boot. It confirms the last-used driver.
 - **Automatic DST** — flips `APP_SETTING_CLOCK_DAYLIGHTSAVETIME` from a
   selectable IANA timezone. The build downloads the latest IANA tzdata and
@@ -71,8 +82,16 @@ vendor tints the front display through
 
 The app keeps the cluster asserted through the same micom CAN signals the
 vendor uses, and applies the same Hyundai warmth to the front display while
-projection is foreground. Deep red night mode asserts the vendor maximum
-cluster level (9) and a deep-red front brightness.
+projection is foreground. Deep red night mode applies a deep-red front
+brightness and asserts the cluster status on whenever the official filter is
+active — schedule (Auto) or on/off (Manual) — not only during projection.
+
+The cluster's tint is binary: CAN 0x063F status bit 26 (`2` = on, `1` = off).
+The level field (bit 12/4) is sent for protocol parity but does not change
+the dash tint; the front display is where the deep-red/level effect lives.
+`status.json` exposes `blf_mode` (`0` auto, `1` manual, `-1` unknown),
+`blf_start`/`blf_end` (minutes since midnight), `blf_in_window`,
+`blf_schedule_off`, and the effective `filter_active`.
 
 The micom service only accepts CAN sends from a process whose executable
 basename is whitelisted (`AppHomeScreen`, `TmsRemoteApp`,
@@ -306,11 +325,12 @@ SMACK label gates.
   rejected the brightness write. Use `Identify front` to confirm the output,
   or change `main_crtc` in the config (defaults to the vendor front CRTC 1;
   old 0-based configs are migrated on the next install).
-- **Deep red shows no cluster change** — it asserts CAN level 9 whenever the
-  cluster fix is on and night mode is effective (filter on, or projection
-  active). `blu_status_sent`/`blu_level_sent` mean the frame was **queued to
-  the helper**, not that the micom acknowledged it (the factory senders use
-  no-reply, so the helper exits 0 by design). Check `can_source` first, then
+- **Deep red shows no cluster change** — the cluster tint is **binary**
+  (status bit 26 on/off), so deep red does not change the dash beyond making
+  sure the tint is on. Check `filter_active`, `blf_mode`, `blf_in_window`,
+  `blu_status_sent`/`blu_forced`, and the `micom BLU` lines in `failures.log`.
+  `blu_status_sent`/`blu_level_sent` mean the frame was **queued to the
+  helper**, not that the micom acknowledged it. Check `can_source` first, then
   the `micom BLU` lines in `failures.log`.
 - **`status.json` says `"can_source":"dbus"`** — the micom-send helper is
   missing, not executable, or is an old raw-only Battery wrapper without the

@@ -76,7 +76,7 @@ wrapper=${wrapper_note}
 wrapper_sha256=$(sha256sum "$out/AppUpgrade" | cut -d' ' -f1)
 ver_size=$(stat -c%s "$out/$VER_FILE")
 ver_sha256=$(sha256sum "$out/$VER_FILE" | cut -d' ' -f1)
-message_sha256=$(sha256sum "$SCOURGE_ROOT/config/message.txt" | cut -d' ' -f1)
+messages_sha256=$(sha256sum "$SCOURGE_ROOT/config/messages.json" | cut -d' ' -f1)
 note=normal USB install; eleven stubs + SMACK permissive flag baked into the rootfs; .lge.upgrade.xml is stock
 EOF
 

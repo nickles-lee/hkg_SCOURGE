@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=SCOURGE Rust daemon (my-daemon)
+After=network.target
+ConditionPathExists=/rw_data/apps/my-daemon/bin/my-daemon
+
+[Service]
+Type=simple
+ExecStart=/rw_data/apps/my-daemon/bin/my-daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

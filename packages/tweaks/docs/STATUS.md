@@ -1,6 +1,6 @@
 # Status — Tweaks app build
 
-**Date:** 2026-11-14
+**Date:** 2026-11-17
 **Target:** Ioniq 5 Gen5W, `NE_E.EUR.S5W_L.001.001.260128`
 
 ## Done
@@ -10,7 +10,8 @@
   - vendor persistence read through `tweaks_persist`
   - Hyundai gamma table
   - cluster and infotainment fixes
-  - deep red night mode toggle (front 128:32:16, cluster CAN level 9)
+  - deep red night mode toggle (front 128:32:16; cluster status on —
+    the dash tint is binary, level 9 is protocol parity)
   - daemon/persist run on the SMACK floor label `_` (micom/system-bus access);
     live label exposed in /status and /health
   - cluster CAN sends go through the Battery micom helper
@@ -22,6 +23,17 @@
   - `/reboot`: `systemctl reboot --no-block`, then `sync()` + micom
     `SetETCCPUWDTReset array:byte:0x00` if the daemon is still alive after
     20 s; update/process guard and CSRF header
+  - BLF state is read through PCL under `TimeManager` (other app names return
+    `-6`); Auto mode evaluates the configured start/end window, Manual mode
+    follows the on/off status. An Auto window is authoritative, including
+    during projection. Deep red applies whenever BLF is active, with or
+    without projection. Live car values: `STATUS=1`, `WARM_LEVEL=5`,
+    `START_TIME=420`, `END_TIME=1080`, `LAST_SETTING_MODE=0` (auto).
+    `status.json` exposes `blf_mode`, `blf_start`, `blf_end`,
+    `blf_in_window`, `blf_schedule_off`, and the effective `filter_active`.
+  - Car-verified: `wrandr --crtc=1` is the front/infotainment, not the
+    cluster; the cluster tint is binary CAN 0x063F status 26/2 (on/off) and
+    ignores level 0–15. The micom helper path (`can_source=service`) is live.
   - `dbus-monitor` projection detection with manual override
   - session-bus Home/Star counter (`home_seq`) for the Reboot overlay
 - `wrandr` wrapper:
@@ -50,7 +62,7 @@
   - QML parse check with the vendor Qt 5.4 `qmllint`
 - Safety disclaimer auto-accept:
   - AppStandbyClock `main.qml` + both confirm screens patched
-  - on/off and 1–10 s timeout exposed in Tweaks
+  - on/off and 0–10 s timeout (0.25 s steps) exposed in Tweaks
   - any touch cancels for the boot; last-used driver confirmed
 - Auto-DST:
   - latest IANA tzdata downloaded/compiled at build time
@@ -68,15 +80,17 @@
 
 ## Needs the car
 
-- Confirm `wrandr --crtc=1` is the cluster.
+- Confirm the Auto window boundary on the car: at `END_TIME` the front red and
+  cluster force release, and at `START_TIME` they return. Unit tests cover
+  in-window/out-of-window/manual and projection outside the window; the
+  real-time boundary transition is still car-pending.
 - Confirm `wrandr --crtc=0` covers the main display / CarPlay surface.
-- Confirm `tweaks_persist read` returns the blue-light keys on the car.
 - Confirm `dbus-monitor` sees `carplay_play_enable_status`,
   `android_auto_play_enable_status`, and `front_drawing_application`.
-- Confirm the micom whitelist path on the car: `status.json` must show
-  `"can_source":"service"` and the cluster must change; a `dbus` source means
-  the helper is missing and the vendor micom will drop the frame.
-- Visual check that the cluster and projection tints match.
+- Confirm the new disclaimer delay UI on the car: 0 s is immediate, 0.25 s
+  steps apply, and a touch still cancels.
+- Visual check that the front deep red and the cluster's binary amber match
+  the expected states.
 - Reboot persistence and restore check.
 - Confirm disclaimer auto-accept after reboot and touch-cancel behaviour.
 - Confirm the selected DST zone changes the vehicle DST switch correctly,

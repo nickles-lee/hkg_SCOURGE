@@ -49,16 +49,27 @@ workable paths.
 One line per file (header line first):
 
 ```
-NE_E.EUR.S5W_L.001.001.260128
++|21393|NE_E.EUR.S5W_L.001.001.260128|HM|IONIQ5_EU|1489|1
 IONIQ5_EU\HU\images|mango-rootfs.tar.gz|341174|<crc32-signed>|879126179|1
 IONIQ5_EU|AppUpgrade|341142|<crc32-signed>|10803676|1
 ```
 
+- Header fields: `+|package-id|version|brand|product|number|flag`.
+  `brand` is `HM` (Hyundai), `KM` (Kia) or `GN` (Genesis); `product` is the
+  package product (`IONIQ5_EU`, `EV6_MY_22_EU`, …). The numeric
+  `package-id` is an HMG server counter, **not** a firmware identity: it
+  changes between official repacks while every row stays identical.
 - `crc32` is the signed 32-bit zlib CRC of the file.
 - Row IDs used by SCOURGE: **341174** (rootfs), **341142** (wrapper).
 - `tools/patch_ver.py` patches the rootfs row; `tools/patch_ver_row_id.py`
-  patches any row by ID. The `.ver` is padded with newlines to the stock
-  2,467 B because the engine reads a fixed-size record area.
+  patches any row by ID. The `.ver` is padded with newlines to at least the
+  stock 2,467 B because the engine reads a fixed-size record area.
+- **Do not use the `.ver` file hash as the identity check.** HMG's server
+  serves the same rows under a different `package-id` counter (and therefore
+  a different file size/hash) after a repack. `scripts/01b_audit_inputs.py`
+  verifies the header identity and the consumed rows' CRC32/size, and reports a
+  server-repack revision as a warning. A *row* that disagrees with its file,
+  or with a locks pin, is an error.
 
 ## `.lge.upgrade.xml`
 

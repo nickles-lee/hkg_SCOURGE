@@ -254,32 +254,136 @@ stage_watcher(){
     WLOG="$WDIR/update_watch.log"
     WPID="$WDIR/update_watch.pid"
 
+    # Stop a live watcher before replacing its script: a running instance
+    # keeps the old file open and would keep logging on top of the replacement.
+    _stop_failed=0
+    if [ -f "$WPID" ]; then
+        _oldpid=$(cat "$WPID" 2>/dev/null)
+        if [ -n "$_oldpid" ] && [ -r "/proc/$_oldpid/cmdline" ] && \
+           grep -q 'update_watcher' "/proc/$_oldpid/cmdline" 2>/dev/null; then
+            : > "$WDIR/update_watch.stop"
+            _wn=0
+            while [ "$_wn" -lt 5 ] && kill -0 "$_oldpid" 2>/dev/null; do
+                sleep 1
+                _wn=$((_wn + 1))
+            done
+            if kill -0 "$_oldpid" 2>/dev/null; then
+                kill -TERM "$_oldpid" 2>/dev/null
+                sleep 1
+            fi
+            if kill -0 "$_oldpid" 2>/dev/null; then
+                log "watcher: previous instance survived stop/TERM (pid $_oldpid); leaving it in place"
+                _stop_failed=1
+            else
+                log "watcher: stopped previous instance (pid $_oldpid)"
+                rm -f "$WPID" 2>/dev/null
+            fi
+        else
+            # A recycled pid after a reboot is not evidence of a running
+            # watcher: drop the stale file even when an unrelated live process
+            # now owns that pid, or every later run would refuse to start.
+            rm -f "$WPID" 2>/dev/null
+        fi
+    fi
+    rm -f "$WDIR/update_watch.stop" 2>/dev/null
+    [ "$_stop_failed" = 1 ] && return 1
+
     cat > "$WSH" <<'EOF'
 #!/bin/sh
 # update_watcher.sh — installed by both_copies_v1.
 # Logs ps transitions and captures every distinct /tmp/AppUpgrade next to
 # this script (normally /rw_data) during an update attempt.
-# Self-terminates after 45 minutes or when <dir>/update_watch.stop appears.
+# Self-terminates after at least 45 minutes or when <dir>/update_watch.stop appears.
 WBASE=$(dirname "$0")
 LOG="$WBASE/update_watch.log"
 PIDF="$WBASE/update_watch.pid"
 STOP="$WBASE/update_watch.stop"
-[ -f "$PIDF" ] && kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null && exit 0
+MAXLOG=${UPDATE_WATCH_MAX_BYTES:-2097152}
+MAXLINE=${UPDATE_WATCH_MAX_LINE:-200}
+KEEPBYTES=${UPDATE_WATCH_KEEP_BYTES:-32768}
+TMPD=${TMPDIR:-/tmp}
+PREV="$TMPD/.update_watch.prev.$$"
+CUR="$TMPD/.update_watch.cur.$$"
+
+# A pid recycled after a power cycle must not block a fresh watcher.
+if [ -f "$PIDF" ]; then
+    oldpid=$(cat "$PIDF" 2>/dev/null)
+    if [ -n "$oldpid" ] && [ -r "/proc/$oldpid/cmdline" ] && \
+       grep -q 'update_watcher' "/proc/$oldpid/cmdline" 2>/dev/null; then
+        exit 0
+    fi
+    rm -f "$PIDF" 2>/dev/null
+fi
 echo $$ > "$PIDF" 2>/dev/null
-NOW=$(date +%s 2>/dev/null || echo 0)
-END=$(( NOW + 2700 ))
-prev=""
+trap '[ "$(cat "$PIDF" 2>/dev/null)" = "$$" ] && rm -f "$PIDF" 2>/dev/null
+      rm -f "$PREV" "$CUR" 2>/dev/null' EXIT
+trap 'exit 0' INT TERM HUP
+
+# Optional helpers: fall back to a plain snapshot / full record rather than
+# silently logging nothing when an applet is missing from the vendor rootfs.
+HAVE_AWK=1
+command -v awk >/dev/null 2>&1 || HAVE_AWK=0
+HAVE_COMM=1
+command -v comm >/dev/null 2>&1 || HAVE_COMM=0
+
+# The watcher's own pipeline (ps/awk/cut/sort) and the kernel threads change
+# on every sample, and logging them would reproduce the old spam at a smaller
+# scale.  Keep the header; drop kthreadd's children (PPID 2) and our own
+# helper commands (a pipeline element forks, so PPID alone is not enough),
+# then bound each line.
+snap() {
+    if [ "$HAVE_AWK" = 1 ]; then
+        ps -ef 2>/dev/null | awk -v me="$$" 'NR == 1 || ($3 != me && $3 != 2 &&
+            $0 !~ /update_watcher/ && $8 !~ /^(ps|awk|cut|sort|comm)$/) {
+            printf "%s %s %s %s\n", $1, $2, $3, substr($0, index($0, $8))
+        }'
+    else
+        ps -ef 2>/dev/null
+    fi | cut -c1-"$MAXLINE" | sort
+}
+
+# Hard cap.  The previous version appended a full `ps -ef` (about 50 KB on
+# this head unit) on every 2-second transition and reached ~100 MB in one
+# window; trimming to the tail keeps the file near MAXLOG.
+trim_log() {
+    [ -f "$LOG" ] || return 0
+    sz=$(wc -c < "$LOG" 2>/dev/null || echo 0)
+    [ "${sz:-0}" -gt "$MAXLOG" ] || return 0
+    tail -c "$KEEPBYTES" "$LOG" > "$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG"
+    echo "=== log trimmed (kept last $KEEPBYTES of $sz bytes) $(date -u 2>/dev/null) ===" >> "$LOG"
+}
+
+trim_log
+echo "=== watcher start $(date -u 2>/dev/null) pid $$ base=$WBASE cap=${MAXLOG}B ===" >> "$LOG"
+snap > "$PREV" 2>/dev/null
 lastcap=""
-echo "=== watcher start $(date -u 2>/dev/null) pid $$ base=$WBASE ===" >> "$LOG"
-while [ "$(date +%s 2>/dev/null || echo 9999999999)" -lt "$END" ]; do
+i=0
+# 1350 cycles of at least 2 s, so at least 45 minutes.  A cycle count does
+# not trust the wall clock: a unit whose RTC reads 1970 made the old END
+# comparison unreliable.
+while [ "$i" -lt 1350 ]; do
+    i=$((i + 1))
     [ -f "$STOP" ] && break
-    cur=$(ps -ef 2>/dev/null | md5sum 2>/dev/null | cut -d' ' -f1)
-    if [ -n "$cur" ] && [ "$cur" != "$prev" ]; then
+    snap > "$CUR" 2>/dev/null
+    if ! cmp -s "$PREV" "$CUR"; then
+        trim_log
+        added=""
+        removed=""
+        if [ "$HAVE_COMM" = 1 ]; then
+            added=$(comm -13 "$PREV" "$CUR" 2>/dev/null)
+            removed=$(comm -23 "$PREV" "$CUR" 2>/dev/null)
+        fi
         {
-            echo "--- $(date -u 2>/dev/null) ps md5=$cur ---"
-            ps -ef 2>/dev/null
+            if [ -n "$added" ] || [ -n "$removed" ]; then
+                echo "--- $(date -u 2>/dev/null) +$(printf '%s\n' "$added" | grep -c .) -$(printf '%s\n' "$removed" | grep -c .) ---"
+                [ -n "$added" ] && printf '%s\n' "$added" | sed 's/^/+ /'
+                [ -n "$removed" ] && printf '%s\n' "$removed" | sed 's/^/- /'
+            else
+                echo "--- $(date -u 2>/dev/null) full snapshot (no diff tool) ---"
+                cat "$CUR"
+            fi
         } >> "$LOG"
-        prev="$cur"
+        mv -f "$CUR" "$PREV"
     fi
     if [ -f /tmp/AppUpgrade ]; then
         m=$(md5sum /tmp/AppUpgrade 2>/dev/null | cut -d' ' -f1)
@@ -293,15 +397,13 @@ while [ "$(date +%s 2>/dev/null || echo 9999999999)" -lt "$END" ]; do
     sleep 2
 done
 echo "=== watcher end $(date -u 2>/dev/null) ===" >> "$LOG"
-rm -f "$PIDF" 2>/dev/null
 EOF
     chmod 0755 "$WSH" 2>/dev/null
 
     if [ -f "$WPID" ] && kill -0 "$(cat "$WPID" 2>/dev/null)" 2>/dev/null; then
-        log "watcher: already running (pid $(cat "$WPID" 2>/dev/null))"
-        return 0
+        log "watcher: pid file still points at a live process (pid $(cat "$WPID" 2>/dev/null))"
+        return 1
     fi
-    rm -f "$WDIR/update_watch.stop" 2>/dev/null
     nohup /bin/sh "$WSH" >/dev/null 2>&1 &
     sleep 1
     if [ -f "$WPID" ] && kill -0 "$(cat "$WPID" 2>/dev/null)" 2>/dev/null; then

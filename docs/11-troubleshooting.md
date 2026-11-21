@@ -10,9 +10,12 @@ Ioniq 5 Gen5W_L, 260128 (EU) unless noted.
 | `integrity_valid: false` on a freshly built container | Inspected under the wrong basename. The TE2 IV derives from the basename — inspect/decrypt under a `mango-rootfs.tar.gz` symlink, never as `stage1.te2`. (docs/02) |
 | `over the ceiling by N bytes` | The additions must compress under 879,109,759 B. Check what you added; libdeflate L10 is already the tightest known. |
 | `unexpected AppUpgrade bytes at <off>` | The stock binary is not the 260128 build — the locks gate is working as designed. Do not patch; go to docs/09. |
-| `QTranslator failed` / `translation not found` | PyQt5 missing (optional check) vs. a wrong stock tar or an already-patched `.qm`. Rebuild from the genuine plaintext. |
-| `new message too long` | The boot message exceeds 206 chars (the shorter `.qm` key). Shorten it. |
+| `QTranslator failed` / `key not found in .qm` | PyQt5 missing (optional check) vs. a wrong stock tar or a `.qm` without the SAFETY_OBEY keys. Rebuild from the genuine plaintext. |
+| `message too long for <key>` | One locale's text no longer fits its stock `.qm` UTF-16 slot. The error names the key and the slot size; shorten that locale in `config/messages.json` (or use a shorter wording). |
 | Patch script aborts on sha256 mismatch | The ELF-hash rule. Never bypass; re-derive (docs/10) or fix the input staging (docs/03). |
+| `firmware audit: ... lock pin is stale/wrong` | A published pin disagrees with a package whose row and file agree. Fix the pin, not the download. The 2026-11 fix corrected `VER_ROOTFS_ROW_STOCK_CRC` (it held the initial-root container's CRC, `1744474344`, instead of the stock `1243982759`). Re-run `scripts/01b_audit_inputs.py`; it names the value to use. |
+| `firmware audit: ver.sha ... but header identity and rows verify` | This is an official server repack: HMG changed the `.ver` header's package-id counter (e.g. `1489` → `101489`), so the file hash/size move while every row is identical. Warning only; continue. Do not "fix" the package. |
+| `ERROR: missing input/mango-rootfs.tar.gz` after `01_stage_inputs.sh --download` | Older staging bug: `--download` wrote the package tree into `input/` without copying the four staged inputs. Current `--download` downloads into `input/package_stock/` and stages from there; re-run it. |
 | `gzip -t` fails on the decrypted plaintext | Trailing 8 bytes were stripped from the genuine stream, or a non-gzip input. Re-decrypt from the staged container. |
 | Build output does not match the known-good table | Stop. Compare inputs first (locks gates), then each intermediate (`work/` artifacts) against the docs/03 table. Do not deploy a mismatched build. |
 | `ERROR: TE2 content key not set` | Run `scripts/00_fetch_third_party.sh`, or fill `config/key.local` (see `config/key.local.example`). |
@@ -35,14 +38,22 @@ Ioniq 5 Gen5W_L, 260128 (EU) unless noted.
 | Update fails at 0% | A signature gate ran before the install. Known gates: the five engine validators (SCOMO four + FUMO, baked into stage-1) and the button gate. Collect evidence (`tools/update-debug/both_copies.sh`) instead of retrying blind. |
 | Update rejected as unrecognizable | `.lge.upgrade.xml` was modified — it must stay byte-identical to stock. |
 | HU does not mount the stick | Try bare exFAT on the whole device (no partition table) — that matches the proven TOCTOU image layout. |
-| Boot message unchanged after flash | The displayed `.qm` may be the `new_gui` partition copy (a separate, higher-risk variant, intentionally not built). The failsafe and stubs are unaffected. |
+| Boot message unchanged after flash | The displayed `.qm` may be the `new_gui` partition copy (a separate, higher-risk variant, intentionally not built). An SSH `.qm` refresh also needs a head-unit reboot before AppStandbyClock reloads the translations. The failsafe and stubs are unaffected. |
 | Watcher log stops early | The watcher is a `nohup` process: a head-unit reboot kills it. Do not reboot between starting it and the update attempt. |
+| `update_watch.log` is enormous (~100 MB) | Pre-fix watchers appended a full `ps -ef` every 2 s. Current `tools/update-debug/` deployers log transitions only and cap the file at 2 MiB; re-run the deployer to replace the installed watcher. |
 
 ## Packages
+
+For BlueLink failures with working WiFi/SSH, use the
+[BlueLink architecture and diagnostic guide](bluelink/architecture-and-diagnostics.md).
+The [2026-11 MOF cache postmortem](bluelink/postmortem-2026-11-mof-cache.md)
+documents a car-confirmed startup blocker and a reversible manual repair;
+public-internet probe failures alone do not diagnose a SIM/subscription fault.
 
 | Symptom | Cause / fix |
 |---|---|
 | `run_stuff.sh` does not run | Not at the stick root; wrong filesystem; or the loader already ran this exact content (md5 gate) — change the file to re-run. Check `/rw_data/initial_root.log`. |
+| `/rw_data` fills up (97% seen: 58 wifi + 23 wifi1b snapshots = 152 MB) | The loader's md5 gate lives in `/run` (tmpfs), so every power-on re-runs a left-in stick, and each install used to add a full ~2-3 MB transaction snapshot with no retention. Current installers prune to the restore point plus two newest snapshots (`prune:` line in the install log) before creating a new one, and cap `daemon.log`/`wpa_supplicant.log` at 1 MiB each. Navigation databases were ~650 MB on one car; usage varies, so measure rather than delete them. See the tentative [baseline and read-only report](18-rw-data-baseline.md). Retention fixes are offline-validated; car validation pending. |
 | A daemon/installer "silently" never finds the USB stick | **fstype mismatch:** the car's exFAT is Tuxera `texfat.ko` and `/proc/mounts` reports `texfat`, not `exfat`. Code matching only `vfat\|exfat\|ntfs` rejects the real mount — and the failure is silent on automatic paths. Accept `texfat` (docs/02), or match by content. Both shipped daemons were fixed for this; the package tests now assert it. |
 | A UI button/action does nothing after an install | The running UI is the old in-memory QML until the owning process restarts — the installer's restart step (AppLauncher terminate/launch) must have actually run; check the installer's `restart=` result line before debugging the QML itself. |
 | Installer aborts on a QML hash | Base detection: the car's QML is neither the stock reference nor a known install state. Register the new base (docs/09) or restore stock first. |
@@ -66,7 +77,7 @@ Ioniq 5 Gen5W_L, 260128 (EU) unless noted.
 
 | Symptom | Cause / fix |
 |---|---|
-| `PREFLIGHT: OK` but a hash differs from docs/03 | The known-good table covers the validated message/config; a deliberately changed `config/message.txt` changes the rootfs hashes by design — re-record them. |
+| `PREFLIGHT: OK` but a hash differs from docs/03 | The known-good table covers the validated message/config; a deliberately changed `config/messages.json` changes the rootfs hashes by design — re-record them and re-validate the image. |
 | `PACKAGE VERIFY: FAIL` on extra files | Only `BUILD.txt` and `MANIFEST.sha256` may be extras in a package tree. |
 | Manifest verifies locally, fails on the stick | Truncated copy — re-copy and re-verify on the stick. |
 | QML loads on the host but not on the car | Host Qt vs vendor Qt mismatch. Run the firmware's own `/usr/bin/qt5/qmllint` over every shipped QML file before deploying (docs/07, "Validating without the car"). |

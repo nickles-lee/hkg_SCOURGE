@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 from harness.update_media import (check_update_media, parse_manifest,
@@ -21,6 +22,11 @@ VM = Path(__file__).resolve().parents[1]
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def crc32(data: bytes) -> int:
+    value = zlib.crc32(data)
+    return value - (1 << 32) if value >= (1 << 31) else value
 
 
 def make_media(root: Path) -> dict[str, bytes]:
@@ -34,11 +40,12 @@ def make_media(root: Path) -> dict[str, bytes]:
     (root / 'HU/firmware/update.tar.gz').write_bytes(firmware)
     ver = (
         '+|21393|NE_E.EUR.S5W_L.001.001.260128|HM|IONIQ5_EU|1489|1\n'
-        f'IONIQ5_EU\\HU\\images|mango-rootfs.tar.gz|341142|609028602|'
-        f'{len(archive)}|1\n'
-        f'IONIQ5_EU\\HU\\firmware|update.tar.gz|341146|-196972734|'
+        f'IONIQ5_EU\\HU\\images|mango-rootfs.tar.gz|341174|'
+        f'{crc32(archive)}|{len(archive)}|1\n'
+        f'IONIQ5_EU\\HU\\firmware|update.tar.gz|341146|{crc32(firmware)}|'
         f'{len(firmware)}|1\n'
-        f'IONIQ5_EU|.lge.upgrade.xml|341147|1|{len(encrypted)}|1\n'
+        f'IONIQ5_EU|.lge.upgrade.xml|341175|{crc32(encrypted)}|'
+        f'{len(encrypted)}|1\n'
     ).encode()
     (root / 'IONIQ5_EU.ver').write_bytes(ver)
     manifest = (f'{digest(ver)}  IONIQ5_EU.ver\n'

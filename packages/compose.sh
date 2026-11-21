@@ -854,7 +854,7 @@ bind-all. This is a deliberate product default account and is NOT
 car-validated. Owner keys already present in /rw_data/wifi1b are preserved
 unless replaced here.
 
-V23 BlueLink/Pi networking:
+V24 BlueLink/Pi networking:
 - While rmnet_usb0/rmnet_usb1 has an IPv4 address, Wifi1b installs no WiFi
   default route. WiFi remains an SSH-only link; the modem default and the
   vendor per-server host routes stay authoritative.

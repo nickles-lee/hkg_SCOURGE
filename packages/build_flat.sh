@@ -84,7 +84,7 @@ cp -f "$STAGE/appcombo.tar.gz" "$STAGE/run_stuff.sh" "$OUT/"
 cat > "$OUT/README.txt" <<'EOF'
 SCOURGE AppComboFlatV24MicomStandalone — Battery, Tweaks/Reboot and Wifi1b
 =========================================================================
-Version: V24 candidate (final integration review and release gates pending)
+Version: V24 (BlueLink-safe modem routing + Orange Pi USB-SSH integration)
 See docs/wireless-carplay/V24.md in the source repository for the gate ledger.
 This bundle does NOT install the WiFi app, does NOT reinstall WiFi, and has
 NO one-way migration stage. It installs Battery, Tweaks/Reboot and Wifi1b on

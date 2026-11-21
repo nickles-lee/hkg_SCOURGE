@@ -94,28 +94,65 @@ PY
 }
 
 # --- 3. nudl (official-firmware downloader) ---------------------------------------
+# Signed release binary, pinned by size/hash in config/third_party.lock. The
+# release channel is SSH-signed; the sha256 pins are the mechanical gate the
+# build enforces (verify the signature per upstream when you update the pin).
+NUDL_VERSION="1.3.0"
+NUDL_ASSET="nudl-${NUDL_VERSION}-x86_64-unknown-linux-musl.zip"
+NUDL_URL="https://github.com/chenxiaolong/nudl/releases/download/v${NUDL_VERSION}/${NUDL_ASSET}"
+NUDL_ZIP_SHA256="66d0e1c6ab35a5ca372ed47125bbb633d9a5c995347651910b535caff94ad028"
+NUDL_BIN_SHA256="7c0c022013ef0449d5cc13b657e93983eb792e0e279ce947b2135e031498aecc"
+
 fetch_nudl() {
-    local dst="$THIRD_PARTY_DIR/nudl"
+    local dst="$THIRD_PARTY_DIR/nudl" tmp
     if [ -x "$NUDL_BIN" ]; then
-        echo "== nudl already present"
-        return 0
+        if [ "$(sha256sum "$NUDL_BIN" | cut -d' ' -f1)" = "$NUDL_BIN_SHA256" ]; then
+            echo "== nudl $NUDL_VERSION already present (pinned sha256)"
+            return 0
+        fi
+        echo "ERROR: $NUDL_BIN does not match the pinned sha256." >&2
+        echo "  Delete it and rerun this script to restore the pin." >&2
+        return 1
     fi
     if [ -n "$FROM_ARCHIVE" ] && [ -e "$FROM_ARCHIVE/nudl" ]; then
         echo "== seeding nudl from $FROM_ARCHIVE"
-        cp -a "$FROM_ARCHIVE/nudl" "$dst"
+        mkdir -p "$dst"
+        if [ -d "$FROM_ARCHIVE/nudl" ]; then
+            cp -a "$FROM_ARCHIVE/nudl/." "$dst/"
+        else
+            cp -a "$FROM_ARCHIVE/nudl" "$NUDL_BIN"
+        fi
+        chmod +x "$NUDL_BIN"
+        echo "$NUDL_BIN_SHA256  $NUDL_BIN" | sha256sum -c - || return 1
         return 0
     fi
-    if command -v cargo >/dev/null 2>&1; then
-        echo "== building nudl from source (pinned via Cargo; see third_party.lock)"
-        git clone --quiet https://github.com/chenxiaolong/nudl "$dst"
-        ( cd "$dst" && cargo build --release --quiet )
-    else
-        echo "== cargo not found; download a nudl release binary manually:"
-        echo "   https://github.com/chenxiaolong/nudl/releases"
-        echo "   (verify its SSH signature per the upstream instructions),"
-        echo "   place it at $NUDL_BIN and rerun this script."
-        return 0
+    command -v curl >/dev/null 2>&1 || {
+        echo "ERROR: curl is required to fetch the pinned nudl release." >&2
+        echo "  Download $NUDL_URL manually, verify its sha256" >&2
+        echo "  $NUDL_ZIP_SHA256, extract nudl to $NUDL_BIN, and rerun." >&2
+        return 1
+    }
+    command -v unzip >/dev/null 2>&1 || {
+        echo "ERROR: unzip is required to extract the pinned nudl release." >&2
+        return 1
+    }
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/nudl-fetch.XXXXXX")"
+    echo "== fetching nudl $NUDL_VERSION"
+    if ! curl -fsSL --retry 3 -o "$tmp/$NUDL_ASSET" "$NUDL_URL"; then
+        rm -rf "$tmp"
+        echo "ERROR: could not download $NUDL_URL" >&2
+        echo "  Offline? Seed third_party/ with --from-archive <dir>." >&2
+        return 1
     fi
+    echo "$NUDL_ZIP_SHA256  $tmp/$NUDL_ASSET" | sha256sum -c - || {
+        rm -rf "$tmp"; return 1; }
+    mkdir -p "$dst"
+    unzip -q -o "$tmp/$NUDL_ASSET" -d "$dst" || { rm -rf "$tmp"; return 1; }
+    chmod +x "$NUDL_BIN"
+    echo "$NUDL_BIN_SHA256  $NUDL_BIN" | sha256sum -c - || {
+        rm -rf "$tmp"; return 1; }
+    rm -rf "$tmp"
+    echo "== nudl $NUDL_VERSION ready at $NUDL_BIN"
 }
 
 fetch_toctou

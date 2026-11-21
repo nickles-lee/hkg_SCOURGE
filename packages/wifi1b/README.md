@@ -10,6 +10,16 @@ This integrated version is **offline-tested, not car-validated**. It is work
 in progress: do not present it as a verified fix and do not deploy it to a
 vehicle without explicit owner authorization.
 
+Field evidence (2026-11-17): the V23 car build demonstrated modem-owned default
+routing alongside WiFi client mode and SSH through the Pi/`usb0` on port 2224.
+BlueLink's remaining startup blocker was an unreadable vendor navigation cache,
+not a reason to reset provisioning or keys. See the
+[BlueLink guide](../../docs/bluelink/architecture-and-diagnostics.md) and
+[postmortem](../../docs/bluelink/postmortem-2026-11-mof-cache.md).
+This is partial feature validation, not validation of all modes or of the
+combined tree with subsequent log-retention changes. Inbound remote commands,
+explicit navigation search, and post-repair reboot persistence remain pending.
+
 - Works standalone on the canonical Battery/Tweaks/Reboot base; no WiFi app
   reinstall and no migration stage
 - Also works beside an existing WiFi app and does not modify WiFi's page,
@@ -27,16 +37,20 @@ vehicle without explicit owner authorization.
 - Daemon starts idle; importing credentials never activates anything
 - Restore puts back the original shared QML and the original
   service file/enabled/active state from the install transaction
-- V23 BlueLink-safe client routing: while `rmnet_usb0`/`rmnet_usb1` has an
+- V22+ BlueLink-safe client routing: while `rmnet_usb0`/`rmnet_usb1` has an
   IPv4 address, no WiFi default route is installed. WiFi remains an SSH-only
   link. Unverified legacy wlan0 defaults and ownership records are preserved;
   route changes fail closed rather than assuming ownership. A 30 s audit
   restores/removes the bounded proto-66 fallback as the
   modem data state changes; routes on other interfaces are never touched.
-- V23 Orange Pi USB-SSH: the ECM link is `usb0` at `10.55.0.2/24` with no
+- V22+ Orange Pi USB-SSH: the ECM link is `usb0` at `10.55.0.2/24` with no
   default route. The generated udev rule and helper follow the configured
   Wifi1b SSH port, and dropbear stays available over `usb0` when WiFi is Off.
-  ConnMan is kept off `usb0` so it cannot overwrite the static link.
+  The watchdog also ensures the listener whenever `usb0` is present, even
+  while WiFi is unassociated or failed, so startup no longer depends on a
+  manual key import. The SSH worker does not reserve `wlan0`, so a foreign or
+  OEM radio owner cannot block the USB listener. ConnMan is kept off `usb0`
+  so it cannot overwrite the static link.
 - `client_route_policy=modem_safe` is the default; `fallback` is available in
   `config.conf` for owners who need a WiFi default while the modem is up.
 - The ConnMan drop-in accepts the exact known V21 file for an over-the-top
@@ -67,3 +81,12 @@ Artifacts:
 - `out/usb/` (standalone payload; requires the current canonical
   Battery/Tweaks or Battery/Tweaks/WiFi shared QML)
 - Repository `out/appcombo-flat/` (standalone two-file bundle; preferred)
+
+## Updating a running daemon over SSH
+
+For a daemon-only update, see
+[docs/UPDATE-OVER-SSH.md](docs/UPDATE-OVER-SSH.md). The update is staged under
+`/rw_data/wifi1b` and launched detached with `systemd-run` (or `setsid`), so
+stopping the daemon and dropping the SSH session does not kill the swap. The
+helper verifies the staged binary hash, backs up the live binary, replaces it,
+waits for the listener, and rolls back on failure.

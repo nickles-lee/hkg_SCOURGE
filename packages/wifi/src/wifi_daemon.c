@@ -299,6 +299,23 @@ static int net_total(void)
 
 static void redact_secret(char *buf, const char *secret);
 
+#define LOG_MAX_BYTES (1024 * 1024)
+
+/* The systemd unit appends stderr to daemon.log and the wpa_supplicant child
+ * appends its stdout/stderr to wpa_supplicant.log.  Both writers keep their
+ * descriptor across a rename, so the cap must truncate in place: a rename
+ * would leave them writing to an unlinked inode, leaking the space instead of
+ * freeing it.  /rw_data is a 1.2 GB partition and this daemon is the largest
+ * writer on it, so every append path is capped. */
+static void log_cap(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size <= LOG_MAX_BYTES) return;
+    int fd = open(path, O_WRONLY | O_TRUNC | O_CLOEXEC);
+    if (fd >= 0) close(fd);
+}
+
 static void log_msg(const char *fmt, ...)
 {
     char buf[1024];
@@ -309,6 +326,10 @@ static void log_msg(const char *fmt, ...)
     for (int i = 0; i < WIFI_NETS_MAX; i++) redact_secret(buf, net_psk(i));
     redact_secret(buf, g_cfg.cp_psk);
 
+    if (!g_pure_query) {
+        log_cap(LOG_PATH);
+        log_cap(WPA_LOG);
+    }
     int logfd = g_pure_query ? -1 : open(LOG_PATH, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     if (logfd >= 0) fchmod(logfd, 0600);
     FILE *f = logfd >= 0 ? fdopen(logfd, "a") : NULL;
@@ -1527,6 +1548,7 @@ static bool start_wpa_supplicant_args(const char *driver)
         if (setsid() < 0) _exit(126);
         signal(SIGTERM, SIG_DFL); signal(SIGINT, SIG_DFL);
         signal(SIGHUP, SIG_IGN);
+        log_cap(WPA_LOG);
         int log = open(WPA_LOG, O_WRONLY | O_CREAT | O_APPEND, 0600);
         int nul = open("/dev/null", O_RDONLY);
         if (log < 0 || nul < 0) _exit(126);
@@ -3846,6 +3868,10 @@ static void watchdog(void)
     int64_t now = now_ms();
     if (now - g_last_watchdog_ms < 10000) return;
     g_last_watchdog_ms = now;
+
+    /* wpa_supplicant writes its own descriptor; nothing here logs once the
+     * stack is healthy, so the cap must also run on this tick. */
+    log_cap(WPA_LOG);
 
     bool oem_respawned = pid_by_executable("supplicantmanager") > 0;
 

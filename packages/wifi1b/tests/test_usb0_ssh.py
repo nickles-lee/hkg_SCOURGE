@@ -46,4 +46,4 @@ with tempfile.TemporaryDirectory(prefix="wifi1b-usb0-", dir="/tmp/opencode") as 
     assert 'KERNEL=="usb0"' in rule_text
     assert "opi-usb0-up.sh usb0 2224" in rule_text
 
-print("PASS: usb0 SSH is deferred without the Pi and starts/stops with WiFi off")
+print("PASS: USB SSH is ensured in WiFi client mode, under a foreign radio owner, and when WiFi is off")

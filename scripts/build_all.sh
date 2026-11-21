@@ -14,7 +14,7 @@ source "$HERE/lib.sh"
 echo "########## 1. patch the payload binaries"
 "$PYTHON" "$HERE/03_patch_payload.py" \
     --stock-tar "$WORK_DIR/stock-plain.tar.gz" \
-    --message "$SCOURGE_ROOT/config/message.txt" \
+    --messages "$SCOURGE_ROOT/config/messages.json" \
     --out "$WORK_DIR/payload"
 
 echo "########## 2. repack the rootfs"

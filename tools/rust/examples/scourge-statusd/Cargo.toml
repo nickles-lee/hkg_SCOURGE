@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+[package]
+name = "scourge-statusd"
+version = "0.1.0"
+edition = "2021"
+description = "SCOURGE sample Rust status daemon (static musl, Tokio)"
+license = "AGPL-3.0-only"
+
+[dependencies]
+anyhow = "1.0"
+serde_json = "1.0"
+tokio = { version = "1.54", features = ["rt", "net", "io-util", "signal", "macros"] }

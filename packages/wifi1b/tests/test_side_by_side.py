@@ -490,8 +490,14 @@ def exercise(tweaks: bool) -> None:
         assert "mode=off" in cfg and "wlan_on=0" in cfg and "ssh=0" in cfg and "ssh_port=2224" in cfg
         assert "carplay_ssid=IONIQ5-CarPlay-B" in cfg
         restore_point = (fixture.rw2 / 'backup/latest').resolve()
-        fixture.run(fixture.install)
+        for _ in range(4):
+            fixture.run(fixture.install)
         assert (fixture.rw2 / 'backup/latest').resolve() == restore_point
+        assert (fixture.rw2 / 'backup/latest').exists()
+        # Repeated power-on re-installs must not accumulate snapshots: the
+        # installer prunes to the restore point + two newest, plus the new one.
+        snaps = [p for p in (fixture.rw2 / 'backup').glob('20*') if p.is_dir()]
+        assert len(snaps) <= 4, sorted(p.name for p in snaps)
         assert (fixture.rw2 / 'config.conf').read_text() == cfg
         passwd = (fixture.root / "etc/passwd").read_text()
         assert "wifi1b:" in passwd and "car:" in passwd

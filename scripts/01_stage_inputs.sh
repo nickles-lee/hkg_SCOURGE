@@ -12,13 +12,25 @@
 #
 # Staged into input/:  mango-rootfs.tar.gz  AppUpgrade.usb  IONIQ5_EU.ver
 #                     .lge.upgrade.xml   [package_stock/  full tree]
-# Every staged file is hash-gated against config/firmware_locks.env.
+# Every staged file is audited against config/firmware_locks.env.
+# --minimal skips the full-tree copy; point STOCK_PACKAGE at the source tree
+# for package/image builds.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/lib.sh"
 
 MODE="${1:---download}"
 shift || true
+MINIMAL=0
+ARGS=()
+for arg in "$@"; do
+    if [ "$arg" = "--minimal" ]; then
+        MINIMAL=1
+    else
+        ARGS+=("$arg")
+    fi
+done
+set -- "${ARGS[@]}"
 mkdir -p "$INPUT_DIR"
 
 stage_and_gate() {
@@ -27,24 +39,29 @@ stage_and_gate() {
     local got_size got_md5
     got_size="$(stat -c%s "$src")"
     got_md5="$(md5sum "$src" | cut -d' ' -f1)"
-    [ "$got_size" = "$size" ] || { echo "ERROR: $what size $got_size != $size" >&2; exit 1; }
+    [ -z "$size" ] || [ "$got_size" = "$size" ] || {
+        echo "ERROR: $what size $got_size != $size" >&2; exit 1; }
     if [ -n "$sha" ]; then
         lock_check_or_die "$src" "$sha" "$what" || exit 1
     elif [ -n "$md5" ]; then
         [ "$got_md5" = "$md5" ] || { echo "ERROR: $what md5 mismatch" >&2; exit 1; }
     fi
-    cp -f "$src" "$dst"
+    if [ "$(readlink -f "$src")" != "$(readlink -f "$dst")" ]; then
+        cp -f "$src" "$dst"
+    fi
     echo "  staged $what ($(stat -c%s "$dst") B, md5 $got_md5)"
 }
 
 case "$MODE" in
 --download)
     [ -x "$NUDL_BIN" ] || { echo "ERROR: nudl missing — run 00_fetch_third_party.sh" >&2; exit 1; }
+    mkdir -p "$STOCK_PACKAGE"
     echo "== nudl download $NUDL_MODEL / $NUDL_REGION / $NUDL_VERSION"
     "$NUDL_BIN" download -b "$NUDL_BRAND" -m "$NUDL_MODEL" -r "$NUDL_REGION" \
-        -v "$NUDL_VERSION" -o "$INPUT_DIR"
+        -v "$NUDL_VERSION" -o "$STOCK_PACKAGE"
     echo "== nudl verify"
-    "$NUDL_BIN" verify -d "$INPUT_DIR"
+    "$NUDL_BIN" verify -d "$STOCK_PACKAGE"
+    SRC_DIR="$STOCK_PACKAGE"
     ;;
 --from-dir)
     SRC_DIR="${1:?--from-dir needs a path}"
@@ -58,7 +75,7 @@ case "$MODE" in
     SRC_DIR="$(find "$INPUT_DIR/extracted" -type d -name 'HU' -printf '%h\n' | head -1)"
     [ -n "$SRC_DIR" ] || { echo "ERROR: could not find a package tree in the zip" >&2; exit 1; }
     ;;
-*) echo "usage: $0 [--download | --from-dir DIR | --from-zip ZIP]" >&2; exit 2 ;;
+*) echo "usage: $0 [--download | --from-dir DIR | --from-zip ZIP] [--minimal]" >&2; exit 2 ;;
 esac
 
 if [ -n "${SRC_DIR:-}" ]; then
@@ -68,13 +85,20 @@ if [ -n "${SRC_DIR:-}" ]; then
         "$GENUINE_ENVELOPE_SIZE" "" "$GENUINE_MD5"
     stage_and_gate "$SRC_DIR/AppUpgrade" "$INPUT_DIR/AppUpgrade.usb" \
         "USB wrapper container" "$WRAPPER_SIZE" "$WRAPPER_STOCK_SHA256" ""
+    # The .ver header carries an HMG package-id counter that moves between
+    # server repacks. Size/hash are not a hard gate here; 01b_audit_inputs.py
+    # verifies the header identity, the consumed rows' CRC32/size and this file's
+    # pinned revision (warning on a verified repack).
     stage_and_gate "$SRC_DIR/$VER_FILE" "$INPUT_DIR/$VER_FILE" \
-        ".ver" "$VER_STOCK_SIZE" "$VER_STOCK_SHA256" ""
+        ".ver" "" "" ""
     stage_and_gate "$SRC_DIR/.lge.upgrade.xml" "$INPUT_DIR/.lge.upgrade.xml" \
         ".lge.upgrade.xml" "" "$LGE_UPGRADE_XML_SHA256" ""
     # Full stock tree for the vanilla image / packages (24 GB+; optional for
     # payload-only builds, required for 08_build_usb_image.sh / 06_build_package.sh).
-    if [ ! -d "$STOCK_PACKAGE" ]; then
+    if [ "$MINIMAL" = 1 ]; then
+        echo "== minimal staging: full stock tree left at $SRC_DIR"
+        echo "   export STOCK_PACKAGE=$SRC_DIR for package builds"
+    elif [ ! -d "$STOCK_PACKAGE" ]; then
         echo "== staging the full stock tree at $STOCK_PACKAGE (24 GB+; this takes a while)"
         mkdir -p "$STOCK_PACKAGE"
         rsync -a "$SRC_DIR"/ "$STOCK_PACKAGE"/
@@ -82,14 +106,23 @@ if [ -n "${SRC_DIR:-}" ]; then
 fi
 
 echo
+echo "== firmware audit"
+PY="$PYTHON"; [ -x "$PY" ] || PY=python3
+"$PY" "$SCOURGE_ROOT/scripts/01b_audit_inputs.py" \
+    --layout staged --root "$INPUT_DIR" \
+    --locks "$SCOURGE_ROOT/config/firmware_locks.env"
+
+echo
 echo "== staged input gates:"
-[ -f "$INPUT_DIR/mango-rootfs.tar.gz" ] && \
-    lock_check_or_die "$INPUT_DIR/mango-rootfs.tar.gz" "" "rootfs (md5)" 2>/dev/null || true
-md5sum "$INPUT_DIR/mango-rootfs.tar.gz" | grep -q "$GENUINE_MD5" && echo "  rootfs md5 OK"
+if [ -f "$INPUT_DIR/mango-rootfs.tar.gz" ]; then
+    md5sum "$INPUT_DIR/mango-rootfs.tar.gz" | grep -q "$GENUINE_MD5" \
+        && echo "  rootfs md5 OK"
+fi
 [ -f "$INPUT_DIR/AppUpgrade.usb" ] && \
     lock_check_or_die "$INPUT_DIR/AppUpgrade.usb" "$WRAPPER_STOCK_SHA256" "USB wrapper"
-[ -f "$INPUT_DIR/$VER_FILE" ] && \
-    lock_check_or_die "$INPUT_DIR/$VER_FILE" "$VER_STOCK_SHA256" ".ver"
+# .ver identity is checked by 01b_audit_inputs.py above (rows, not the
+# server-side package-id counter in the header).
+[ -f "$INPUT_DIR/$VER_FILE" ] && echo "  .ver audited"
 [ -f "$INPUT_DIR/.lge.upgrade.xml" ] && \
     lock_check_or_die "$INPUT_DIR/.lge.upgrade.xml" "$LGE_UPGRADE_XML_SHA256" ".lge.upgrade.xml"
 echo "INPUTS: OK"

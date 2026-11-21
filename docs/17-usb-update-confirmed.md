@@ -12,6 +12,12 @@ TARGET: Ioniq 5 Gen5W_L (Linux), firmware `NE_E.EUR.S5W_L.001.001.260128` (EU).
 Stage-1 **build 5**: the four patched binaries with **eleven stubs**, plus
 the persistent SMACK permissive flag and the hardened failsafe.
 
+> **Build 6 (all-language boot message) is WIP.** Changing the message `.qm`
+> files does not alter the eleven stubs or the security model, but it changes
+> every rootfs-derived hash. The artifacts below are the car-validated build 5;
+> a build-6 image needs its own table and car validation. An already-rooted car
+> can take the message refresh over SSH without rebuilding the image (docs/08).
+
 | Binary | Function | File offset | Patch |
 |---|---|---:|---|
 | AppUpgrade (SCOMO) | `FUN_002f5a00` | 2,086,500 | `31 C0 C3` |
@@ -71,7 +77,7 @@ therefore has this USB path ready without a deployer.
 | `out/package_second/IONIQ5_EU.ver` | sha256 `0850314af773103a8d47eceac2aebcdad1a0d44eca70132639cb935c2b2c8429` |
 | rootfs row | `IONIQ5_EU\HU\images|mango-rootfs.tar.gz|341174|311417491|879126179|1` |
 | wrapper row | `IONIQ5_EU|AppUpgrade|341142|414600538|10803676|1` |
-| boot message | sha256 `a00dd663d6f3cb791dac9b7d3d674df59f97c0f42b615a981d20c256114abb33` |
+| boot message (build 5) | sha256 `a00dd663d6f3cb791dac9b7d3d674df59f97c0f42b615a981d20c256114abb33` (`config/message.txt`, retired; build 6 uses `config/messages.json`) |
 
 ## Evidence
 

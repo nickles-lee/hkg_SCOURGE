@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
 # SPDX-License-Identifier: AGPL-3.0-only
-"""05_verify_rootfs.py — verify the stage-1 build-5 TE2 envelope end to end.
+"""05_verify_rootfs.py — verify a stage-1 TE2 envelope end to end.
+
+Verifies the car-validated build-5 layout and the build-6 WIP boot-message
+refresh (all firmware locales) — the stub/ELF checks are identical for both.
 
 Checks:
   1. envelope size == GENUINE_ENVELOPE_SIZE (879,126,179)
@@ -9,7 +12,7 @@ Checks:
   3. decrypt -> exact GENUINE_BODY_SIZE plaintext, gzip -t, tar entries
   4. patched AppUpgrade: five engine stubs present (SCOMO four + FUMO)
   5. patched AppScomoDM: two button-gate stubs present
-  6. patched .qm files carry the boot message
+  6. patched .qm files carry the boot message in every firmware locale
   7. the four failsafe entries + SMACK flag are present in the tar
 
 Usage: 05_verify_rootfs.py [--container out/stage1.te2]
@@ -28,6 +31,8 @@ sys.path.insert(0, os.path.join(HERE, "payload"))
 from patch_validators import (ENGINE_PATCHES, SCDM_PATCHES,  # noqa: E402
                               DMCLIENT_PATCHES, LAUNCHER_PATCHES,
                               LAUNCHER_STUB)
+from boot_message import (load_messages, qm_entry,  # noqa: E402
+                          read_qm_messages, safety_keys, ts_entry)
 
 # config/firmware_locks.env
 GEN_SIZE = 879126179
@@ -40,10 +45,6 @@ NEW_FILES = [
     "./etc/systemd/system/initial-root-failsafe.service",
     "./etc/systemd/system/multi-user.target.wants/initial-root-failsafe.service",
     "./etc/smack_permissive",
-]
-QM_FILES = [
-    "./app/share/AppStandbyClock/localization/qm/translation_en-gb.qm",
-    "./app/share/AppStandbyClock/localization/qm/translation_en-au.qm",
 ]
 
 
@@ -195,15 +196,26 @@ def main():
         shutil.rmtree(tmp, ignore_errors=True)
 
     print("6. patched .qm")
-    msg = open(os.path.join(HERE, "config/message.txt"),
-               encoding="utf-8").read().strip("\n")
-    msg_b = msg.encode("utf-16be")
+    messages = load_messages(os.path.join(HERE, "config/messages.json"))
+    qm_files = [qm_entry(loc) for loc in messages]
+    ts_files = [ts_entry(loc) for loc in messages]
     tmp = tempfile.mkdtemp(prefix="scourge_verify_")
     try:
-        subprocess.run(["tar", "-xzf", plain, "-C", tmp] + QM_FILES, check=True)
-        for qm in QM_FILES:
-            data = open(os.path.join(tmp, qm.lstrip("./")), "rb").read()
-            check(msg_b in data, "%s carries the message" % os.path.basename(qm))
+        subprocess.run(["tar", "-xzf", plain, "-C", tmp] + qm_files + ts_files,
+                       check=True)
+        for locale, text in sorted(messages.items()):
+            qm = qm_entry(locale).lstrip("./")
+            ts = ts_entry(locale).lstrip("./")
+            try:
+                keys = safety_keys(os.path.join(tmp, ts))
+                with open(os.path.join(tmp, qm), "rb") as f:
+                    got = read_qm_messages(f.read(), keys)
+                values = [v.rstrip(" ") for vals in got.values() for v in vals]
+                check(bool(values) and all(v == text for v in values),
+                      "%s carries the %s message" %
+                      (os.path.basename(qm), locale))
+            except ValueError as e:
+                check(False, "%s: %s" % (os.path.basename(qm), e))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

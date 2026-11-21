@@ -195,6 +195,32 @@ with tempfile.TemporaryDirectory(prefix="wifi-install-", dir="/tmp/opencode") as
         for relative in ("ssh/authorized_keys", "home/.ssh/authorized_keys"):
             assert (fixture.rw / relative).read_text() == original_keys
         print("PASS: per-file account ownership preserves pre-existing car entries")
+    elif KIND == "retention":
+        # The loader re-runs the stick on every power-on; without a cap each
+        # run adds a full transaction snapshot and filled /rw_data.
+        fixture = Fixture(directory, "stock")
+        fixture.run()
+        baseline = (fixture.rw / "backup/latest").resolve()
+        (fixture.rw / "backup/vbt-app.original").write_text("{}")
+        (fixture.rw / "backup/supplicantmanager.path.state").write_text("enabled")
+        for _ in range(6):
+            fixture.run()
+        backups = sorted(p.name for p in (fixture.rw / "backup").glob("20260101T000000Z*"))
+        # The prune runs before each new snapshot, so steady state is the two
+        # newest previous snapshots + the one just written + the restore point.
+        assert len(backups) == 4, backups
+        assert (fixture.rw / "backup/latest").exists()
+        assert (fixture.rw / "backup/latest").resolve() == baseline
+        assert (fixture.rw / "backup/accounts").is_dir()
+        assert (fixture.rw / "backup/vbt-app.original").exists()
+        assert (fixture.rw / "backup/supplicantmanager.path.state").exists()
+        assert "prune:" in (fixture.rw / "install.log").read_text()
+        for _ in range(3):
+            fixture.run()
+        again = sorted(p.name for p in (fixture.rw / "backup").glob("20260101T000000Z*"))
+        assert len(again) == 4, again
+        assert (fixture.rw / "backup/latest").resolve() == baseline
+        print("PASS: retention keeps the restore point and bounds the snapshots")
     else:
         fixture = Fixture(directory, KIND)
         fixture.run()

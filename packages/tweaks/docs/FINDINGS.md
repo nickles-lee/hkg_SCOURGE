@@ -287,3 +287,23 @@ on localhost and the daemon execs `can_service` as root, `/set` accepts only
 the two installer-managed `micom-send` paths; arbitrary paths are rejected.
 Finally, `blu_*_sent` means “queued to the helper,” not “micom acknowledged”:
 the factory senders use no-reply and the helper intentionally exits 0.
+
+BLF state and schedule (2026-11-17, live car): `tweaks_persist` initialized
+`AppSetup` and read the display keys there, but every read returned `-6`.
+The same keys succeed only under the **`TimeManager`** PCL app; the helper now
+tries app names until the status key actually reads (init success alone is not
+enough). Live values on the car: `STATUS=1` (on), `WARM_LEVEL=5`,
+`START_TIME=420` (07:00), `END_TIME=1080` (18:00),
+`LAST_SETTING_MODE=0` (auto), `GAMMA=128:128:128`, and
+`BRIGHTNESS=128:116:104`. Auto mode evaluates the start/end window in local
+time (overnight windows included); manual mode (`LAST_SETTING_MODE=1`) uses
+the on/off status. `status.json` exposes `blf_mode`, `blf_start`, `blf_end`,
+`blf_in_window`, and the effective `filter_active`.
+
+The instrument cluster tint is **binary**: CAN 0x063F status bit 26
+(`2` = on, `1` = off). Sending levels 0–15 through the 12/4 field produced no
+visible dash change while the status stayed on; the dash flicked on/off only
+with the status bit. The front display is the surface where the 0–9 warmth and
+the deep-red override are visible (wrandr `--crtc=1 --brightness`). The vendor
+`MicomInterfaceM::setBLUStatus/setBLULevel` calls match this byte-for-byte
+(`ay={0x06,0x3f}`, 26/2/status and 12/4/level, int args).

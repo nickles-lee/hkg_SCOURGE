@@ -26,7 +26,7 @@ the new firmware's own content, never copied blindly.
 | Embedded engine ELF offset (0x7C64 on 260128) | `firmware_locks.env` | verify with `tools/carve_engine.py --scan` |
 | Rootfs container size/md5/IV, tar entry count | `firmware_locks.env` | recompute from the new package |
 | `.ver` row IDs (341174/341142), stock `.ver` size/hash | `firmware_locks.env` | find rows by filename in the new `.ver` |
-| Boot-message `.qm` keys + length budget (206 chars) | `firmware_locks.env` | re-read the new firmware's `.ts`/`.qm` |
+| Boot-message `.qm` locale set + per-locale slot sizes | locale set: `config/messages.json`; slot sizes: the stock `.qm`/`.ts` | add every new firmware locale; re-read the new `.ts`/`.qm`; the patcher reports any slot that is too small |
 | Fail-safe mount points (`/media/usb/<N>/…`), systemd, `/rw_data` | payload scripts | verify on the new rootfs |
 | QML base hashes (stock/Hello/… variants) | package installers | register the new stock QML |
 | CAN IDs (`0x2FC`, `0x326`, `0x036`), micom commands (`0x0C7`, `0x4ED`, `0x4A2`) | package daemons | confirm with `battery_daemon --sniff`; vehicle-specific |

@@ -40,7 +40,8 @@ SCENARIO_NAMES = ('boot', 'usb-discovery', 'dbus-ready', 'dmclient-events',
                   'dmengine-fumo-download-update-multi-invalid-result',
                   'device-model',
                   'dmclient-fota-events',
-                  'recovery-repeat-update')
+                  'recovery-repeat-update',
+                  'rust-app')
 
 
 def load_profile(name: str) -> dict:
@@ -88,6 +89,8 @@ def scenario_command(scenario: dict, profile: dict, graphics: str = 'patched-off
         return (VM / 'probes' / 'ui-smoke.sh').read_text()
     if name == 'wifi-ui':
         return (VM / 'probes' / 'wifi-ui.sh').read_text()
+    if name == 'rust-app':
+        return (VM / 'probes' / 'rust-app.sh').read_text()
     if name == 'can-smoke':
         return (VM / 'probes' / 'can-smoke.sh').read_text()
     if name == 'recovery-reboot':

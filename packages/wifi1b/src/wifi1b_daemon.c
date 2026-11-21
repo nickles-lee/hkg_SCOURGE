@@ -377,20 +377,19 @@ static void redact_secret(char *buf, const char *secret);
 
 #define LOG_MAX_BYTES (1024 * 1024)
 
-/* The systemd unit appends stderr to the same file, so keep one bounded
- * generation.  A full filesystem must not turn logging into an unbounded
- * stream: fall back to truncation if the rename cannot be done. */
-static void log_rotate_if_needed(void)
+/* The systemd unit appends stderr to daemon.log and the wpa_supplicant child
+ * appends its stdout/stderr to wpa_supplicant.log.  Both writers keep their
+ * descriptor across a rename, so the cap must truncate in place: a rename
+ * would leave them writing to an unlinked inode, leaking the space instead of
+ * freeing it.  /rw_data is a 1.2 GB partition and this daemon is the largest
+ * writer on it, so every append path is capped. */
+static void log_cap(const char *path)
 {
     struct stat st;
-    if (stat(LOG_PATH, &st) != 0 || st.st_size <= LOG_MAX_BYTES) return;
-    char old[512];
-    snprintf(old, sizeof(old), "%s.1", LOG_PATH);
-    unlink(old);
-    if (rename(LOG_PATH, old) != 0) {
-        int fd = open(LOG_PATH, O_WRONLY | O_TRUNC | O_CLOEXEC);
-        if (fd >= 0) close(fd);
-    }
+    if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size <= LOG_MAX_BYTES) return;
+    int fd = open(path, O_WRONLY | O_TRUNC | O_CLOEXEC);
+    if (fd >= 0) close(fd);
 }
 
 static void log_msg(const char *fmt, ...)
@@ -404,7 +403,10 @@ static void log_msg(const char *fmt, ...)
     for (int i = 0; i < 3; i++) redact_secret(buf, g_cfg.extra_psk[i]);
     redact_secret(buf, g_cfg.cp_psk);
 
-    if (!g_pure_query) log_rotate_if_needed();
+    if (!g_pure_query) {
+        log_cap(LOG_PATH);
+        log_cap(WPA_LOG);
+    }
     int logfd = g_pure_query ? -1 : open(LOG_PATH, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     if (logfd >= 0) fchmod(logfd, 0600);
     FILE *f = logfd >= 0 ? fdopen(logfd, "a") : NULL;
@@ -1896,6 +1898,7 @@ static bool start_wpa_supplicant_args(const char *driver)
         if (setsid() < 0) _exit(126);
         signal(SIGTERM, SIG_DFL); signal(SIGINT, SIG_DFL);
         signal(SIGHUP, SIG_IGN);
+        log_cap(WPA_LOG);
         int log = open(WPA_LOG, O_WRONLY | O_CREAT | O_APPEND, 0600);
         int nul = open("/dev/null", O_RDONLY);
         if (log < 0 || nul < 0) _exit(126);
@@ -4582,7 +4585,11 @@ static void start_pending_work(void)
         if (test_work) ok = test_work(g_work_kind, g_current_pair);
         else
 #endif
+        /* SSH start/stop is interface-independent: dropbear, the key files and
+         * the usb0 firewall rule do not mutate wlan0.  A foreign/OEM radio
+         * reservation must not block the out-of-band listener at boot. */
         if (g_work_kind != WORK_MODE && g_work_kind != WORK_DUMP &&
+            g_work_kind != WORK_SSH &&
             radio_begin("wifi1b_daemon",
                         release_work || g_work_kind == WORK_SCAN ||
                         (g_cfg.wlan_on && g_cfg.mode != MODE_OFF)) != 1) {
@@ -4897,6 +4904,10 @@ static void watchdog(void)
     if (now - g_last_watchdog_ms < 10000) return;
     g_last_watchdog_ms = now;
 
+    /* wpa_supplicant writes its own descriptor; nothing here logs once the
+     * stack is healthy, so the cap must also run on this tick. */
+    log_cap(WPA_LOG);
+
     /* Log dumps: one attempt ~15 s after start, then only on repeated
      * network failure. */
     if (!g_boot_dumped && g_start_ms && now - g_start_ms > 15000 &&
@@ -4909,6 +4920,15 @@ static void watchdog(void)
 
     if (g_apply_pid > 0 || g_work_pending) return;
 
+    /* The Pi USB link is the out-of-band management path.  Ensure its SSH
+     * listener even while WiFi is unassociated or failed: the WiFi health
+     * branches below return early and would otherwise starve it. */
+    if (g_cfg.ssh_enabled && usb0_present() && !ssh_running()) {
+        log_msg("watchdog: USB SSH down; restarting");
+        request_work(WORK_SSH, false);
+        return;
+    }
+
     if (!g_cfg.wlan_on || g_cfg.mode == MODE_OFF) {
         /* The Pi USB SSH path is expected to outlive WiFi Off.  Dropbear
          * running only for usb0 is not a stale WiFi reservation. */
@@ -4917,8 +4937,6 @@ static void watchdog(void)
              radio_owner_is("wifi1b_daemon")) &&
             now - g_last_mode_ms > 15000)
             apply_mode(false);
-        if (g_cfg.ssh_enabled && usb0_present() && !ssh_running())
-            request_work(WORK_SSH, false);
         return;
     }
 

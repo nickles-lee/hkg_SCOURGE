@@ -31,8 +31,12 @@ TARGET: Ioniq 5 Gen5W_L (Linux), firmware 260128 (EU). Read docs/12 first.
 
 ## Post-boot verification
 
-- The startup safety-disclaimer screen shows the boot message
-  ("Good news everyone! We're rooted!...").
+- The startup safety-disclaimer screen shows the boot message. Build 5
+  patches only `en-gb`/`en-au` with the old text ("Good news everyone!...");
+  the other 24 locales keep the OEM disclaimer. After the optional
+  all-language refresh (docs/08) every locale shows "We're rooted." /
+  "run_stuff.sh auto-runs from USB." / "Updater signature checks are
+  disabled." / "No warranties provided."
 - Plug a FAT/exFAT stick with `payload/run_stuff.sample.sh` (renamed to
   `run_stuff.sh`) at its root: within ~8 s the failsafe runs it as root and
   writes `RUN_STUFF_OK.txt` back to the stick (uid=0 proves the root

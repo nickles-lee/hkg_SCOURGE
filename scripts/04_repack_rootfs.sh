@@ -8,7 +8,7 @@
 #   work/stock-plain.tar.gz (genuine plaintext)
 #     -> 03b patches /etc/smack_setup.sh + the permissive flag
 #     -> surgery.py replaces AppUpgrade + AppScomoDM + AppDMClient +
-#        AppLauncher + /etc/smack_setup.sh + the two .qm files
+#        AppLauncher + /etc/smack_setup.sh + every patched .qm file
 #     -> tar --append the four failsafe entries + the SMACK flag
 #     -> libdeflate L10 (concatenated gzip members)
 #     -> truncate to exactly GENUINE_BODY_SIZE
@@ -46,14 +46,23 @@ echo "== patch /etc/smack_setup.sh + flag (build artifact in work/smack/)"
 "$PYTHON" "$SCOURGE_ROOT/scripts/03b_patch_smack.py" --stock-tar "$STOCK" --out "$SMACK_ETC"
 
 echo "== surgery: replace AppUpgrade + AppScomoDM + AppDMClient + AppLauncher + smack_setup + .qm"
+QM_PAYLOAD=("$P"/translation_*.qm)
+if [ ! -f "${QM_PAYLOAD[0]}" ]; then
+    echo "ERROR: no patched .qm files in $P (run 03_patch_payload.py)" >&2
+    exit 1
+fi
+qm_args=()
+for qm in "${QM_PAYLOAD[@]}"; do
+    base=$(basename "$qm")
+    qm_args+=(--replace "./app/share/AppStandbyClock/localization/qm/$base=$qm")
+done
 "$PYTHON" "$SCOURGE_ROOT/tools/surgery.py" "$STOCK" "$REPLACED" \
   --replace ./app/bin/AppUpgrade="$P/AppUpgrade.patched" \
   --replace ./app/bin/AppScomoDM="$P/AppScomoDM.patched" \
   --replace ./app/bin/AppDMClient="$P/AppDMClient.patched" \
   --replace ./app/bin/AppLauncher="$P/AppLauncher.patched" \
   --replace ./etc/smack_setup.sh="$SMACK_ETC/smack_setup.sh" \
-  --replace ./app/share/AppStandbyClock/localization/qm/translation_en-gb.qm="$P/translation_en-gb.qm" \
-  --replace ./app/share/AppStandbyClock/localization/qm/translation_en-au.qm="$P/translation_en-au.qm"
+  "${qm_args[@]}"
 
 echo "== decompress to tar"
 zcat "$REPLACED" > "$TAR"

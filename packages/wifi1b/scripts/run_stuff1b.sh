@@ -452,9 +452,48 @@ if [ "${WIFI1B_DRY_RUN:-0}" = "1" ]; then
     exit 0
 fi
 
-# ---- backup -------------------------------------------------------------
+# ---- backup (retention, then snapshot) ----------------------------------
+# The loader re-runs this stick on every power-on (/run is tmpfs, so its md5
+# gate resets), and each run writes a full transaction snapshot (~3 MB).
+# Unbounded, that history filled /rw_data (23 snapshots = 51 MB), so keep the
+# restore point plus the two newest snapshots and prune the rest before
+# allocating a new one.
+prune_backups() {
+    _b="$1"
+    [ -d "$_b" ] || return 0
+    # readlink -f prints the target of a dangling symlink, so require that it
+    # resolves to an existing directory before treating it as the restore point.
+    _lat=$(readlink -f "$_b/latest" 2>/dev/null)
+    [ -n "$_lat" ] && [ -d "$_lat" ] || _lat=""
+    _n=0
+    _freed=0
+    for _d in $(ls -d "$_b"/20* 2>/dev/null | sort -r); do
+        [ -d "$_d" ] || continue
+        case "$_d" in
+            "$_b"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z*) ;;
+            *) continue ;;
+        esac
+        _n=$((_n + 1))
+        if [ "$_n" -le 2 ]; then continue; fi
+        # _d keeps the caller's $RW_DIR spelling while _lat is canonical, so a
+        # trailing slash or a symlinked parent must not hide the restore point.
+        if [ -n "$_lat" ] && [ "$(readlink -f "$_d" 2>/dev/null)" = "$_lat" ]; then
+            continue
+        fi
+        _kb=$(du -sk "$_d" 2>/dev/null | cut -f1)
+        rm -rf "$_d" || fail "cannot prune $_d"
+        _freed=$((_freed + ${_kb:-0}))
+    done
+    if [ -n "$_lat" ] && [ ! -d "$_lat" ]; then
+        fail "restore point $_lat disappeared while pruning"
+    fi
+    [ "$_freed" -gt 0 ] && log "prune: freed ${_freed} KB (kept restore point + 2 snapshots)"
+    return 0
+}
+
 STAMP=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null)
 [ -n "$STAMP" ] || STAMP=manual
+prune_backups "$RW_DIR/backup"
 BACKUP_HU="$RW_DIR/backup/$STAMP"
 suffix=0
 while ! mkdir -m 700 "$BACKUP_HU" 2>/dev/null; do

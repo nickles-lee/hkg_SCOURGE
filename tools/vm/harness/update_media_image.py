@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 import tempfile
+import zlib
 from pathlib import Path
 
 VERSION = 'NE_E.EUR.S5W_L.001.001.260128'
@@ -22,6 +23,11 @@ MANIFEST = Path('MANIFEST.sha256')
 
 def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _crc32(data: bytes) -> int:
+    value = zlib.crc32(data)
+    return value - (1 << 32) if value >= (1 << 31) else value
 
 
 def build_update_image(output: Path, size_mb: int = 32,
@@ -38,9 +44,9 @@ def build_update_image(output: Path, size_mb: int = 32,
     blob = b'\x0f\x09\x21\x8f' + bytes(range(64))
     ver = (
         f'+|21393|{VERSION}|HM|IONIQ5_EU|1489|1\n'
-        f'IONIQ5_EU\\HU\\images|mango-rootfs.tar.gz|341142|609028602|'
-        f'{len(payload)}|1\n'
-        f'IONIQ5_EU|.lge.upgrade.xml|341147|1|{len(blob)}|1\n'
+        f'IONIQ5_EU\\HU\\images|mango-rootfs.tar.gz|341174|'
+        f'{_crc32(payload)}|{len(payload)}|1\n'
+        f'IONIQ5_EU|.lge.upgrade.xml|341175|{_crc32(blob)}|{len(blob)}|1\n'
     ).encode()
     manifest = (f'{_digest(ver)}  {VER.as_posix()}\n'
                 f'{_digest(payload)}  {PAYLOAD.as_posix()}\n').encode()

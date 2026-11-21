@@ -120,6 +120,17 @@ stubs).
 - **`applauncher_sigstub.sh`** — gate 4 alone, with in-session AppLauncher
   respawn + bus-name verification.
 
+The 45-minute (at least) watcher installed by all three deployers logs only
+process transitions, not a full `ps -ef` snapshot per change. It drops its
+own pipeline helpers and kernel threads (PPID 2), and caps
+`/rw_data/update_watch.log` at 2 MiB (`UPDATE_WATCH_MAX_BYTES`), with
+`UPDATE_WATCH_MAX_LINE` for the 200-byte line bound and
+`UPDATE_WATCH_KEEP_BYTES` for the 32 KB tail kept when trimming. The earlier
+build appended a full snapshot on every 2-second transition and reached
+roughly 100 MB in one window, which filled a 1.2 GB `/rw_data` and had to be
+deleted by hand. The bounded watcher is offline-tested only; car validation
+is pending.
+
 ## The confirmed test sequence
 
 1. **Fresh stage-1 build-5 flash** (TOCTOU or already-rooted car with the
@@ -152,6 +163,50 @@ stubs).
 | VM Test A — A2 stubbed fix | PASS (`errAppUpgrade=0`, launch, `PHASE4_OK`) |
 | VM Test B — engine validation | VM GUI blocker; car is the real test |
 | **Car: full custom update via normal USB** | **PASS (2026-11-15)** |
+
+## Boot-message refresh over SSH (WIP)
+
+A rooted car can take a message-only refresh without a USB update. The
+patched `.qm` files are installed in place; the eleven stubs, the SMACK flag
+and the failsafe are untouched. The patcher and stage generation are
+offline-validated on the stock tree; the installer's verify/install/rollback
+paths are host-tested with a sandboxed mount table and label tools. Neither
+has run on a car yet — the car-validated image remains build 5.
+
+1. Generate the stage with the message-only mode (stock tree or a copy of the
+   car's current `localization/` tree):
+
+   ```sh
+   "$PYTHON" scripts/03_patch_payload.py \
+       --stock-qm-dir work/rootfs/app/share/AppStandbyClock/localization \
+       --messages config/messages.json --out work/bootmsg-qm
+   ( cd work/bootmsg-qm && sha256sum translation_*.qm > MANIFEST.sha256 )
+   ```
+
+2. Copy the stage and the installer to the car over SSH (direct
+   `wifi1b@10.55.0.2:2224`, or through the Pi reverse tunnel):
+
+   ```sh
+   tar -C work/bootmsg-qm -cf - . | ssh <car> '
+       rm -rf /rw_data/scourge/bootmsg.new &&
+       mkdir -p /rw_data/scourge/bootmsg.new &&
+       tar -C /rw_data/scourge/bootmsg.new -xf -'
+   ssh <car> 'cat > /rw_data/scourge/deploy_boot_messages.sh' \
+       < tools/deploy_boot_messages.sh
+   ```
+
+3. Run the installer. It verifies every staged hash and size, remounts `/`
+   read-write only for the copy, backs up the live files under
+   `/rw_data/scourge/bootmsg-backup-*`, installs by atomic rename, syncs,
+   restores the original mount mode, and rolls back on any failure:
+
+   ```sh
+   ssh <car> 'STAGE=/rw_data/scourge/bootmsg.new EXPECTED_COUNT=26 \
+       sh /rw_data/scourge/deploy_boot_messages.sh'
+   ```
+
+4. Reboot the head unit. AppStandbyClock loads the translations at startup,
+   so the screen does not change until then.
 
 ## Recovery, always
 

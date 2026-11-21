@@ -33,7 +33,9 @@ files.pizero/nbdkit_toctou.py.sha256 = <record-at-first-fetch>
 url       = https://github.com/chenxiaolong/nudl
 license   = GPL-3.0-only (fetched only)
 channel   = signed release binaries (verify per upstream VERIFY_SSH_SIGNATURES.md)
-version   = <pin-latest-release-at-first-fetch>
+version   = 1.3.0
+files.nudl-1.3.0-x86_64-unknown-linux-musl.zip.sha256 = 66d0e1c6ab35a5ca372ed47125bbb633d9a5c995347651910b535caff94ad028
+files.nudl-1.3.0-x86_64-unknown-linux-musl.sha256     = 7c0c022013ef0449d5cc13b657e93983eb792e0e279ce947b2135e031498aecc
 used_for  = downloading the official firmware package from the OEM's own
             update servers (same publicly available files as the official
             Navigation Updater, no login); nudl verify -d for offline checks
@@ -48,3 +50,23 @@ used_for  = packages/wifi static-musl SSH server (build_dropbear.sh)
 url       = https://data.iana.org/time-zones/
 license   = public domain
 used_for  = packages/tweaks automatic-DST zoneinfo (fetched at package build)
+
+[rust-toolchain]
+# Host-side Rust apps/daemons toolchain. Fetched only; never installed on the
+# head unit and never committed. The head unit receives static-musl binaries.
+url_base     = https://static.rust-lang.org/dist/2026-11-12
+version      = 1.100.0
+release_date = 2026-11-12
+commit       = 0ef1bc386059596dada8fb65b50425aab2ea637a
+host         = x86_64-unknown-linux-gnu
+target       = x86_64-unknown-linux-musl
+license      = MIT OR Apache-2.0 (fetched only; never copied into this repo)
+used_for     = tools/rust host build/package of static-musl apps and daemons
+rustc.url    = https://static.rust-lang.org/dist/2026-11-12/rustc-1.100.0-x86_64-unknown-linux-gnu.tar.xz
+rustc.sha256 = f1d0b1dec81dab6f523cd098507763487b0d4bd7fd2c87582f154128719be03b
+cargo.url    = https://static.rust-lang.org/dist/2026-11-12/cargo-1.100.0-x86_64-unknown-linux-gnu.tar.xz
+cargo.sha256 = 7e29ce07d7c6e92d1826870575ba27d57fff6cb3e754aa57d99099cb88fab35d
+std_gnu.url  = https://static.rust-lang.org/dist/2026-11-12/rust-std-1.100.0-x86_64-unknown-linux-gnu.tar.xz
+std_gnu.sha256 = 4591b6486594ded52ecd6135db95bf9355bbd3ca7a380888b141528bbcf9a5d4
+std_musl.url = https://static.rust-lang.org/dist/2026-11-12/rust-std-1.100.0-x86_64-unknown-linux-musl.tar.xz
+std_musl.sha256 = 9d5211bc7b40195f9700a6f9133831832a32f50d0e2a2c0ae8af801e7656de5c

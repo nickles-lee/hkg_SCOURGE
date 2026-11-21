@@ -712,7 +712,7 @@ STANDBY_CONFIRM_CODE = r"""    property bool autoConfirmCancelled: false
                 if (y.status === 200 || y.status === 0) {
                     var n = parseInt(String(y.responseText).replace(/\s+/g, ""), 10)
                     if (!isNaN(n))
-                        timeout = Math.max(1000, Math.min(10000, n))
+                        timeout = Math.max(0, Math.min(10000, n))
                 }
                 root.autoConfirmTimeout = timeout
                 root.autoConfirmRetries = 0

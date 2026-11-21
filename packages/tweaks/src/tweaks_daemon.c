@@ -136,6 +136,11 @@ typedef struct {
 typedef struct {
     int filter_on;
     int filter_known;
+    int blf_mode;              /* -1 unknown, 0 auto schedule, 1 manual */
+    int blf_start;             /* minutes since midnight, -1 unknown */
+    int blf_end;
+    int blf_in_window;         /* auto mode: now inside the configured window */
+    int blf_schedule_off;      /* auto mode: valid window exists and now is outside */
     int warmth_level;
     char gamma[32];
     int gamma_valid;
@@ -282,6 +287,33 @@ static int clamp_int(int v, int lo, int hi)
     return v;
 }
 
+/* Disclaimer auto-accept delay: 0 = immediate, otherwise 0.25 s steps. */
+static int clamp_disclaimer_ms(int ms)
+{
+    if (ms < 0)
+        ms = 0;
+    if (ms > 10000)
+        ms = 10000;
+    return ((ms + 125) / 250) * 250;
+}
+
+/* Parse a complete decimal integer in [lo, hi]; empty/malformed/out-of-range
+ * leaves *out untouched and returns 0. */
+static int parse_int_range(const char *s, int lo, int hi, int *out)
+{
+    char *end = NULL;
+    long v;
+
+    if (!s || !s[0])
+        return 0;
+    errno = 0;
+    v = strtol(s, &end, 10);
+    if (errno || !end || *end || v < lo || v > hi)
+        return 0;
+    *out = (int)v;
+    return 1;
+}
+
 static void write_disclaimer_runtime(void);
 static void check_dst(time_t now, int force);
 static void check_ota(time_t now, int force);
@@ -289,6 +321,21 @@ static int restore_main(void);
 static int front_owned(void);
 static void write_status(void);
 static void reboot_tick(void);
+
+#define LOG_MAX_BYTES (1024 * 1024)
+
+/* daemon.log is append-only from this daemon and from the unit's stderr
+ * redirect, so truncate in place: a rename would leave the unit's O_APPEND
+ * descriptor writing to the unlinked inode.  /rw_data is a 1.2 GB partition. */
+static void log_cap(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size <= LOG_MAX_BYTES)
+        return;
+    int fd = open(path, O_WRONLY | O_TRUNC | O_CLOEXEC);
+    if (fd >= 0) close(fd);
+}
 
 static void log_msg(const char *fmt, ...)
 {
@@ -302,6 +349,7 @@ static void log_msg(const char *fmt, ...)
     localtime_r(&now, &tmv);
     strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S", &tmv);
     snprintf(path, sizeof(path), "%s/daemon.log", cfg.rw_dir);
+    log_cap(path);
     f = fopen(path, "a");
     if (!f)
         return;
@@ -770,7 +818,8 @@ static int update_running(void)
  */
 static int night_mode_on(void)
 {
-    return rt.filter_on || rt.projection_active;
+    return rt.filter_on ||
+           (rt.projection_active && !rt.blf_schedule_off);
 }
 
 /*
@@ -888,7 +937,7 @@ static void load_config(void)
         else if (!strcmp(k, "disclaimer_auto"))
             cfg.disclaimer_auto = parse_bool(v) == 1;
         else if (!strcmp(k, "disclaimer_timeout_ms"))
-            cfg.disclaimer_timeout_ms = atoi(v);
+            cfg.disclaimer_timeout_ms = clamp_disclaimer_ms(atoi(v));
         else if (!strcmp(k, "auto_dst"))
             cfg.auto_dst = parse_bool(v) == 1;
         else if (!strcmp(k, "dst_zone"))
@@ -939,7 +988,7 @@ static void load_config(void)
         cfg.poll_ms = 200;
     if (cfg.poll_ms > 5000)
         cfg.poll_ms = 5000;
-    cfg.disclaimer_timeout_ms = clamp_int(cfg.disclaimer_timeout_ms, 1000, 10000);
+    cfg.disclaimer_timeout_ms = clamp_disclaimer_ms(cfg.disclaimer_timeout_ms);
     if (cfg.dst_check_ms < 10000)
         cfg.dst_check_ms = 10000;
     if (cfg.dst_check_ms > 3600000)
@@ -1694,7 +1743,9 @@ static void load_last_gamma(void)
 static void read_vendor_state(void)
 {
     char out[4096], status[128], warm[128], gamma[128] = "", bright[128] = "";
+    char start_s[64], end_s[64], mode_s[64];
     int st = -1, level = -1;
+    int start_min = -1, end_min = -1, blf_mode = -1;
     int have_gamma = 0, have_bright = 0;
 
     if (run_persist_helper(out, sizeof(out)) > 0) {
@@ -1702,6 +1753,24 @@ static void read_vendor_state(void)
             st = parse_bool(status);
         if (line_value(out, "APP_SETTING_DISP_BLUE_LIGHT_WARM_LEVEL", warm, sizeof(warm)))
             level = atoi(warm);
+        start_min = -1;
+        if (line_value(out, "APP_SETTING_DISP_BLUE_LIGHT_START_TIME", start_s, sizeof(start_s))) {
+            int v;
+            if (parse_int_range(start_s, 0, 1439, &v))
+                start_min = v;
+        }
+        end_min = -1;
+        if (line_value(out, "APP_SETTING_DISP_BLUE_LIGHT_END_TIME", end_s, sizeof(end_s))) {
+            int v;
+            if (parse_int_range(end_s, 0, 1439, &v))
+                end_min = v;
+        }
+        blf_mode = -1;
+        if (line_value(out, "APP_SETTING_DISP_BLUE_LIGHT_LAST_SETTING_MODE", mode_s, sizeof(mode_s))) {
+            int v;
+            if (parse_int_range(mode_s, 0, 1, &v))
+                blf_mode = v;
+        }
         if (line_value(out, "APP_SETTING_DISP_GAMMA_R_G_B", gamma, sizeof(gamma)))
             have_gamma = valid_gamma(gamma);
         if (line_value(out, "APP_SETTING_DISP_BRIGHTNESS_R_G_B", bright, sizeof(bright)))
@@ -1710,6 +1779,12 @@ static void read_vendor_state(void)
     } else {
         set_error("vehicle persistence unavailable");
     }
+
+    rt.blf_mode = blf_mode;
+    rt.blf_start = start_min;
+    rt.blf_end = end_min;
+    rt.blf_in_window = 0;
+    rt.blf_schedule_off = 0;
 
     if (cfg.warmth_override >= 1 && cfg.warmth_override <= 9)
         level = cfg.warmth_override;
@@ -1738,6 +1813,37 @@ static void read_vendor_state(void)
     rt.filter_on = (st == 1);
     rt.filter_known = 1;
     rt.warmth_level = (level >= 1 && level <= 9) ? level : 0;
+
+    /*
+     * Auto mode follows the vendor's configured start/end window; manual
+     * mode follows the PCL on/off state.  The vendor stores mode 0 = auto,
+     * 1 = manual (AppSetup's blueLightLastSettingMode).  The window is
+     * evaluated independently of the current on/off flag so status.json
+     * reports blf_in_window even while the filter is off.  A zero-length or
+     * out-of-range window is invalid and falls back to the on/off state.
+     */
+    int schedule_valid = blf_mode == 0 && start_min >= 0 && end_min >= 0 &&
+                         start_min != end_min;
+    int in_window = 0;
+    if (schedule_valid) {
+        time_t nowt = time(NULL);
+        struct tm local_tm;
+        if (localtime_r(&nowt, &local_tm)) {
+            int now_min = local_tm.tm_hour * 60 + local_tm.tm_min;
+            if (start_min < end_min)
+                in_window = now_min >= start_min && now_min < end_min;
+            else
+                in_window = now_min >= start_min || now_min < end_min;
+        }
+    }
+    rt.blf_in_window = in_window;
+    rt.blf_schedule_off = schedule_valid && !in_window;
+    if (schedule_valid && rt.filter_on)
+        rt.filter_on = in_window;
+    if (cfg.force_filter_on) {
+        rt.filter_on = 1;
+        rt.blf_schedule_off = 0;
+    }
 
     if (!rt.filter_on) {
         /*
@@ -2579,6 +2685,11 @@ static void build_status(char *out, size_t size)
              "\"infotainment_fix\":%d,"
              "\"deep_red\":%d,"
              "\"filter_active\":%d,"
+             "\"blf_mode\":%d,"
+             "\"blf_start\":%d,"
+             "\"blf_end\":%d,"
+             "\"blf_in_window\":%d,"
+             "\"blf_schedule_off\":%d,"
              "\"warmth_level\":%d,"
              "\"gamma\":\"%s\","
              "\"projection_active\":%d,"
@@ -2637,6 +2748,11 @@ static void build_status(char *out, size_t size)
              cfg.infotainment_fix ? 1 : 0,
              cfg.deep_red ? 1 : 0,
              rt.filter_on ? 1 : 0,
+             rt.blf_mode,
+             rt.blf_start,
+             rt.blf_end,
+             rt.blf_in_window,
+             rt.blf_schedule_off,
              rt.warmth_level,
              valid_gamma(rt.gamma) ? rt.gamma : "128:128:128",
              rt.projection_active ? 1 : 0,
@@ -2939,6 +3055,13 @@ static void tick(void)
 
     trace_msg("tick enter");
 
+    /* Cap the unit's stderr-only growth while the daemon is otherwise quiet. */
+    {
+        char cap_path[MAX_PATH];
+        snprintf(cap_path, sizeof(cap_path), "%s/daemon.log", cfg.rw_dir);
+        log_cap(cap_path);
+    }
+
     for (int i = 0; i < 2; i++) {
         int st;
         if (g_mon[i].pid > 0 && waitpid(g_mon[i].pid, &st, WNOHANG) == g_mon[i].pid) {
@@ -3148,7 +3271,7 @@ static int apply_config_key(const char *k, const char *v)
     else if (!strcmp(k, "disclaimer_auto"))
         cfg.disclaimer_auto = parse_bool(v) == 1;
     else if (!strcmp(k, "disclaimer_timeout_ms"))
-        cfg.disclaimer_timeout_ms = clamp_int(atoi(v), 1000, 10000);
+        cfg.disclaimer_timeout_ms = clamp_disclaimer_ms(atoi(v));
     else if (!strcmp(k, "auto_dst"))
         cfg.auto_dst = parse_bool(v) == 1;
     else if (!strcmp(k, "dst_zone")) {
