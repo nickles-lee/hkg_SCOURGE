@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# Dashboard runtime, installed into .venv by scripts/rig_ui.sh. Pinned: this is
+# a local tool, not part of the firmware build, so it must not drag the build
+# venv forward on its own.
+fastapi==0.121.2
+uvicorn==0.38.0
+jinja2==3.1.6

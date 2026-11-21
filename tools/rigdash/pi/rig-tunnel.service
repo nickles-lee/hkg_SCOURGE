@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# rig-tunnel.service — reverse SSH tunnel from the rig to the build host.
+#
+# The rig sits in a car with no inbound route, so it dials out instead: one
+# RemoteForward lets the build host reach the rig's sshd as if it were local.
+# The target, the port and the key path live in /etc/rig/tunnel.env (0600, root),
+# written on the board — never in this repo, which carries no personal data.
+#
+#   RIG_TUNNEL_TARGET    user@host to dial
+#   RIG_TUNNEL_REMOTE    port on that host that forwards to the rig's 22
+#                        (default 0: ask sshd to pick one nothing listens on)
+#   RIG_TUNNEL_SSH_PORT  port on the target's sshd (default 22)
+#   RIG_TUNNEL_KEY       private key file on the rig
+#
+# Enable it from the page's Remote access buttons, or:
+#   sudo systemctl enable --now rig-tunnel
+[Unit]
+Description=SCOURGE rig: reverse SSH tunnel to the build host (debugging from the car)
+Documentation=file:/home/pi/scourge/docs/04-pi-rig.md
+ConditionPathExists=/etc/rig/tunnel.env
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Defaults first, then the file, so the file wins where it sets the same name.
+Environment=RIG_TUNNEL_SSH_PORT=22 RIG_TUNNEL_REMOTE=0
+EnvironmentFile=-/etc/rig/tunnel.env
+ExecStart=/bin/sh -c 'exec /usr/bin/ssh -NT -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/etc/rig/known_hosts -i "${RIG_TUNNEL_KEY:-/root/.ssh/id_ed25519}" -p "${RIG_TUNNEL_SSH_PORT:-22}" -R "${RIG_TUNNEL_REMOTE:-0}:127.0.0.1:22" "${RIG_TUNNEL_TARGET:?RIG_TUNNEL_TARGET is not set}"'
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

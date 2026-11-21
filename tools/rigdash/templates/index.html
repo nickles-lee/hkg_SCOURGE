@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<!-- SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+     SPDX-License-Identifier: AGPL-3.0-only -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#10131a">
+  <title>{{ title }}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="topline">
+      <h1>SCOURGE rig</h1>
+      <button id="refresh" class="ghost" type="button" aria-label="Refresh">↻</button>
+    </div>
+    <p class="rig" id="rig"></p>
+    <div class="progress">
+      <div class="bar"><span id="bar"></span></div>
+      <p id="progress-text" class="muted">…</p>
+    </div>
+  </header>
+
+  <main>
+    <section id="next" class="card next" hidden>
+      <p class="eyebrow">Next step</p>
+      <h2 id="next-title"></h2>
+      <p id="next-detail" class="muted"></p>
+      <div id="next-actions" class="row"></div>
+    </section>
+
+    <section id="wifi" class="card" hidden>
+      <p class="eyebrow">WiFi</p>
+      <h2 id="wifi-title">…</h2>
+      <p id="wifi-detail" class="muted"></p>
+      <details id="wifi-change" class="change">
+        <summary id="wifi-change-label">Change network</summary>
+        <form id="wifi-form" class="stack">
+          <label for="wifi-ssid">Network</label>
+          <select id="wifi-ssid" name="ssid"></select>
+          <label for="wifi-psk">Passphrase <span class="muted">(empty for open networks)</span></label>
+          <input id="wifi-psk" name="psk" type="password" autocomplete="off"
+                 inputmode="text" enterkeyhint="go">
+          <button id="wifi-connect" class="primary wide" type="submit">Connect the rig</button>
+          <p id="wifi-msg" class="muted"></p>
+        </form>
+      </details>
+    </section>
+
+    <section id="groups"></section>
+    <p id="empty" class="muted">Loading…</p>
+  </main>
+
+  <aside id="log" class="sheet" hidden aria-live="polite">
+    <div class="sheet-head">
+      <div>
+        <p class="eyebrow" id="log-eyebrow">run</p>
+        <strong id="log-title"></strong>
+      </div>
+      <span id="log-state" class="chip"></span>
+      <button id="log-close" class="ghost" type="button" aria-label="Close">✕</button>
+    </div>
+    <pre id="log-body"></pre>
+  </aside>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

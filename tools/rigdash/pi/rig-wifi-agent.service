@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=SCOURGE rig: WiFi setup page (served on the fallback access point)
+After=NetworkManager.service rig-ap-fallback.service
+Wants=rig-ap-fallback.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/rig/wifi.env
+ExecStart=/usr/bin/python3 /usr/local/lib/rig/rig_wifi_agent.py --address 0.0.0.0 --port 80
+Restart=always
+RestartSec=5
+# The agent only answers while the rig is actually serving its AP.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+# Switching USB modes rewrites dr_mode in config.txt, and swapping images moves
+# the serve symlink plus its hash cache under the deploy dir. ProtectSystem and
+# ProtectHome would make both read-only; the '-' keeps the unit starting on
+# images without those paths.
+ReadWritePaths=-/boot/firmware -/boot -/home/pi/scourge/build
+
+[Install]
+WantedBy=multi-user.target

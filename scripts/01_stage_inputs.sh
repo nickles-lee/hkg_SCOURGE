@@ -27,7 +27,10 @@ stage_and_gate() {
     local got_size got_md5
     got_size="$(stat -c%s "$src")"
     got_md5="$(md5sum "$src" | cut -d' ' -f1)"
-    [ "$got_size" = "$size" ] || { echo "ERROR: $what size $got_size != $size" >&2; exit 1; }
+    # size is optional: some inputs are pinned by sha256 alone (the signed XML
+    # has no recorded length), and an empty pin must not read as a mismatch.
+    [ -z "$size" ] || [ "$got_size" = "$size" ] || {
+        echo "ERROR: $what size $got_size != $size" >&2; exit 1; }
     if [ -n "$sha" ]; then
         lock_check_or_die "$src" "$sha" "$what" || exit 1
     elif [ -n "$md5" ]; then
@@ -92,4 +95,50 @@ md5sum "$INPUT_DIR/mango-rootfs.tar.gz" | grep -q "$GENUINE_MD5" && echo "  root
     lock_check_or_die "$INPUT_DIR/$VER_FILE" "$VER_STOCK_SHA256" ".ver"
 [ -f "$INPUT_DIR/.lge.upgrade.xml" ] && \
     lock_check_or_die "$INPUT_DIR/.lge.upgrade.xml" "$LGE_UPGRADE_XML_SHA256" ".lge.upgrade.xml"
+
+# The .ver rootfs row is derived, never trusted: it must describe the envelope we
+# actually staged. Pinning that CRC as a constant is what let a stale value block
+# a genuine package (and would let a republished manifest pass unnoticed).
+echo
+echo "== derived gate: the .ver rootfs row describes the staged envelope"
+"$PYTHON" - "$INPUT_DIR/$VER_FILE" "$INPUT_DIR/mango-rootfs.tar.gz" \
+    "$VER_ROOTFS_ROW_ID" "$GENUINE_ENVELOPE_SIZE" <<'PY'
+import os, sys, zlib
+
+ver_path, img_path, row_id, want_size = sys.argv[1:5]
+crc = 0
+with open(img_path, "rb") as fh:
+    for chunk in iter(lambda: fh.read(1 << 22), b""):
+        crc = zlib.crc32(chunk, crc)
+crc &= 0xFFFFFFFF
+signed = crc - (1 << 32) if crc >= 1 << 31 else crc
+size = os.path.getsize(img_path)
+
+row = None
+with open(ver_path, encoding="utf-8") as fh:
+    for line in fh:
+        f = line.rstrip("\n").split("|")
+        if len(f) >= 5 and f[0].endswith("HU\\images") and f[1] == "mango-rootfs.tar.gz":
+            row = f
+            break
+
+if row is None:
+    sys.exit("ERROR: no mango-rootfs row in %s" % ver_path)
+
+row_id_got, row_crc, row_size = row[2], int(row[3]), int(row[4])
+checks = [
+    ("row id", row_id_got, row_id),
+    ("row size", row_size, size),
+    ("container size", size, int(want_size)),
+    ("row crc", row_crc, crc if row_crc >= 0 else signed),
+]
+failed = False
+for name, got, want in checks:
+    ok = str(got) == str(want)
+    failed = failed or not ok
+    print("  [%s] %s %s%s" % ("PASS" if ok else "FAIL", name, got,
+                              "" if ok else " (measured %s)" % want))
+print("  row: %s" % "|".join(row))
+sys.exit(1 if failed else 0)
+PY
 echo "INPUTS: OK"

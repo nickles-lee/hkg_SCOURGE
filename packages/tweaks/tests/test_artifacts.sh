@@ -230,8 +230,20 @@ SB="$ROOT/artifacts/qml/AppStandbyClock"
 for base in qml_eco3.0 new_qml qml_genesis; do
     grep -q 'TWEAKS_DISCLAIMER_260128' "$SB/$base/main.qml" || {
         echo "missing disclaimer marker in $base/main.qml" >&2; exit 1; }
+    grep -q 'mouse.accepted = false' "$SB/$base/main.qml" || {
+        echo "disclaimer touch guard must decline the press in $base/main.qml" >&2; exit 1; }
+    if grep -q 'enabled: !root.disclaimerAutoDone' "$SB/$base/main.qml"; then
+        echo "disclaimer touch guard must not disable itself mid-press in $base/main.qml" >&2
+        exit 1
+    fi
     grep -q 'TWEAKS_DISCLAIMER_260128' "$SB/$base/Screen_AppStandbyClock_Confirm.qml" || {
         echo "missing disclaimer marker in $base/Confirm.qml" >&2; exit 1; }
+    for page in Screen_AppStandbyClock_Confirm Screen_AppStandbyClock_Confirm_Profile; do
+        grep -q 'TWEAKS_UNGATED_CONFIRM' "$SB/$base/$page.qml" || {
+            echo "Confirm button still gated on enableBtn in $base/$page.qml" >&2; exit 1; }
+        grep -q 'root.requestConfirmClick()' "$SB/$base/$page.qml" || {
+            echo "Confirm click is not routed in $base/$page.qml" >&2; exit 1; }
+    done
     grep -q 'autoConfirmTimer' "$SB/$base/Screen_AppStandbyClock_Confirm_Profile.qml" || {
         echo "missing autoConfirmTimer in $base/Confirm_Profile.qml" >&2; exit 1; }
 done

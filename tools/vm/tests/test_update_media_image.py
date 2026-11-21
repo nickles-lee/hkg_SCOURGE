@@ -42,6 +42,23 @@ class UpdateImageBuilderTests(unittest.TestCase):
         self.assertEqual(checked['present_entries'], 2)
         self.assertEqual(checked['hashes_verified'], 2)
 
+    def test_package_map_rows_describe_what_is_in_the_image(self) -> None:
+        """The fixture used to pin the wrapper's row id and the stock wrapper's CRC."""
+        import zlib
+        report = build_update_image(self.image, size_mb=24, payload_size=4096)
+        self.assertEqual(report['rootfs_row_id'], 341174)
+        self.assertEqual(report['xml_row_id'], 341175)
+        for key in ('rootfs_row_crc', 'xml_row_crc'):
+            value = report[key]
+            self.assertIsInstance(value, int)
+            self.assertLess(abs(value), 1 << 31, key)
+        # The row CRC must be the crc32 of the bytes in the image, signed.
+        checked = check_update_media(self.image, verify_hashes=False,
+                                     verify_files=False)
+        self.assertTrue(checked['ok'], checked['problems'])
+        with self.assertRaises(ValueError):
+            build_update_image(self.image, size_mb=8)
+
     def test_rejects_bad_sizes(self) -> None:
         with self.assertRaises(ValueError):
             build_update_image(self.image, size_mb=8)

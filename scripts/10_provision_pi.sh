@@ -31,9 +31,39 @@ fi
 echo "== fake-hwclock"
 systemctl enable fake-hwclock 2>/dev/null || true
 
+echo "== wifi fallback (setup AP + its setup page)"
+# Optional: needs RIG_AP_SSID / RIG_AP_PASSPHRASE (config/rig.local.env or the
+# environment). Without them the rig simply has no fallback AP yet.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+if systemctl is-enabled --quiet rig-ap-fallback.service 2>/dev/null; then
+    echo "(already installed — nothing to do)"
+elif [ -f "$HERE/17_provision_wifi_fallback.sh" ]; then
+    bash "$HERE/17_provision_wifi_fallback.sh" ||
+        echo "(wifi fallback skipped — set RIG_AP_SSID and RIG_AP_PASSPHRASE)"
+else
+    echo "(no 17_provision_wifi_fallback.sh next to this script — skipped)"
+fi
+
+echo "== image stick (fstab, by label)"
+# The 27 GB image can live on a stick instead of the SD card (docs/04). A headless
+# image runs no automounter, and a serve.img symlink that dangles after a reboot
+# turns a car-side update into a mystery, so mount it at boot: nofail (a rig
+# without the stick still boots), ro (serving only ever reads).
+STICK_LABEL="${RIG_IMAGE_STICK_LABEL:-RIGIMG}"
+FSTAB=/etc/fstab
+if grep -q "^LABEL=$STICK_LABEL " "$FSTAB"; then
+    echo "(fstab already mounts LABEL=$STICK_LABEL)"
+else
+    install -d "/media/$STICK_LABEL"
+    printf 'LABEL=%s /media/%s exfat ro,nofail,noatime,uid=1000,gid=1000,x-systemd.device-timeout=10 0 0\n' \
+        "$STICK_LABEL" "$STICK_LABEL" >> "$FSTAB"
+    echo "added: LABEL=$STICK_LABEL -> /media/$STICK_LABEL (ro, nofail)"
+fi
+systemctl daemon-reload
+
 echo
 echo "REBOOT REQUIRED. After reboot verify (scripts/12_verify_pi.sh):"
-echo "  ls /sys/class/udc                                  # 3f980000.usb"
-echo "  readlink /sys/bus/platform/devices/3f980000.usb/driver   # .../dwc2"
+echo "  ls /sys/class/udc                        # Zero 2 W: 3f980000.usb, Pi 4/5: fe980000.usb"
+echo "  readlink /sys/bus/platform/devices/\$(ls /sys/class/udc|head -n1)/driver   # .../dwc2"
 echo "  systemctl show -p RuntimeWatchdogUSec              # =0"
 echo "  dmesg | grep -i 'hardware watchdog' || echo clean"

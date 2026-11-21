@@ -26,6 +26,7 @@ Ioniq 5 Gen5W_L, 260128 (EU) unless noted.
 | Head unit sees nothing on USB | Charge-only cable; or `dwc2` overlay missing / UDC not bound (`ls /sys/class/udc` must show `3f980000.usb` with the dwc2 driver). |
 | 27 GB transfer would take ~44 h | That is the Pi's WiFi. Use `scripts/13_copy_image_to_sd.sh` (SD card in a host reader). |
 | `nbdkit` plugin errors on the Pi | Re-run provisioning (`scripts/10_provision_pi.sh`); check `toctou.log` for the plugin's stderr. |
+| Rig powered (red LED on) but no ssh, no mDNS, no `rig-setup` AP | Rule out a link lapse first: this was seen once with the board up for hours — `ping` said *No route to host* from a `FAILED` ARP entry while the pi was fine, and a retry minutes later worked. Check `ip neigh`, then plug Ethernet (the Pi 4 has it) for a path that does not depend on WiFi. If the board really is stuck: green ACT LED irregular blinking = OS up, only the network missing; dead LED = no boot. Last resort, pull the card and run `sudo bash scripts/21_rig_card_rescue.sh /dev/sdXN` (report) then `--fix`, which removes an enabled `toctou-gadget.service` and the stick `fstab` line. |
 
 ## Car update flow
 

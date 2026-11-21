@@ -57,7 +57,9 @@ REPO = Path(__file__).resolve().parents[1]
 # segments: target-device accounts (`root`, `car`), the vendor's own
 # no-username device dir (`/rw_data/wifi/home/.ssh`), and image-URI
 # internals (`image://AppHomeScreen/home/72x72/...`). Fixtures, not usernames.
-HOME_ALLOW = {"root", "car", ".ssh", "72x72", "99x99", "bubble01", "menu"}
+# `pi` is the rig image's default account (docs/04-pi-rig.md), the same class of
+# deliberate product default as `car` — not somebody's username.
+HOME_ALLOW = {"root", "car", "pi", ".ssh", "72x72", "99x99", "bubble01", "menu"}
 # Addresses that are protocol/virtualization/product constants, not LAN
 # details: the QEMU virtio gateway/guest range, loopback, and the car-AP
 # tether gateway the WiFi app documents (the laptop joined to the car's own
@@ -80,6 +82,24 @@ HOME_RE = re.compile(r"/(?:home|Users)/([A-Za-z0-9._-]+)[/\\\"'\s]")
 LAN_RE = re.compile(
     r"\b(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b")
 NICK_RE = re.compile(r"(?<![A-Za-z])nick(?![A-Za-z])", re.IGNORECASE)
+# WiFi credentials are personal data of the same class as a home path: an SSID names a
+# person's network and a PSK is a shared secret. Documented *format* examples use
+# placeholders, so only values that look like real ones are flagged.
+WIFI_RE = re.compile(
+    r"\b(?P<key>ssid|psk|passphrase|wifi[-_ ]?password)\s*[=:]\s*"
+    r"(?P<value>[^\s;#&]{6,64})", re.IGNORECASE)
+# Only text/config carriers are scanned: in C/Python source the same tokens are
+# identifiers, format strings and fixtures, not credentials.
+WIFI_TEXT_SUFFIXES = (".md", ".txt", ".sample", ".conf", ".ini", ".env", ".yaml",
+                      ".yml", ".json", ".sh", ".nmconnection", ".cfg", ".example")
+WIFI_PLACEHOLDERS = ("<", ">", "$", "{", "%", "your", "example", "changeme",
+                     "placeholder", "redacted", "xxxx", "ssid", "psk",
+                     "myhome", "fixture", "scourge-", "iphone", "dummy",
+                     "sample", "demo")
+
+
+def wifi_scan_scope(path: str) -> bool:
+    return path.lower().endswith(WIFI_TEXT_SUFFIXES)
 PEM_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 SSH_RE = re.compile(
     r"\b(?:ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-[a-z0-9-]+) [A-Za-z0-9+/]{50,}")
@@ -118,6 +138,14 @@ def check_leaks(files: list[str]) -> list[str]:
                         findings.append(f"{path}:{i} — LAN address {addr}")
             if NICK_RE.search(line) and not any(a in line for a in NAME_ALLOW):
                 findings.append(f"{path}:{i} — 'nick' as a username/personal ref")
+            for match in (WIFI_RE.finditer(line) if wifi_scan_scope(path) else ()):
+                value = match.group("value").strip("\"'").lower()
+                if any(token in value for token in WIFI_PLACEHOLDERS):
+                    continue
+                if value.isdigit() and len(value) < 10:
+                    continue  # a numeric field/port, not a credential
+                findings.append(
+                    f"{path}:{i} — WiFi credential ({match.group('key')})")
     return findings
 
 

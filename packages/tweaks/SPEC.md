@@ -173,6 +173,13 @@ Brightness is kept at `128:128:128`.
 
 - Patch `AppStandbyClock/qml_*` `main.qml` and both
   `Screen_AppStandbyClock_Confirm*.qml` screens.
+- The stock Confirm button is `enabled: AppStandbyClockModel.enableBtn`, a flag
+  the engine only raises after its foreground setup, so the button was dimmed
+  and dead for the first seconds. The patch drops that binding
+  (`TWEAKS_UNGATED_CONFIRM`) and routes the click through
+  `requestConfirmClick()`: the tap is delivered immediately, and if the flag is
+  still false it is re-delivered once the flag turns true (250 ms poll, 10 s
+  cap) so no tap is lost.
 - `main.qml` holds per-boot `disclaimerAutoCancelled`/`disclaimerAutoDone`
   state and a pass-through touch guard.
 - The confirm screen starts a 0–10 second timer (0.25 s steps, 0 = immediate)

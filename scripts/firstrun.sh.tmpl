@@ -1,0 +1,153 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# firstrun.sh.tmpl — the rig's first-boot script, as a template.
+#
+# scripts/16_provision_sd_boot.sh renders this with the secrets from
+# config/rig.local.env and installs the result on the card's boot partition,
+# where the kernel-command-line hook runs it once as root:
+#   systemd.run=/boot/firstrun.sh systemd.run_success_action=reboot \
+#   systemd.unit=kernel-command-line.target
+#
+# It finishes by stripping the hook and deleting itself, then reboots, so the
+# association retry installed below happens on the next, normal boot.
+set -u
+
+BOOT=/boot/firmware
+[ -d "$BOOT" ] || BOOT=/boot
+LOG=$BOOT/firstrun.log
+
+WIFI_COUNTRY='@WIFI_COUNTRY@'
+WIFI_SSIDS='@WIFI_SSIDS@'
+WIFI_PSK='@WIFI_PSK@'
+RIG_USER='@RIG_USER@'
+RIG_PASSWORD='@RIG_PASSWORD@'
+RIG_HOSTNAME='@RIG_HOSTNAME@'
+PI_PUBKEY='@SSH_PUBKEY@'
+
+exec >>"$LOG" 2>&1
+echo "=== firstrun $(date -Is) on $(cat /etc/hostname 2>/dev/null) ==="
+
+echo "-- hostname"
+hostnamectl set-hostname "$RIG_HOSTNAME" 2>/dev/null || echo "$RIG_HOSTNAME" >/etc/hostname
+# sudo and journald warn on every call until the name resolves locally.
+grep -q "^127.0.1.1[[:space:]]*$RIG_HOSTNAME\$" /etc/hosts ||
+    echo "127.0.1.1 $RIG_HOSTNAME" >>/etc/hosts
+
+echo "-- user $RIG_USER"
+# Trixie's supported route is userconf-pi: it creates the uid-1000 user, sets
+# the password and marks the first-boot setup wizard done. A bare useradd
+# leaves the console wizard (and its prompts) pending on this image.
+if [ -x /usr/lib/userconf-pi/userconf ]; then
+    hash=$(openssl passwd -6 "$RIG_PASSWORD" 2>/dev/null) || hash=""
+    [ -n "$hash" ] && { /usr/lib/userconf-pi/userconf "$RIG_USER" "$hash" || true; }
+fi
+if ! id "$RIG_USER" >/dev/null 2>&1; then
+    useradd -m -s /bin/bash -G sudo,adm,netdev,video,audio,plugdev "$RIG_USER" || true
+fi
+printf '%s:%s\n' "$RIG_USER" "$RIG_PASSWORD" | chpasswd
+usermod -U "$RIG_USER" 2>/dev/null || true
+install -o "$RIG_USER" -g "$RIG_USER" -m 700 -d "/home/$RIG_USER/.ssh"
+touch "/home/$RIG_USER/.ssh/authorized_keys"
+grep -qxF "$PI_PUBKEY" "/home/$RIG_USER/.ssh/authorized_keys" ||
+    echo "$PI_PUBKEY" >>"/home/$RIG_USER/.ssh/authorized_keys"
+chown "$RIG_USER:$RIG_USER" "/home/$RIG_USER/.ssh/authorized_keys"
+chmod 600 "/home/$RIG_USER/.ssh/authorized_keys"
+
+echo "-- ssh"
+systemctl enable ssh >/dev/null 2>&1 || true
+systemctl start ssh >/dev/null 2>&1 || true
+rm -f "$BOOT/ssh"
+
+echo "-- wifi"
+command -v raspi-config >/dev/null 2>&1 &&
+    raspi-config nonint do_wifi_country "$WIFI_COUNTRY" || true
+# Unblock the radio now and persist it: the regulatory domain arrives with the
+# kernel command line, but the rfkill soft-block is remembered in
+# /var/lib/systemd/rfkill and would otherwise survive.
+rfkill unblock all || true
+for f in /var/lib/systemd/rfkill/*:wlan; do
+    [ -e "$f" ] && echo 0 >"$f"
+done
+
+# One NetworkManager profile per candidate spelling, highest priority first;
+# the radio associates with whichever is actually beaconing.
+prio=30
+for ssid in $WIFI_SSIDS; do
+    safe=$(printf '%s' "$ssid" | tr -c 'A-Za-z0-9._-' '_')
+    conn="/etc/NetworkManager/system-connections/$safe.nmconnection"
+    cat >"$conn" <<EOF
+[connection]
+id=$ssid
+type=wifi
+autoconnect=true
+autoconnect-priority=$prio
+autoconnect-retries=0
+
+[wifi]
+mode=infrastructure
+ssid=$ssid
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk=$WIFI_PSK
+
+[ipv4]
+method=auto
+
+[ipv6]
+addr-gen-mode=default
+method=auto
+EOF
+    chmod 600 "$conn"
+    chown root:root "$conn"
+    prio=$((prio - 5))
+done
+
+# Trixie's own path: the image's helper writes the profile through raspi-config
+# and, because the radio may not be up on this first boot, installs a timer that
+# retries the association after the reboot. Repeat calls reuse one helper script
+# and one timer, so only the primary candidate goes through here — the profiles
+# above carry the rest.
+if [ -x /usr/lib/raspberrypi-sys-mods/imager_custom ]; then
+    primary=$(printf '%s' "$WIFI_SSIDS" | awk '{print $1}')
+    /usr/lib/raspberrypi-sys-mods/imager_custom set_wlan -p \
+        "$primary" "$WIFI_PSK" "$WIFI_COUNTRY" || true
+fi
+nmcli connection reload >/dev/null 2>&1 || true
+nmcli connection up "$(printf '%s' "$WIFI_SSIDS" | awk '{print $1}')" >/dev/null 2>&1 || true
+
+echo "-- mdns (avahi ships enabled; make it pick up the new hostname now)"
+systemctl enable avahi-daemon >/dev/null 2>&1 || true
+systemctl restart avahi-daemon >/dev/null 2>&1 || true
+sleep 2
+avahi-resolve -n "$RIG_HOSTNAME.local" 2>/dev/null || true
+
+echo "-- publish the address to the boot partition"
+cat >/etc/systemd/system/publish-wifi-ip.service <<'EOF'
+[Unit]
+Description=Write the network addresses to the boot partition
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'for i in $(seq 1 60); do a=$(ip -4 -o addr show wlan0 2>/dev/null | awk "{print \$4}" | cut -d/ -f1); [ -n "$a" ] && break; sleep 2; done; { echo "host=$(hostname)"; echo "wlan0=$a"; echo "time=$(date -Is)"; ip -4 -o addr show 2>/dev/null; } > BOOTDIR/wifi-ip.txt'
+[Install]
+WantedBy=multi-user.target
+EOF
+sed -i "s#BOOTDIR#$BOOT#" /etc/systemd/system/publish-wifi-ip.service
+systemctl daemon-reload || true
+systemctl enable publish-wifi-ip.service >/dev/null 2>&1 || true
+/bin/sh -c "$(sed -n 's/^ExecStart=//p' /etc/systemd/system/publish-wifi-ip.service)" >/dev/null 2>&1 || true
+
+ip -4 -o addr show 2>/dev/null || true
+iwgetid 2>/dev/null || true
+
+echo "-- removing the hook and this script"
+# Strip the hook by token shape: the boot-time fixup rewrites literal /boot/
+# paths in this script before it runs, so an exact-path pattern may not match.
+sed -i -E 's# systemd\.run[^ ]*##g; s# systemd\.unit=kernel-command-line\.target##g' "$BOOT/cmdline.txt"
+sync
+rm -f "$BOOT/firstrun.sh" "$BOOT/cmdline.txt.from-flash"
+echo "=== firstrun done ==="
+exit 0

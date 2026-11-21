@@ -650,26 +650,46 @@ STANDBY_MAIN_CODE = """    objectName: "AppStandbyClockRoot"
     property bool disclaimerAutoDone: false
 """
 
+STANDBY_MAIN_FN = """    function cancelDisclaimerAuto() {
+        if (disclaimerAutoDone)
+            return
+        disclaimerAutoCancelled = true
+        disclaimerAutoDone = true
+        if (current_loader && current_loader.item && current_loader.item.cancelAutoConfirm)
+            current_loader.item.cancelAutoConfirm()
+    }
+"""
+
 STANDBY_MAIN_GUARD = """    // TWEAKS_DISCLAIMER_260128: any touch before auto-accept cancels it for this boot.
+    // The guard only ever DECLINES the press: accepting it, or flipping its own
+    // `enabled` inside onPressed, lets this 1920x720 overlay swallow the tap that
+    // was meant for the disclaimer's Confirm button (which is what made the button
+    // look dead on some boots). The state flip therefore runs from a 0 ms timer,
+    // after the press has already been delivered to the button below.
     MouseArea {
         id: disclaimerTouchGuard
         anchors.fill: parent
         z: 1001
-        enabled: !root.disclaimerAutoDone
         propagateComposedEvents: true
         onPressed: {
-            root.disclaimerAutoCancelled = true
-            root.disclaimerAutoDone = true
-            if (current_loader.item && current_loader.item.cancelAutoConfirm)
-                current_loader.item.cancelAutoConfirm()
             mouse.accepted = false
+            disclaimerAutoCancelTimer.start()
         }
+    }
+
+    Timer {
+        id: disclaimerAutoCancelTimer
+        interval: 0
+        repeat: false
+        running: false
+        onTriggered: root.cancelDisclaimerAuto()
     }
 """
 
 STANDBY_CONFIRM_CODE = r"""    property bool autoConfirmCancelled: false
     property int autoConfirmTimeout: 2000
     property int autoConfirmRetries: 0
+    property bool manualConfirmPending: false
 
     function autoAppRoot() {
         var p = root.parent
@@ -741,23 +761,60 @@ STANDBY_CONFIRM_CODE = r"""    property bool autoConfirmCancelled: false
         return true
     }
 
-    function confirmAutoAccept() {
-        if (!root.autoConfirmAllowed())
-            return
-        if (typeof AppStandbyClockModel.enableBtn !== "undefined" && !AppStandbyClockModel.enableBtn) {
-            if (root.autoConfirmRetries < 20) {
-                root.autoConfirmRetries++
-                autoConfirmTimer.interval = 250
-                autoConfirmTimer.start()
-            }
-            return
-        }
+    /* TWEAKS_DISCLAIMER_260128: the stock Confirm button is
+       `enabled: AppStandbyClockModel.enableBtn`, and the engine raises that flag
+       only once AppStandbyClockEngine::inter_show_window_fg() finished its
+       foreground setup (driver profile / language reads). Until then the button
+       was dimmed and every tap was dropped. The button is ungated, and a tap
+       made before the flag is up is held and delivered the moment it turns true,
+       so the disclaimer can be confirmed as soon as it is on screen. */
+    function confirmInputReady() {
+        return typeof AppStandbyClockModel.enableBtn === "undefined" ||
+               AppStandbyClockModel.enableBtn
+    }
+
+    function sendConfirm() {
         var r = root.autoAppRoot()
         if (r)
             r.disclaimerAutoDone = true
         if (typeof root.isPressedConfirm !== "undefined")
             root.isPressedConfirm = true
         QML_Handler.qmlSendEvtKey(HMIEVENTS.KEY_EVT_CONFIRMSCREEN_BUTTON_CONFIRM_CLICKED)
+    }
+
+    function requestConfirmClick() {
+        if (root.manualConfirmPending)
+            return
+        root.manualConfirmPending = true
+        autoConfirmTimer.stop()
+        root.autoConfirmRetries = 0
+        root.confirmAutoAccept()
+    }
+
+    function confirmAutoAccept() {
+        if (root.manualConfirmPending) {
+            if (!root.confirmInputReady() && root.autoConfirmRetries < 40) {
+                root.autoConfirmRetries++
+                autoConfirmTimer.interval = 250
+                autoConfirmTimer.start()
+                return
+            }
+            root.manualConfirmPending = false
+            root.sendConfirm()
+            return
+        }
+        if (!root.autoConfirmAllowed())
+            return
+        if (!root.confirmInputReady()) {
+            if (root.autoConfirmRetries < 40) {
+                root.autoConfirmRetries++
+                autoConfirmTimer.interval = 250
+                autoConfirmTimer.start()
+                return
+            }
+            console.log("[tweaks] disclaimer: enableBtn stayed false, sending the confirm key directly")
+        }
+        root.sendConfirm()
     }
 
     Timer {
@@ -776,11 +833,44 @@ STANDBY_CONFIRM_CODE = r"""    property bool autoConfirmCancelled: false
     }
 """
 
+CONFIRM_SEND = (
+    "QML_Handler.qmlSendEvtKey(HMIEVENTS.KEY_EVT_CONFIRMSCREEN_BUTTON_CONFIRM_CLICKED)"
+)
+
+
+def ungate_confirm_button(text: str) -> str:
+    """Drop `enabled: AppStandbyClockModel.enableBtn` from the Confirm button."""
+    if "TWEAKS_UNGATED_CONFIRM" in text:
+        return text
+    button = text.find("idButtonConfirm")
+    if button < 0:
+        raise ValueError("idButtonConfirm not found")
+    binding = text.find("AppStandbyClockModel.enableBtn", button)
+    if binding < 0:
+        raise ValueError("confirm button enableBtn binding not found")
+    return (text[:binding] + "true // TWEAKS_UNGATED_CONFIRM" +
+            text[binding + len("AppStandbyClockModel.enableBtn"):])
+
+
+def route_confirm_click(text: str) -> str:
+    """Send the confirm key through the queueing helper instead of directly."""
+    if "requestConfirmClick" in text:
+        return text
+    if CONFIRM_SEND not in text:
+        raise ValueError("confirm button handler not found")
+    return text.replace(CONFIRM_SEND, "root.requestConfirmClick()", 1)
+
+
 
 def patch_standby_main(src: str) -> str:
     text = standby_marker(read(src))
     if "AppStandbyClockRoot" not in text:
         text = insert_after_first_id_root(text, STANDBY_MAIN_CODE)
+    if "cancelDisclaimerAuto" not in text:
+        state = "    property bool disclaimerAutoDone: false\n"
+        if state not in text:
+            raise ValueError("disclaimerAutoDone property not found")
+        text = text.replace(state, state + STANDBY_MAIN_FN, 1)
     if "disclaimerTouchGuard" not in text:
         text = insert_before_last_brace(text, STANDBY_MAIN_GUARD)
     return text
@@ -788,6 +878,8 @@ def patch_standby_main(src: str) -> str:
 
 def patch_standby_confirm(src: str) -> str:
     text = standby_marker(read(src))
+    text = ungate_confirm_button(text)
+    text = route_confirm_click(text)
     if "autoConfirmTimer" not in text:
         text = insert_before_last_brace(text, STANDBY_CONFIRM_CODE)
     return text

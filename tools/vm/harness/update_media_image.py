@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 import tempfile
+import zlib
 from pathlib import Path
 
 VERSION = 'NE_E.EUR.S5W_L.001.001.260128'
@@ -19,9 +20,23 @@ BLOB = Path('.lge.upgrade.xml')
 VER = Path('IONIQ5_EU.ver')
 MANIFEST = Path('MANIFEST.sha256')
 
+#: Row ids as the OEM package uses them (docs/02): the rootfs and the wrapper are
+#: the two rows SCOURGE rewrites, and the signed manifest has its own. The fixture
+#: carried 341142 (the *wrapper* id) for the rootfs and a hardcoded 609028602 —
+#: crc32 of the stock AppUpgrade — so the row described nothing that was in the
+#: image. Derive it instead; a pinned CRC is what went stale in the real package.
+ROW_ROOTFS = 341174
+ROW_XML = 341175
+
 
 def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _signed_crc32(data: bytes) -> int:
+    """The `.ver` convention: 32-bit zlib CRC written as a signed integer."""
+    value = zlib.crc32(data) & 0xFFFFFFFF
+    return value - (1 << 32) if value >= 1 << 31 else value
 
 
 def build_update_image(output: Path, size_mb: int = 32,
@@ -36,11 +51,12 @@ def build_update_image(output: Path, size_mb: int = 32,
         output.unlink()
     payload = (bytes(range(256)) * (payload_size // 256 + 1))[:payload_size]
     blob = b'\x0f\x09\x21\x8f' + bytes(range(64))
+    payload_crc, blob_crc = _signed_crc32(payload), _signed_crc32(blob)
     ver = (
         f'+|21393|{VERSION}|HM|IONIQ5_EU|1489|1\n'
-        f'IONIQ5_EU\\HU\\images|mango-rootfs.tar.gz|341142|609028602|'
+        f'IONIQ5_EU\\HU\\images|mango-rootfs.tar.gz|{ROW_ROOTFS}|{payload_crc}|'
         f'{len(payload)}|1\n'
-        f'IONIQ5_EU|.lge.upgrade.xml|341147|1|{len(blob)}|1\n'
+        f'IONIQ5_EU|.lge.upgrade.xml|{ROW_XML}|{blob_crc}|{len(blob)}|1\n'
     ).encode()
     manifest = (f'{_digest(ver)}  {VER.as_posix()}\n'
                 f'{_digest(payload)}  {PAYLOAD.as_posix()}\n').encode()
@@ -61,4 +77,6 @@ def build_update_image(output: Path, size_mb: int = 32,
                 f'mke2fs failed: {completed.stderr.strip() or completed.stdout.strip()}')
     return {'output': str(output), 'size_mb': size_mb,
             'payload_bytes': len(payload), 'payload_sha256': _digest(payload),
-            'version': VERSION, 'manifest_sha256': _digest(manifest)}
+            'version': VERSION, 'manifest_sha256': _digest(manifest),
+            'rootfs_row_id': ROW_ROOTFS, 'rootfs_row_crc': payload_crc,
+            'xml_row_id': ROW_XML, 'xml_row_crc': blob_crc}

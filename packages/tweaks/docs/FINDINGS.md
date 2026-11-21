@@ -102,6 +102,27 @@ valid cluster diagnostic and has been removed.
 - The boot disclaimer is `AppStandbyClock`'s
   `Screen_AppStandbyClock_Confirm*.qml`; the Confirm button sends
   `KEY_EVT_CONFIRMSCREEN_BUTTON_CONFIRM_CLICKED`.
+- **The Confirm/Language buttons are gated on `AppStandbyClockModel.enableBtn`**
+  (`Screen_AppStandbyClock_Confirm.qml:97,116`, same in `new_qml`/`qml_genesis`).
+  `QHMI_ToggleButton` dims the label to opacity 0.2 and disables its press
+  MouseArea while the flag is false, so a dead button looks like a pale button.
+  The model initialises it to `false` (`movb $0x0,0x1d(%rbx)` in the ctor) and
+  the only writer besides a QML property write is
+  `AppStandbyClockEngine::inter_show_window_fg()` — five `setEnableBtn(true)`
+  sites and one `setEnableBtn(false)` there, none in the screen-change path.
+  When the disclaimer is drawn without a foreground transition the flag never
+  goes true and the button stays dead until the next one. Never treat
+  `enableBtn` as "the confirmation is allowed": the C++ event handler is the
+  authority, so the auto-accept timer keeps retrying and then sends the key
+  itself.
+- The patch therefore un-gates the Confirm button (`TWEAKS_UNGATED_CONFIRM`)
+  and routes its click through `requestConfirmClick()`: the key is sent at
+  once, and if `enableBtn` is still false the tap is re-delivered as soon as
+  it turns true (250 ms poll, 10 s cap) - the OEM setup finishes within a
+  couple of seconds, so the disclaimer is confirmable the moment it is drawn.
+- `inter_show_window_fg()` also arms a 10 s watchdog
+  (`QTimer::start(10000)` → `slotTimeoutDisableConfirmBtn()`); that slot only
+  clears internal engine state, it does not touch the model flag.
 - DST is `APP_SETTING_CLOCK_DAYLIGHTSAVETIME` (0/1) through the vendor PCL.
   `TimeManager` treats `1` as DST on and `0` as DST off and adds/removes one
   hour when it broadcasts time. Value `2` (stock Setup "Custom" mode) is

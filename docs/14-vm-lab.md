@@ -284,6 +284,32 @@ Weston/QML/updater logs and the serial tail. Run management
 (`list/show/extract/prune/gc`) defaults to dry-run; `--apply` is required to
 delete runs.
 
+## What a successful car flash promotes
+
+When a real update goes through, the fixtures and the status labels move with it —
+that is the point of keeping the two apart. What each promotion needs from the run
+comes from one bundle (`scripts/22_collect_rig_logs.sh`), so nothing here depends
+on memory of a driveway:
+
+| what | now | after a successful flash | evidence it needs |
+|---|---|---|---|
+| `docs/17` TOCTOU path | **done: `car-validated 2026-11-21`** | `car-validated` with the date | `PASS #1 END served=GENUINE`, `SWITCH at pass #2`, then evil reads to the region end — a `PASS #2 END` row only appears if another sweep starts |
+| `docs/03` build-5 `.ver` output hashes | "unreachable, re-record" | the recorded `sha256` of the packaged `.ver` | that bundle's `rig-state.txt` + the local `out/` hashes |
+| `docs/04` rate figures | Pi-side measurement (98 MB/s, 30–45 s/pass floor) | the head unit's real per-pass rate | `dur` and bytes from `toctou.log` |
+| `tools/vm/probes` + `make-update-media` fixtures | synthetic lab `.ver`/manifest | real row CRCs pinned (`1243982759` genuine, `287530490` patched) | the same two numbers, already checked by `09_preflight.sh` |
+| `stock-update-stage` blockers | "not implemented" | split into *not implemented* vs *not yet car-validated* | only the parts the run touched |
+| swap invariants | `verify/verify_toctou_image.py`, run by `09_preflight.sh` D | unchanged, plus the real image's numbers | already local — this one does not wait for the car |
+
+Not promoted by a successful flash: the `.ver` row CRC in the *served* image. It
+stays the genuine `1243982759`, because the install path never re-hashes the
+rootfs (`docs/01`).
+
+**Promoted 2026-11-21** from a 2021 Ioniq 5 RWD that took the patched rootfs
+through the rig (`docs/17`): the status label in `docs/17`, the build-6 column in
+`docs/03`, the `KNOWN_GOOD_*` pins in `config/firmware_locks.env`, and the rate
+figures in `docs/04`. The fixture pins had already been derived rather than
+pinned, so the run confirmed them instead of changing them.
+
 ## Status labels
 
 `car-validated` · `VM-validated (vendor kernel)` · `VM-validated (compat

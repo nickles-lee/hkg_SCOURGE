@@ -14,7 +14,7 @@ url       = https://github.com/galaxy4public/hkmcavn-tools
 license   = GPL-2.0 (fetched only; nothing is redistributed from here)
 commit    = 2570e130d4f4cc586b30e30a146f457ed7053f2b
 used_for  = TE2 content key (extracted from xcrypt/xcrypt.py into config/key.local)
-files.xcrypt/xcrypt.py.sha256 = <record-at-first-fetch>
+files.xcrypt/xcrypt.py.sha256 = cd7fc4aabac3f798f1db2cc662a121091e50744249dcd4f54e0e9b1d6a2c93e1
 
 [ioniq5-usb-toctou]
 url       = https://github.com/CloudPapi/ioniq5-usb-toctou
@@ -24,16 +24,18 @@ used_for  = pizero/te2_encrypt.py, pizero/gen5w_decrypt.py, pizero/chunkgz.py,
             pizero/nbdkit_toctou.py, pizero/02_build_usb_image.sh,
             pizero/03_deploy_gadget.sh, pizero/04_preflight.sh, pizero/arm.sh,
             pizero/99_teardown.sh, pizero/toctou-gadget.service, pizero/system/
-files.pizero/te2_encrypt.py.sha256   = <record-at-first-fetch>
-files.pizero/gen5w_decrypt.py.sha256 = <record-at-first-fetch>
-files.pizero/chunkgz.py.sha256       = <record-at-first-fetch>
-files.pizero/nbdkit_toctou.py.sha256 = <record-at-first-fetch>
+files.pizero/te2_encrypt.py.sha256   = 9ac7391cf173ecec39dde3913210c2f832b896f4dfd2c6ed934bf0f12b162a8f
+files.pizero/gen5w_decrypt.py.sha256 = 93a87f9c58ff9de1f5c07e437b068f7a72476825eae583497decd6771caffba2
+files.pizero/chunkgz.py.sha256       = 80b22bbe9add89dca80dbe47d593a7169eacde691e21a04095fbf2d6d1f4b37c
+files.pizero/nbdkit_toctou.py.sha256 = ccabd38ddf8da36c4ecf4e8763933a164138f5e20ac32ae30ddbd776daf03571
 
 [nudl]
 url       = https://github.com/chenxiaolong/nudl
 license   = GPL-3.0-only (fetched only)
 channel   = signed release binaries (verify per upstream VERIFY_SSH_SIGNATURES.md)
-version   = <pin-latest-release-at-first-fetch>
+version   = 1.3.0 (nudl-1.3.0-x86_64-unknown-linux-musl.zip)
+sha256.nudl-1.3.0-x86_64-unknown-linux-musl.zip = 66d0e1c6ab35a5ca372ed47125bbb633d9a5c995347651910b535caff94ad028
+sha256.nudl = 7c0c022013ef0449d5cc13b657e93983eb792e0e279ce947b2135e031498aecc
 used_for  = downloading the official firmware package from the OEM's own
             update servers (same publicly available files as the official
             Navigation Updater, no login); nudl verify -d for offline checks

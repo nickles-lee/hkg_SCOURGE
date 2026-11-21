@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=SCOURGE rig: fall back to a setup access point when WiFi is unknown
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/rig/wifi.env
+ExecStart=/usr/local/sbin/rig-ap-fallback
+Restart=always
+RestartSec=10
+# Never let a bug here take the rig offline: the unit is restarted, not fatal.
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

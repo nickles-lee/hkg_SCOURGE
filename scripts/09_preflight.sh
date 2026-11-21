@@ -41,5 +41,21 @@ if [ -d "$OUT_DIR/package_wrapper" ]; then
         --ver "$OUT_DIR/package_wrapper/$VER_FILE"
 fi
 
+# D is the one gate that looks at the *served* image instead of the build: a
+# region that misses the container, or an envelope that failed to differ, costs a
+# drive to the car and nothing else catches it.
+if [ -f "$OUT_DIR/usb.img" ] && [ -f "$OUT_DIR/regions.json" ]; then
+    echo
+    echo "########## D. TOCTOU image (the swap lands on the genuine container)"
+    "$PYTHON" "$SCOURGE_ROOT/verify/verify_toctou_image.py" \
+        --image "$OUT_DIR/usb.img" \
+        --regions "$OUT_DIR/regions.json" \
+        --genuine "$INPUT_DIR/mango-rootfs.tar.gz" \
+        --envelope "$OUT_DIR/stage1.te2"
+else
+    echo
+    echo "########## D. TOCTOU image — skipped (no out/usb.img or out/regions.json)"
+fi
+
 echo
 echo "PREFLIGHT: OK"

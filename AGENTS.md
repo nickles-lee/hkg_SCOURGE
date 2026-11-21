@@ -20,7 +20,8 @@ repo.
    - No TE2 key material (it is fetched into gitignored `config/key.local`).
    - No third-party code (dependencies are fetched pinned into
      gitignored `third_party/`; deltas ship as patch files only).
-   - No personal data (credentials, pubkeys, LAN details) in any file.
+   - No personal data (credentials, pubkeys, LAN details, WiFi SSIDs and
+     PSKs) in any file. `policy_check.py leaks` enforces all of it.
    - **Preserve and attach attribution:** first-party files carry
      `SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors` +
      `SPDX-License-Identifier: AGPL-3.0-only` headers (Section 7
@@ -171,7 +172,10 @@ per clone via `core.hooksPath scripts/githooks`:
 The checks:
 
 - **`leaks`** — no personal data: absolute host paths, usernames, LAN
-  details, key material. **Deliberate product defaults are not secrets:**
+  details, key material, and WiFi credentials (`ssid=` / `psk=` /
+  `passphrase=` in text and config carriers; source files are exempt,
+  where those tokens are identifiers and fixtures).
+  **Deliberate product defaults are not secrets:**
   the `car`/`electric` SSH credential and the fixed UIDs (`car` = UID 0)
   are intended defaults — never remove them. QEMU gateway addresses
   (`10.0.2.x`), loopback, and the `config/paths.env.example` fill-in

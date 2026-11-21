@@ -77,11 +77,14 @@ libdeflate L10 → exact-size padding → TE2-encrypt with the stock envelope
 as metadata template) reproduces byte-identical artifacts. **Compare every
 artifact against this table; any mismatch means stop and investigate.**
 
-> **Build 6 (all-language boot message) is WIP.** The message refresh changes
-> all patched `.qm` files, so it changes every rootfs-derived hash below. The
-> values are the car-validated **build 5** and remain the reference for the
-> image on the car. Re-record the table from a full build and validate the new
-> image on the car before calling build 6 known-good. The `.qm`-only SSH
+> **Build 6 is car-validated as of 2026-11-21.** A 2021 Ioniq 5 RWD installed
+> `out/stage1.te2` (`7f3b155e…`) through the TOCTOU rig — the run is in docs/17.
+> The build-6 column below is therefore what is on that car, and the build-5
+> values are the historical reference: the message refresh changes all patched
+> `.qm` files, so every rootfs-derived hash moved while the four payload
+> binaries stayed byte-identical (see the table's payload rows).
+> `config/firmware_locks.env`'s `KNOWN_GOOD_*` pins now carry the validated
+> values, so a build that does not reproduce them stops here. The `.qm`-only SSH
 > refresh (`tools/deploy_boot_messages.sh`) does not use this table.
 
 | Artifact | Property | Known-good value (build 5) |
@@ -100,6 +103,48 @@ artifact against this table; any mismatch means stop and investigate.**
 
 Build-6 input (WIP): `config/messages.json` sha256
 `f9929bf437ba0bdd763e744b3a1ec47cbfd910973431b88272a346ceb4a266f6`.
+
+### Build 6 measurements (offline-validated 2026-11-19, NOT car-validated)
+
+A full local run of the chain on the OEM 260128 package reproduced every
+payload binary byte-for-byte and produced the values below. The build-5 column
+above still describes the image on the car; these replace it only once a car
+run confirms them.
+
+| Artifact | Property | Measured value (build 6) |
+|---|---|---|
+| `out/stage1.te2` | size / sha256 | 879,126,179 / `7f3b155e487f10929ea97cb3e12eb95fdeb114e57a38c187ec8b410d1b12fb94` |
+| `work/stage1.padded.tar.gz` | sha256 | `32aec017f8e0c16a7cfcdb836c8db346717774d42186cbf47c87dbe23516a8c4` |
+| `work/payload/*.patched` (4 files) | sha256 | unchanged — identical to the build-5 pins |
+| `out/AppUpgrade.patched.te2` | sha256 | `9a0df0809a3f15c2d5f1d3e83c19ec0a27f336727e57e01bb2c5ae2e82783876` (unchanged) |
+| `out/package_second/IONIQ5_EU.ver` | size / sha256 | 2,469 / `c763b6d7947a5bdb70f925db675e284d9a322a6cf7e850a9e0be2f5c6077dd12` |
+| `out/package_wrapper/IONIQ5_EU.ver` | size / sha256 | 2,469 / `34bb8bc8966353a4b3084d916cacfd839d07accf43f691c84471be16602f40d3` |
+| `out/usb.img` | size / sha256 | 28,894,603,492 / `ab4686bd4144d770d5bd95fcf4b337f9340e1a1d2e3d3966619a7a9ba027dcf5` |
+| `out/regions.json` | `off` / `len` | 5,505,024 / 879,126,179 (single extent, `benign_then_evil`, pass 2) |
+
+Two facts about the build-5 column, both established on 2026-11-19 while
+reproducing it from a clean download:
+
+1. **`VER_STOCK_SIZE` / `VER_STOCK_SHA256` / `VER_ROOTFS_ROW_STOCK_CRC` were
+   wrong, and are corrected in `config/firmware_locks.env`.** The OEM package
+   for this version ships a **2,469-byte** `.ver` (sha256 `53da7ec0…80ad7b3`)
+   whose rootfs row carries CRC `1243982759` — exactly `crc32` of the genuine
+   879,126,179 B envelope, the same convention the wrapper row uses
+   (`609028602` == `crc32(AppUpgrade)`). The old pin described a 2,467-byte
+   manifest that no official download produces, so `01_stage_inputs.sh`
+   refused a genuine package. The row CRC is no longer pinned at all: it is
+   derived and checked against the staged envelope on every run. Verified
+   2026-11-20 by extracting that gate and running it on purpose: the genuine
+   `.ver` exits 0, the same file with the row CRC off by one exits 1.
+   The *patched* row CRC had rotted the same way — `VER_ROOTFS_ROW_PATCHED_CRC`
+   still said `311417491` while `crc32(out/stage1.te2)` is `287530490`. Nothing
+   read it, so nothing broke, which is exactly how a stale pin waits for a
+   future script; the pin is gone and the value is derived
+   (`verify_package.py`, `09_preflight.sh`). The wrapper pins are current
+   (`609028602` stock, `414600538` patched).
+2. **The build-5 `.ver` output hashes are therefore unreachable from a fresh
+   download** — they were produced from that 2,467-byte base. Re-record them
+   from a car-validated run, not from this table.
 
 Envelope shape: class `0xe0`, IV `5412d68d2f22bf3d30f3c1ff1e715326`, body
 879,109,759 B, tar entries 66,841 (genuine 66,836 + four failsafe entries +
@@ -138,6 +183,15 @@ package variants (stock diff, `.ver` rows 341174/341142, signed XML, class
   are appended in the script's order; `04_repack_rootfs.sh` fixes their
   mtimes to absolute epochs so the TE2 hash does not depend on the host
   timezone or checkout time.
+- **exFAT cannot store ownership or mode:** `cp -a` and `rsync -a` abort on an
+  exFAT mount (every `chown` is EPERM, root included), which is why
+  `08_build_usb_image.sh` assembles the image itself with
+  `--no-preserve=ownership,mode` / `rsync -rlDt` instead of delegating to the
+  upstream builder. Keep timestamps: they cost nothing and match the package.
+- **A `.ver` mismatch is a stop, not an edit:** the row is derived from the
+  container, so a refused gate means the staged envelope is not the one the
+  manifest describes. Correct the pin only from a measured official package,
+  and re-record the affected output hashes.
 - **Do not "fix" the loader's "ten" comments:** `run_stuff_loader.sh` is
   byte-frozen as part of the car-validated tar; editing either comment
   changes `out/stage1.te2` from `d1eec7cb…`. The guard actually re-applies
