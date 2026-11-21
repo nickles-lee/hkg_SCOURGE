@@ -2,8 +2,9 @@
 
 ## Resume here
 
-Current branch: `carplay-vbtd51-broker`, checkpoints `7e1ebda` (build-only
-broker/units/reproduction map) and `69f1b31` (live P2 docs). Not pushed.
+Current branch: `carplay-vbtd51-broker`, rebased checkpoints `7c62c35`
+(build-only broker/units/reproduction map) and `4663025` (live P2 docs).
+Not pushed.
 Current V24 integration and release gates: [V24.md](V24.md).
 Historical V23 offline checkpoint: [V23.md](V23.md).
 Reviewed defect checkpoints: [CONFIRMED-FIXES.md](CONFIRMED-FIXES.md).

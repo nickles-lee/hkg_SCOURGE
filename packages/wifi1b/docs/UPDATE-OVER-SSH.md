@@ -18,10 +18,15 @@ keys, `authorized_keys`, QML and the USB-SSH boot unit are untouched.
   or through the Pi reverse tunnel from the desktop:
   `ssh -p 2222 <pi-user>@127.0.0.1`, then the same car command.
 - A statically linked x86-64 `wifi1b_daemon` built from the intended commit.
+  The script checks the ELF magic and x86-64 machine field directly and checks
+  the static-link flag when `file` is installed.
 - Root on the head unit (the `wifi1b` account is UID 0).
 - `ssh=1` in `/rw_data/wifi1b/config.conf` if the script should also verify
-  that the USB SSH listener comes back. With `ssh=0` it only waits for the
-  daemon API and reports `ssh_enabled=0`.
+  that the USB SSH listener comes back. With `ssh=0` the script still requires
+  a verified daemon API response; it reports `ssh_enabled=0` and `listener=no`.
+- A local HTTP probe (`socat`, `wget` or `curl`) and, when `ssh=1`, a listener
+  probe (`netstat` or `ss`). The script fails closed **before** stopping the
+  daemon if it cannot verify success.
 
 ## Build
 
@@ -73,8 +78,10 @@ ssh wifi1b@10.55.0.2 -p 2224 '
 '
 ```
 
-The script re-checks the hash and the static x86-64 ELF before it stops
-anything.
+The script re-checks the hash, the ELF magic/x86-64 machine field and (when
+`file` is available) the static-link flag before it stops anything. It also
+checks that a probe tool exists, so it never stops the daemon unless success
+can be verified.
 
 ## Launch detached
 
@@ -105,15 +112,23 @@ will kill that SSH session.
 ## What the script does
 
 1. Takes an exclusive `flock` and removes an old result file.
-2. Verifies the staged binary hash, executable bit and static x86-64 ELF.
-3. Exits without restarting if the live binary already matches the hash.
-4. Stops `wifi1b-daemon.service`, waits for the daemon process to exit.
-5. Backs up the live binary to
-   `/rw_data/wifi1b/backup/wifi1b_daemon.pre-hotswap-<timestamp>`.
-6. Atomically replaces the live binary, fixes mode/owner/SMACK and `sync`s.
-7. Starts the service and waits up to 120 s for the local API and `:2224`.
-8. On start failure or missing listener, restores the backup and restarts the
-   old daemon.
+2. Verifies the staged hash, executable bit, ELF magic and x86-64 machine;
+   checks the static-link flag when `file` is installed; requires a probe tool.
+3. Exits without restarting only when the live hash matches **and** the API
+   answers; otherwise it reports `ok=0` without stopping the daemon.
+4. Backs up the live binary to
+   `/rw_data/wifi1b/backup/wifi1b_daemon.pre-hotswap-<timestamp>` **before**
+   stopping anything, then records the live `SMACK64`/`SMACK64EXEC` labels
+   when readable.
+5. Stops `wifi1b-daemon.service`, waits for the daemon process to exit, and
+   refuses to replace a binary that is still being executed.
+6. Copies the new binary to a same-directory temporary, fixes mode/owner,
+   preserves the recorded labels, `sync`s, and renames it over the live path
+   atomically.
+7. Starts the service and waits up to 120 s for a verified local API response
+   and, when `ssh=1`, the `:2224` listener.
+8. On any failure, interruption or signal after the stop, restores the backup
+   (including its recorded labels), restarts the unit, and writes `ok=0`.
 9. Writes `/rw_data/wifi1b/hotswap.result` and appends to
    `/rw_data/wifi1b/hotswap.log`.
 
@@ -125,21 +140,20 @@ to return and then read the staged result:
 
 ```sh
 # On the Pi (or from the desktop through the Pi):
-while ! ssh -o BatchMode=yes -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
+while ! ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
         -p 2224 wifi1b@10.55.0.2 \
         'test -f /rw_data/wifi1b/hotswap.result'; do
     sleep 2
 done
 
-ssh -o BatchMode=yes -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
+ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
     -p 2224 wifi1b@10.55.0.2 \
     'cat /rw_data/wifi1b/hotswap.result; tail -100 /rw_data/wifi1b/hotswap.log'
 ```
 
-A successful result contains `ok=1`, the new `build_id`, the retained backup
-path and `listener=yes`.
+A successful result contains `ok=1`, `api=yes`, the new `build_id`, the
+retained backup path and, when `ssh=1`, `listener=yes`. With `ssh=0` it
+contains `listener=no` and `ssh_enabled=0`; success still requires `api=yes`.
 
 ## Verify
 
@@ -162,7 +176,9 @@ startup is the end-to-end check:
 
 ## Rollback
 
-The script rolls back automatically on a failed start or missing listener.
+The script restores the backup automatically on any failed start, missing API,
+missing listener, interruption or signal after the stop. It also restarts the
+unchanged old daemon if it fails before replacing the binary.
 For a manual rollback:
 
 ```sh
@@ -172,7 +188,9 @@ ssh wifi1b@10.55.0.2 -p 2224 '
     cp -f "$BACKUP" /rw_data/wifi1b/wifi1b_daemon
     chmod 755 /rw_data/wifi1b/wifi1b_daemon
     chown 0:0 /rw_data/wifi1b/wifi1b_daemon
-    chsmack -a _ /rw_data/wifi1b/wifi1b_daemon 2>/dev/null || true
+    # The automatic path restores the recorded SMACK64/SMACK64EXEC labels.
+    # This manual fallback uses the product's floor label.
+    chsmack -e _ /rw_data/wifi1b/wifi1b_daemon 2>/dev/null || true
     sync
     systemctl start wifi1b-daemon.service
 '

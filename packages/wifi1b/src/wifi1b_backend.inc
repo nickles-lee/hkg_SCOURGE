@@ -505,6 +505,17 @@ static bool carplay_id_allowed(const char *id)
               c == '_' || c == '-'))
             return false;
     }
+    /* A MAC-shaped identity must also be a usable unicast, non-zero address
+     * (the same rule the receiver policy applies to deviceid). */
+    {
+        uint8_t mac[6];
+        if (parse_mac6(id, mac)) {
+            bool zero = true;
+            for (size_t i = 0; i < sizeof(mac); i++)
+                if (mac[i] != 0u) { zero = false; break; }
+            if (zero || (mac[0] & 1u)) return false;
+        }
+    }
     return true;
 }
 

@@ -14,6 +14,9 @@ QML_SRC="$ROOT/artifacts/qml/AppHomeScreen/qml_eco3.0"
 cd "$ROOT"
 
 echo "== build daemon / wrapper =="
+# The embedded build identity hashes scripts/ and src/, so a script-only
+# change must relink the daemon; an incremental make would keep the old ID.
+make -C src clean
 make -C src
 
 echo "== build persistence helper =="

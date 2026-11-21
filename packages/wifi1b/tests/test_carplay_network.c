@@ -1353,6 +1353,14 @@ static void test_identity_gate(void)
     assert(!carplay_ie_on());
     assert(!g_carplay_ie);
 
+    str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), "01:00:00:00:00:00");
+    assert(!carplay_ie_on());
+    assert(!g_carplay_ie);
+
+    str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), "00:00:00:00:00:00");
+    assert(!carplay_ie_on());
+    assert(!g_carplay_ie);
+
     str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), "AA:BB:CC:DD:EE:01");
     assert(carplay_ie_on());
     assert(g_carplay_ie);

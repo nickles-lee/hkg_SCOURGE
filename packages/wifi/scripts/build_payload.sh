@@ -22,6 +22,9 @@ echo "== QML artifacts =="
 python3 scripts/build_artifacts.py
 
 echo "== build daemon =="
+# The embedded build identity hashes scripts/ and src/, so a script-only
+# change must relink the daemon; an incremental make would keep the old ID.
+make -C src clean
 make -C src
 
 echo "== assemble $OUT =="

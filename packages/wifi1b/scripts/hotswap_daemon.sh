@@ -8,40 +8,192 @@
 # Launch this script detached (systemd-run --no-block, or setsid) and read
 # hotswap.result / hotswap.log after reconnecting.
 set -u
-PATH=/bin:/sbin:/usr/bin:/usr/sbin
+PATH=${WIFI1B_HOTSWAP_PATH:-/bin:/sbin:/usr/bin:/usr/sbin}
 
-APP=/rw_data/wifi1b
+APP=${WIFI1B_HOTSWAP_APP:-/rw_data/wifi1b}
+SERVICE=${WIFI1B_HOTSWAP_SERVICE:-wifi1b-daemon.service}
+SYSTEMCTL=${WIFI1B_HOTSWAP_SYSTEMCTL:-systemctl}
+API_PORT=${WIFI1B_HOTSWAP_API_PORT:-8093}
+SSH_PORT=${WIFI1B_HOTSWAP_SSH_PORT:-2224}
+START_DELAY=${WIFI1B_HOTSWAP_START_DELAY:-2}
+VERIFY_WAIT=${WIFI1B_HOTSWAP_VERIFY_WAIT:-120}
+RECOVERY_WAIT=${WIFI1B_HOTSWAP_RECOVERY_WAIT:-30}
 LIVE="$APP/wifi1b_daemon"
 NEW="$APP/wifi1b_daemon.new"
 NEW_SHA="$NEW.sha256"
-SERVICE=wifi1b-daemon.service
 BACKUP_DIR="$APP/backup"
 LOG="$APP/hotswap.log"
 RESULT="$APP/hotswap.result"
 LOCK="$APP/hotswap.lock"
 CFG="$APP/config.conf"
-PORT=2224
+
+state=pre                 # pre -> stopping -> stopped -> installing -> installed -> committed
+reason=""
+backup=""
+tmp=""
+label64=""
+labelexec=""
+api=no
+listener=no
+want_ssh=1
+build=""
+rollback="not-needed"
 
 mkdir -p "$BACKUP_DIR" 2>/dev/null || true
 exec >> "$LOG" 2>&1
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
+
+write_result() {
+    ok=$1
+    rb=$2
+    why=$3
+    tmp_result="$RESULT.tmp.$$"
+    {
+        echo "ok=$ok"
+        echo "rollback=$rb"
+        echo "reason=$why"
+        echo "listener=$listener"
+        echo "ssh_enabled=$want_ssh"
+        echo "api=$api"
+        [ -z "$build" ] || echo "build_id=$build"
+        [ -z "$backup" ] || echo "backup=$backup"
+        echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$tmp_result" 2>/dev/null && mv -f "$tmp_result" "$RESULT" 2>/dev/null
+    rm -f "$tmp_result" 2>/dev/null || true
+}
+
+probe_api() {
+    if command -v socat >/dev/null 2>&1; then
+        printf 'GET /status HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n' |
+            socat -T 2 - TCP:127.0.0.1:"$API_PORT" 2>/dev/null | grep -q '^HTTP/'
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 2 -O - "http://127.0.0.1:$API_PORT/status" 2>/dev/null |
+            grep -q '"ok":'
+    elif command -v curl >/dev/null 2>&1; then
+        curl -fsS --max-time 2 "http://127.0.0.1:$API_PORT/status" 2>/dev/null |
+            grep -q '"ok":'
+    else
+        return 2
+    fi
+}
+
+probe_listener() {
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | grep -q ":$SSH_PORT "
+    elif command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | grep -q ":$SSH_PORT "
+    else
+        return 2
+    fi
+}
+
+record_labels() {
+    if command -v getfattr >/dev/null 2>&1; then
+        label64=$(getfattr -n security.SMACK64 --only-values "$LIVE" 2>/dev/null |
+                  tr -d '\000\n')
+        labelexec=$(getfattr -n security.SMACK64EXEC --only-values "$LIVE" 2>/dev/null |
+                    tr -d '\000\n')
+    fi
+}
+
+apply_labels() {
+    target=$1
+    if command -v chsmack >/dev/null 2>&1; then
+        [ -z "$label64" ] || chsmack -a "$label64" "$target" 2>/dev/null || true
+        [ -z "$labelexec" ] || chsmack -e "$labelexec" "$target" 2>/dev/null || true
+    elif command -v setfattr >/dev/null 2>&1; then
+        [ -z "$label64" ] ||
+            setfattr -n security.SMACK64 -v "$label64" "$target" 2>/dev/null || true
+        [ -z "$labelexec" ] ||
+            setfattr -n security.SMACK64EXEC -v "$labelexec" "$target" 2>/dev/null || true
+    fi
+}
+
+start_service() {
+    "$SYSTEMCTL" start "$SERVICE" >/dev/null 2>&1
+}
+
+recover() {
+    [ "$state" = committed ] && return 0
+    log "recovery: state=$state reason=$reason"
+    case "$state" in
+        installing)
+            [ -z "$tmp" ] || rm -f "$tmp"
+            rollback="service-restarted"
+            start_service || log "recovery: restart failed"
+            ;;
+        installed)
+            if [ -n "$backup" ] && [ -f "$backup" ]; then
+                rt="$LIVE.hotswap.restore.$$"
+                if cp -f "$backup" "$rt" 2>/dev/null; then
+                    chmod 755 "$rt" 2>/dev/null || true
+                    chown 0:0 "$rt" 2>/dev/null || true
+                    apply_labels "$rt"
+                    sync
+                    if mv -f "$rt" "$LIVE" 2>/dev/null; then
+                        rollback="restored"
+                    else
+                        rm -f "$rt" 2>/dev/null || true
+                        rollback="restore-failed"
+                    fi
+                else
+                    rm -f "$rt" 2>/dev/null || true
+                    rollback="restore-failed"
+                fi
+            else
+                rollback="restore-failed"
+            fi
+            start_service || log "recovery: restart failed"
+            ;;
+        stopped|stopping)
+            rollback="service-restarted"
+            start_service || log "recovery: restart failed"
+            ;;
+        pre)
+            rollback="not-needed"
+            ;;
+    esac
+    # Best effort: give the restored daemon a short window to answer.
+    i=0
+    while [ "$i" -lt "$RECOVERY_WAIT" ]; do
+        if probe_api >/dev/null 2>&1; then api=yes; break; fi
+        if [ "$want_ssh" = 1 ] && probe_listener >/dev/null 2>&1; then
+            listener=yes
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    write_result 0 "$rollback" "$reason"
+    state=committed
+}
+
+on_exit() {
+    rc=$?
+    trap - EXIT INT TERM HUP
+    if [ "$state" != committed ]; then
+        [ -n "$reason" ] || reason="interrupted"
+        recover
+    fi
+    exit "$rc"
+}
+
+fail() {
+    reason=$*
+    log "FAIL: $reason"
+    exit 1
+}
+
+trap on_exit EXIT
+trap 'reason=interrupted; exit 130' INT
+trap 'reason=terminated; exit 143' TERM
+trap 'reason=hangup; exit 129' HUP
+
 log "=== hot-swap start pid=$$ ==="
 
 exec 9>"$LOCK" 2>/dev/null || true
 if command -v flock >/dev/null 2>&1; then
     flock -n 9 || { log "another hot-swap holds $LOCK"; exit 1; }
 fi
-
-fail() {
-    log "FAIL: $*"
-    {
-        echo "ok=0"
-        echo "rollback=not-needed"
-        echo "reason=$*"
-        echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    } > "$RESULT"
-    exit 1
-}
 
 rm -f "$RESULT" 2>/dev/null || true
 [ -f "$NEW" ] || fail "missing $NEW"
@@ -54,20 +206,12 @@ want=$(cat "$NEW_SHA" 2>/dev/null | tr -d ' \t\r\n' | cut -c1-64)
 got=$(sha256sum "$NEW" 2>/dev/null | cut -d' ' -f1)
 [ "$got" = "$want" ] || fail "staged binary hash mismatch: got $got want $want"
 
+new_magic=$(dd if="$NEW" bs=1 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')
+[ "$new_magic" = "7f454c46" ] || fail "$NEW is not an ELF file"
+new_machine=$(dd if="$NEW" bs=1 skip=18 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n')
+[ "$new_machine" = "3e00" ] || fail "$NEW is not an x86-64 ELF"
 if command -v file >/dev/null 2>&1; then
-    file "$NEW" | grep -q 'ELF 64-bit LSB.*x86-64' || fail "$NEW is not an x86-64 ELF"
     file "$NEW" | grep -q 'statically linked' || fail "$NEW is not statically linked"
-fi
-
-if [ "$(sha256sum "$LIVE" 2>/dev/null | cut -d' ' -f1)" = "$want" ]; then
-    log "live binary already matches staged hash; no restart"
-    {
-        echo "ok=1"
-        echo "rollback=not-needed"
-        echo "reason=already-current"
-        echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    } > "$RESULT"
-    exit 0
 fi
 
 ssh_en=$(sed -n 's/^ssh=//p' "$CFG" 2>/dev/null | tail -n 1)
@@ -75,18 +219,59 @@ want_ssh=1
 [ "$ssh_en" = "1" ] || want_ssh=0
 log "ssh_enabled=$want_ssh"
 
+# Fail before touching the daemon if success could not be verified.
+probe_api >/dev/null 2>&1
+[ $? -ne 2 ] || fail "no HTTP probe tool (socat/wget/curl)"
+if [ "$want_ssh" = 1 ]; then
+    probe_listener >/dev/null 2>&1
+    [ $? -ne 2 ] || fail "no listener probe tool (netstat/ss)"
+fi
+
+if [ "$(sha256sum "$LIVE" 2>/dev/null | cut -d' ' -f1)" = "$want" ]; then
+    api=no
+    i=0
+    while [ "$i" -lt 5 ]; do
+        if probe_api >/dev/null 2>&1; then api=yes; break; fi
+        i=$((i + 1))
+        sleep 1
+    done
+    if [ "$want_ssh" = 1 ] && probe_listener >/dev/null 2>&1; then listener=yes; fi
+    build=$(sed -n 's/.*"build_id":"\([^"]*\)".*/\1/p' "$APP/status.json" 2>/dev/null | head -n 1)
+    if [ "$api" = yes ]; then
+        log "live binary already matches staged hash and API answers; no restart"
+        write_result 1 not-needed already-current
+        state=committed
+        exit 0
+    fi
+    fail "already-current binary but the daemon API is unreachable"
+fi
+
 # Give the launching SSH command time to return before the daemon stop drops
 # its connection and kills every child of that session.
-sleep 2
+sleep "$START_DELAY"
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 backup="$BACKUP_DIR/wifi1b_daemon.pre-hotswap-$stamp"
+[ ! -e "$backup" ] || backup="$backup.$$"
+# Back up while the daemon is still running: a failed backup must not leave
+# the unit stopped.
+cp -p "$LIVE" "$backup" || fail "cannot back up $LIVE"
+cmp -s "$LIVE" "$backup" || fail "backup readback mismatch: $backup"
+log "backup: $backup"
+record_labels
+log "labels: SMACK64=${label64:-<none>} SMACK64EXEC=${labelexec:-<none>}"
 
+state=stopping
 log "stopping $SERVICE"
-systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+if ! "$SYSTEMCTL" stop "$SERVICE" >/dev/null 2>&1; then
+    # Leave state=stopping so recovery reasserts the unit even if the stop
+    # partly succeeded before returning an error.
+    fail "cannot stop $SERVICE"
+fi
+state=stopped
 i=0
+pid=""
 while [ "$i" -lt 30 ]; do
-    pid=""
     if command -v pidof >/dev/null 2>&1; then
         pid=$(pidof wifi1b_daemon 2>/dev/null || true)
     else
@@ -96,51 +281,34 @@ while [ "$i" -lt 30 ]; do
     i=$((i + 1))
     sleep 1
 done
-[ -z "$pid" ] || log "warning: daemon pid $pid still present after stop"
-
-cp -p "$LIVE" "$backup" || fail "cannot back up $LIVE"
-log "backup: $backup"
-
-cp -f "$NEW" "$LIVE" || fail "cannot install staged binary"
-chmod 755 "$LIVE" 2>/dev/null || true
-chown 0:0 "$LIVE" 2>/dev/null || true
-if command -v chsmack >/dev/null 2>&1; then
-    chsmack -a _ "$LIVE" 2>/dev/null || true
+if [ -n "$pid" ]; then
+    # Do not replace a binary that some process may still be executing.
+    fail "daemon pid $pid still present after stop; not replacing"
 fi
+
+state=installing
+tmp="$LIVE.hotswap.$$"
+cp -f "$NEW" "$tmp" || fail "cannot stage the new binary"
+cmp -s "$NEW" "$tmp" || fail "staged binary readback mismatch"
+chmod 755 "$tmp" 2>/dev/null || true
+chown 0:0 "$tmp" 2>/dev/null || true
+apply_labels "$tmp"
+sync
+mv -f "$tmp" "$LIVE" || fail "cannot replace the live binary"
+state=installed
+log "installed: $LIVE"
 sync
 
 log "starting $SERVICE"
-if ! systemctl start "$SERVICE" >/dev/null 2>&1; then
-    log "start failed; restoring backup"
-    cp -f "$backup" "$LIVE" 2>/dev/null || true
-    chmod 755 "$LIVE" 2>/dev/null || true
-    chown 0:0 "$LIVE" 2>/dev/null || true
-    sync
-    systemctl start "$SERVICE" >/dev/null 2>&1 || true
-    {
-        echo "ok=0"
-        echo "rollback=restored"
-        echo "reason=start-failed"
-        echo "backup=$backup"
-        echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    } > "$RESULT"
-    exit 1
+if ! start_service; then
+    fail "start failed"
 fi
 
-api=no
-listener=no
 i=0
-while [ "$i" -lt 120 ]; do
-    if command -v socat >/dev/null 2>&1 &&
-       printf 'GET /status HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n' |
-           socat -T 2 - TCP:127.0.0.1:8093 2>/dev/null | grep -q '^HTTP/'; then
-        api=yes
-    fi
-    if netstat -ltn 2>/dev/null | grep -q ":$PORT "; then
-        listener=yes
-        break
-    fi
-    if [ "$want_ssh" = 0 ] && [ "$api" = yes ]; then
+while [ "$i" -lt "$VERIFY_WAIT" ]; do
+    if probe_api >/dev/null 2>&1; then api=yes; fi
+    if [ "$want_ssh" = 1 ] && probe_listener >/dev/null 2>&1; then listener=yes; fi
+    if [ "$api" = yes ] && { [ "$want_ssh" = 0 ] || [ "$listener" = yes ]; }; then
         break
     fi
     i=$((i + 1))
@@ -150,32 +318,14 @@ done
 build=$(sed -n 's/.*"build_id":"\([^"]*\)".*/\1/p' "$APP/status.json" 2>/dev/null | head -n 1)
 log "api=$api listener=$listener ssh_enabled=$want_ssh build_id=$build"
 
+if [ "$api" != yes ]; then
+    fail "daemon API did not answer after restart"
+fi
 if [ "$want_ssh" = 1 ] && [ "$listener" != yes ]; then
-    log "listener did not appear; restoring backup"
-    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-    cp -f "$backup" "$LIVE" 2>/dev/null || true
-    chmod 755 "$LIVE" 2>/dev/null || true
-    chown 0:0 "$LIVE" 2>/dev/null || true
-    sync
-    systemctl start "$SERVICE" >/dev/null 2>&1 || true
-    {
-        echo "ok=0"
-        echo "rollback=restored"
-        echo "reason=no-listener"
-        echo "backup=$backup"
-        echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    } > "$RESULT"
-    exit 1
+    fail "SSH listener did not appear after restart"
 fi
 
-{
-    echo "ok=1"
-    echo "rollback=not-needed"
-    echo "listener=$listener"
-    echo "ssh_enabled=$want_ssh"
-    echo "build_id=$build"
-    echo "backup=$backup"
-    echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-} > "$RESULT"
+write_result 1 not-needed ok
+state=committed
 log "=== hot-swap OK ==="
 exit 0
