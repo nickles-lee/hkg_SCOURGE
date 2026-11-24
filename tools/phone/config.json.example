@@ -1,0 +1,20 @@
+{
+  "dmname": "phone-rig",
+  "dmnode": "/dev/block/dm-<N>",
+  "gendev": "/dev/block/loop<N>",
+  "evildev": "/dev/block/loop<N>",
+  "evil_off_sectors": 0,
+  "total_sectors": 0,
+  "region_off_sectors": 0,
+  "region_len_sectors": 0,
+  "gap_ms": 80,
+  "cover_frac": 0.60,
+  "sample_ms": 10,
+  "max_flips": 1,
+  "suspend_swap": true,
+  "log": "/data/local/tmp/scourge/events.jsonl",
+  "switch_after_pass": 1,
+  "min_pass_frac": 0.8,
+  "quiet_flip_ms": 2000,
+  "trace_log": "/data/local/tmp/scourge/trace_reads.tsv"
+}

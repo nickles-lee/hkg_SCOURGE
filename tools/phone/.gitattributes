@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# Android /system/bin/sh cannot parse CRLF scripts, and sourced env files with
+# CR break ADB/losetup/configfs. Force LF on all checkouts.
+*.sh text eol=lf
+phone.env* text eol=lf
+*.example text eol=lf

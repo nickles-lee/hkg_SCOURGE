@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# Owner-local configuration and locally built artifacts. Never commit these.
+phone.env
+config.json
+phone-rig-arm64
