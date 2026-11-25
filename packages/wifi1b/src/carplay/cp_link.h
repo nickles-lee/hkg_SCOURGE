@@ -58,6 +58,25 @@
  * ACK stays owed until the caller drains a frame. Output backpressure never
  * resets a healthy link for a redundant ACK.
  *
+ * Outbound EAKs are bounded the same way. The missing list is recomputed from
+ * the current reorder slots before every transmission, so it never requests a
+ * packet that is already buffered and never retains a hole that has since been
+ * closed. It is clamped to the peer's negotiated max_len (nine-byte header plus
+ * one payload checksum byte) and to local frame limits. If the peer cannot
+ * carry any EAK payload, a normal cumulative ACK is sent instead. At most one
+ * completely unconsumed EAK frame is maintained; it is rewritten in place when
+ * the holes change, cancelled if no holes remain, and deferred (never fatal)
+ * when the output queue is full. A truncated EAK remembers the prefix it
+ * requested: once that prefix changes because a hole filled, a follow-up EAK
+ * requests the remaining holes without waiting for a new gap threshold.
+ * Draining output or ticking alone never re-emits the same list. A partially
+ * consumed EAK frame is immutable, as is a partially consumed ACK or data
+ * frame.
+ *
+ * A DATA retransmission keeps its original sequence number, session id and
+ * payload, but is rebuilt with the current cumulative ACK and a refreshed
+ * header checksum. The stored original frame is not mutated.
+ *
  * The passive role requires the exact six-byte marker before accepting a
  * link header. The initiator still emits the marker but, like the reference,
  * scans for 0xff5a immediately so a peer that answers with SYN before its own
@@ -341,6 +360,11 @@ typedef struct cp_link {
     uint64_t delayed_ack_deadline_ms;
     bool delayed_ack_armed;
     bool ack_due;
+    bool eak_due;
+    bool eak_more;
+    /* Last truncated EAK prefix, used for progress-only follow-ups. */
+    uint8_t eak_last_count;
+    uint8_t eak_last_missing[CP_LINK_MAX_EAK];
     uint64_t now_ms;
 
     uint16_t syn_len;
@@ -430,7 +454,9 @@ int cp_link_abort(cp_link_t *link, uint64_t now_ms,
  * the oldest queued frame. It remains valid until the next mutating call.
  * A transport may write any prefix and then consume exactly those bytes.
  * A completely unconsumed ACK-only frame may be rewritten in place when a
- * cumulative ACK is coalesced; a consumed prefix is never modified.
+ * cumulative ACK is coalesced, and a completely unconsumed EAK frame may be
+ * rewritten in place when its missing list changes or retracted when it has no
+ * holes left; a consumed prefix is never modified.
  * If a retransmission burst does not fit, the remaining retransmissions stay
  * pending (they are never discarded) and resume as output slots are consumed.
  * Queued bytes are not transport-confirmed: drain them promptly so that

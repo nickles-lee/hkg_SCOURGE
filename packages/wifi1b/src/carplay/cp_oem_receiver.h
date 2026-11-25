@@ -393,7 +393,8 @@ cp_oem_receiver_status cp_oem_receiver_scope_format(const cp_oem_receiver_scope 
                                                     bool include_zone, char *out,
                                                     size_t out_len);
 
-/* SHA-256 and local pin verification. */
+/* SHA-256 and local pin verification. File hashing rejects a leaf symlink;
+ * the caller must supply an owner/root-controlled root and ancestor paths. */
 cp_oem_receiver_status cp_oem_receiver_sha256(const void *data, size_t len,
                                               uint8_t out[CP_OEM_RECEIVER_SHA256_LEN]);
 cp_oem_receiver_status cp_oem_receiver_sha256_file(

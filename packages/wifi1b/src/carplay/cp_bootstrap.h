@@ -19,8 +19,18 @@
  * AP readiness.  Bounded ticks re-query consent and USB policy and expire the
  * offer, so a revoked policy or an absent receiver cannot leave a stale
  * "start was sent" state behind.  Projection is never reported active.
- * An outer session wrapper observing a trusted active receiver must retire
- * this receiver-wait deadline while preserving consent/USB checks itself.
+ *
+ * A trusted caller that has independently observed an active receiver may
+ * retire only the offer deadline with cp_bootstrap_hold_offer(), bound to the
+ * current bootstrap generation.  The hold is never inferred from the wire.
+ * While held, availability still reaches the normal decoder and identity
+ * updates, but the offer cannot expire, re-arm or emit a second start; held
+ * offers re-query USB and consent before returning a duplicate.  Withdrawal,
+ * policy refusal, cancel, transport reset, failure, generation drift and
+ * AP-scope invalidation (off-air, or a valid but changed SSID/channel/
+ * security/link-local readback) all clear the hold, so a released observation
+ * falls back to the ordinary bounded offer rather than leaving it held
+ * forever.
  * Expiry alone is not evidence that an OEM receiver failed or stopped.
  *
  * Availability (0x4300) is interpreted conservatively: the wireless side must
@@ -64,6 +74,7 @@ extern "C" {
 #define CP_BOOT_MAX_LANGUAGES CP_WIRE_MAX_LANGUAGES
 #define CP_BOOT_MAX_AUTH_BLOB CP_WIRE_MAX_AUTH_BLOB
 #define CP_BOOT_MAX_TRANSPORT_ID CP_WIRE_MAX_TRANSPORT_ID
+#define CP_BOOT_ASYNC_AUTH_TIMEOUT_MS 5000u
 
 typedef enum {
     CP_BOOT_STATE_DISCONNECTED = 0,
@@ -121,7 +132,8 @@ typedef enum {
     CP_BOOT_EV_AP_NOT_READY,
     CP_BOOT_EV_CANCELLED,
     CP_BOOT_EV_TRANSPORT_RESET,
-    CP_BOOT_EV_ERROR
+    CP_BOOT_EV_ERROR,
+    CP_BOOT_EV_AUTH_PENDING
 } cp_boot_event;
 
 typedef enum {
@@ -157,6 +169,24 @@ typedef struct {
                      size_t challenge_len, uint8_t *out, size_t cap,
                      size_t *out_len);
 } cp_boot_auth_provider;
+
+/* Opt-in deferred provider interface. A request is not authentication success.
+ * The serialized caller starts a nonblocking helper operation, then supplies a
+ * completion bound to both generation and monotonically increasing token. */
+typedef enum {
+    CP_BOOT_AUTH_OP_NONE = 0,
+    CP_BOOT_AUTH_OP_CERTIFICATE,
+    CP_BOOT_AUTH_OP_SIGNATURE
+} cp_boot_auth_op;
+
+typedef struct {
+    cp_boot_auth_op op;
+    uint64_t generation;
+    uint64_t token;
+    uint64_t deadline_ms;
+    size_t challenge_len;
+    uint8_t challenge[CP_BOOT_MAX_AUTH_BLOB];
+} cp_boot_auth_request;
 
 /* Return granted/denied/pending for the current offer.  A missing callback is
  * treated as denied: the owner must explicitly opt in to projection.  The
@@ -274,6 +304,8 @@ typedef struct {
 
     bool offer_active;
     uint64_t offer_deadline_ms;
+    bool offer_held;             /* trusted caller hold; never wire-derived */
+    uint64_t offer_hold_generation;
     bool pending_start;
     uint64_t pending_deadline_ms;
     uint64_t pending_generation;
@@ -287,6 +319,16 @@ typedef struct {
 
     uint8_t auth_scratch[CP_BOOT_MAX_AUTH_BLOB];
     unsigned auth_exchanges;
+    bool async_auth;
+    cp_boot_auth_request auth_request;
+    uint64_t next_auth_token;
+    /* Auth messages may arrive before 1D02; they are decoded and buffered, not
+     * answered, until identification succeeds.  Credentials and 0x4301 stay
+     * gated on AA05 after this buffer is serviced. */
+    bool pending_auth_cert;
+    bool have_pending_auth_challenge;
+    size_t pending_auth_challenge_len;
+    uint8_t pending_auth_challenge[CP_BOOT_MAX_AUTH_BLOB];
     bool projection_active; /* invariant: false */
 } cp_bootstrap;
 
@@ -294,6 +336,15 @@ cp_boot_error cp_bootstrap_init(cp_bootstrap *session,
                                 const cp_boot_config *config);
 cp_boot_error cp_bootstrap_set_auth_provider(
     cp_bootstrap *session, const cp_boot_auth_provider *provider);
+/* Select only before identification starts; synchronous providers are never
+ * called in deferred mode. Stale request/completion identities are refused. */
+cp_boot_error cp_bootstrap_set_async_auth(cp_bootstrap *session, bool enabled);
+bool cp_bootstrap_auth_request(const cp_bootstrap *session,
+                               cp_boot_auth_request *request);
+cp_boot_result cp_bootstrap_auth_complete(
+    cp_bootstrap *session, uint64_t generation, uint64_t token,
+    cp_boot_auth_op op, bool success, const uint8_t *blob, size_t blob_len,
+    uint64_t now_ms, uint8_t *out, size_t out_cap);
 cp_boot_error cp_bootstrap_set_policy(cp_bootstrap *session,
                                       cp_boot_consent_fn consent,
                                       cp_boot_usb_active_fn usb_active,
@@ -310,7 +361,8 @@ cp_boot_result cp_bootstrap_receive(cp_bootstrap *session,
  * Call periodically while a start is pending or an offer is outstanding; it
  * produces no traffic otherwise.  While an offer is outstanding it re-queries
  * consent and USB policy; denial, USB activity, wireless withdrawal, or expiry
- * invalidates the offer without sending a frame. */
+ * invalidates the offer without sending a frame.  A held offer skips the
+ * expiry branch but still runs the consent/USB/withdrawal checks. */
 cp_boot_result cp_bootstrap_tick(cp_bootstrap *session, uint64_t now_ms,
                                  uint8_t *out, size_t out_cap);
 
@@ -322,9 +374,37 @@ cp_boot_result cp_bootstrap_set_ap_readback(cp_bootstrap *session,
                                             uint64_t now_ms, uint8_t *out,
                                             size_t out_cap);
 
-/* Explicit cancellation: clears a pending or unacknowledged start and bumps
- * the generation so no stale deferred action can fire. */
+/* Explicit cancellation: clears a pending or unacknowledged start, any offer
+ * hold, and bumps the generation so no stale deferred action can fire. */
 cp_boot_result cp_bootstrap_cancel(cp_bootstrap *session, uint64_t now_ms);
+
+/* Retire the post-start offer deadline while a trusted caller independently
+ * observes an active receiver.  This is a trust boundary, not wire input:
+ * callers MUST derive the observation from trusted local receiver/hardware
+ * evidence bound to this boot generation and peer.  No network frame, CSM
+ * field, scripted flag or unverified boolean may be forwarded here.
+ *
+ * The call succeeds only with `generation == cp_bootstrap_generation(session)`,
+ * an existing offer, successful authentication and an identified peer.  It
+ * does not verify hardware and cannot make projection_active true.  The hold
+ * suppresses offer expiry/re-arm and duplicate starts only; availability is
+ * still decoded, identity is still updated, and USB/consent policy is
+ * re-queried before a held duplicate is returned.  Any invalidating event
+ * clears the hold automatically (withdrawal, policy refusal, cancel, reset,
+ * failure, generation change or AP-scope invalidation, including a valid but
+ * changed on-air readback).  Clearing a hold never changes the offer, its
+ * deadline or the generation. */
+cp_boot_result cp_bootstrap_hold_offer(cp_bootstrap *session,
+                                       uint64_t generation, uint64_t now_ms);
+
+/* Drop a hold without changing the offer, generation or any queued reply.
+ * The caller uses this when its own observation ends but the bounded offer
+ * should continue to run normally. */
+cp_boot_result cp_bootstrap_release_offer_hold(cp_bootstrap *session,
+                                               uint64_t now_ms);
+
+/* True only while a valid, generation-matching hold is in effect. */
+bool cp_bootstrap_offer_held(const cp_bootstrap *session);
 
 /* Transport loss: drops identification, authentication, phone identity and
  * any pending start.  AP readback is independent and is retained. */

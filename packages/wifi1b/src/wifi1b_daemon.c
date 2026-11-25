@@ -75,10 +75,12 @@
 #define WPA_LOG        APP_DIR "/wpa_supplicant.log"
 #define WPA_PIDFILE    APP_DIR "/wpa_supplicant.pid"
 #define APPLY_RESULT   APP_DIR "/apply.result"
+#define CARPLAY_STATE  APP_DIR "/carplay.state"
 #define SCAN_RESULT    APP_DIR "/scan.json"
 #define BT_STATE       APP_DIR "/bt.state"
 #define SSH_BOUND      APP_DIR "/ssh.bound"
 #define USB0_HELPER    APP_DIR "/bin/opi-usb0-up.sh"
+#define USB0_OWNER     APP_DIR "/usb0.owner"
 #ifndef USB0_RULE_PATH
 #define USB0_RULE_PATH "/run/udev/rules.d/99-opi-usb0.rules"
 #endif
@@ -133,6 +135,11 @@ typedef struct {
     char cp_name[64];
     char cp_id[64];
     char cp_btaddr[32];
+    /* Explicit opt-in only: write the candidate Apple Device IE through the
+     * vendor supplicant's ap_vendor_elements option.  Default off because
+     * support/readback on the target is unproven; no status path may report it
+     * as observed. */
+    bool cp_vendor_ie;
 
     bool ssh_enabled;
     int  ssh_port;
@@ -151,7 +158,11 @@ static bool g_shutdown_cleanup;
 static bool g_log_stderr = true;   /* one-shot CLI mode; daemon redirects stderr into the same log file */
 static bool g_pure_query;
 static int g_apply_gen;            /* increments per apply; stale children cannot publish */
-static bool g_carplay_ie;          /* IE fields configured in the AP config (not a wire observation) */
+static bool g_carplay_ie;          /* AP identity fields configured (not a wire observation) */
+static bool g_carplay_fw_ok;       /* last explicit owned-chain verification */
+static bool g_carplay_last_apply_ok;
+static bool g_carplay_last_apply_fw_ok;
+static int64_t g_carplay_last_apply_at;
 static const char *g_status_path = STATUS_PATH;
 static char g_last_msg[256] = "starting";
 static int64_t g_last_apply_ms;
@@ -161,6 +172,9 @@ static bool g_apply_failed;
 static int64_t g_start_ms;
 static pid_t g_apply_pid;
 static int64_t g_apply_start_ms;
+static bool g_apply_dhcp_capable;
+static bool g_txn_active;
+static int64_t g_apply_deadline_ms;
 static bool g_in_child;
 static int64_t g_last_autodump_ms;
 static int64_t g_last_dump_try_ms;
@@ -203,16 +217,26 @@ static char g_home_member[48];
 typedef enum {
     W2_DHCP_ACQUIRE = 0,
     W2_DHCP_RENEW,
-    W2_DHCP_REBIND
+    W2_DHCP_REBIND,
+    W2_DHCP_RELEASE
 } w2_dhcp_step_t;
 
-typedef enum { WORK_MODE, WORK_SCAN, WORK_SSH, WORK_PAIR_STOP, WORK_DUMP, WORK_DHCP } work_t;
+typedef enum {
+    WORK_MODE,
+    WORK_SCAN,
+    WORK_SSH,
+    WORK_PAIR_STOP,
+    WORK_DUMP,
+    WORK_DHCP,
+    WORK_ROUTE_AUDIT
+} work_t;
 static work_t g_work_kind = WORK_MODE, g_pending_kind;
 static bool g_work_pending, g_pending_pair, g_apply_cancelled;
 static w2_dhcp_step_t g_dhcp_work_step = W2_DHCP_ACQUIRE;
 static int g_dhcp_retry_failures;
 static int64_t g_dhcp_next_try_ms;
 static int64_t g_last_dhcp_work_ms;
+static int64_t g_last_route_audit_ms;
 static int64_t g_client_t1_at_ms, g_client_t2_at_ms, g_client_expiry_at_ms;
 static bool g_current_pair, g_dump_requested;
 static bool g_pairing_stop_requested;
@@ -247,6 +271,9 @@ typedef struct {
 typedef struct {
     int gen;
     bool driver, associated, ap_on, carplay_svc, mdns_svc, ssh_ours;
+    bool carplay_fw_ok;
+    bool broker_observed;
+    char broker_state[24];
     ap_probe_t ap;
     bool vendor_ssh_22, debug_console;
     int signal, clients, secure_console;
@@ -258,16 +285,69 @@ static int64_t g_observed_ms;
 static void home_monitor_tick(void);
 static void apply_reap(void);
 static void probe_tick(void);
+static void carplay_state_save(void);
 
 /* ------------------------------------------------------------------ */
 /* small helpers                                                       */
 /* ------------------------------------------------------------------ */
 
+/* One total budget per apply transaction.  Every command and DHCP wait is
+ * capped by the remaining monotonic time, so cleanup/handoff steps cannot
+ * silently extend a nominal 35 s into an unbounded sequence of 8 s commands. */
+#define WIFI1B_TXN_BUDGET_MS 60000
+#define WIFI1B_TXN_GRACE_MS  3000
+
+#ifdef WIFI_TEST
+static int64_t (*test_now_ms)(void);
+static int test_txn_budget_ms;
+#endif
+
 static int64_t now_ms(void)
 {
+#ifdef WIFI_TEST
+    if (test_now_ms) return test_now_ms();
+#endif
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void w2_txn_begin(bool dhcp_capable)
+{
+    g_txn_active = true;
+    g_apply_dhcp_capable = dhcp_capable;
+    g_apply_start_ms = now_ms();
+    int budget = WIFI1B_TXN_BUDGET_MS;
+#ifdef WIFI_TEST
+    if (test_txn_budget_ms > 0) budget = test_txn_budget_ms;
+#endif
+    g_apply_deadline_ms = g_apply_start_ms + budget;
+}
+
+static void w2_txn_end(void)
+{
+    g_txn_active = false;
+    g_apply_dhcp_capable = false;
+}
+
+static int64_t w2_txn_remaining_ms(void)
+{
+    if (!g_txn_active) return -1;
+    int64_t left = g_apply_deadline_ms - now_ms();
+    return left > 0 ? left : 0;
+}
+
+static bool w2_txn_expired(void)
+{
+    return g_txn_active && w2_txn_remaining_ms() == 0;
+}
+
+static int w2_txn_command_timeout(int requested)
+{
+    int64_t left = w2_txn_remaining_ms();
+    if (left < 0) return requested;
+    if (left == 0) return 0;
+    return left < requested ? (int)left : requested;
 }
 
 static long long disk_free_kb(void)
@@ -375,18 +455,47 @@ static void set_msg(const char *fmt, ...)
  * secret-bearing command text is logged. The parent uses cached observations
  * and never runs network commands from its HTTP/event loop. */
 #ifdef WIFI_TEST
+#ifdef WIFI_TEST
+static int w2_test_net_stub(char *out, size_t n, const char *cmd)
+{
+    if (out && n) out[0] = 0;
+    if (strstr(cmd, "ip -o -4 addr show dev usb0") != NULL) return 1;
+    if (strstr(cmd, "ip -o -4 addr show") != NULL) return 0;
+    if (strstr(cmd, "ip -4 route show default") != NULL) return 0;
+    if (strstr(cmd, "iptables -S WIFI1B_USB0_SSH") != NULL) return 1;
+    if (strstr(cmd, "iptables -S") != NULL) return 0;
+    return system(cmd);
+}
+#endif
+
 static int (*test_command)(char *, size_t, const char *);
 static bool (*test_work)(work_t, bool);
 static int test_iface = -1, test_owned_wpa = -1, test_dhcpd_start = -1;
+static int test_dhcp_pool_first = -1, test_dhcp_pool_last = -1;
+static int test_dhcpd_running = -1;
+static int test_owner_write_fail;
+static int test_owner_dir_sync_fail;
+static int test_lineage_require_lock;
 static const char *test_if_inet6_path;
 static const char *test_ipv6_conf_dir;
 static const char *test_mac_override;
+static const char *test_authorized_keys_source;
 #endif
 static int run_command(char *out, size_t outsz, const char *cmd, int timeout_ms)
 {
     if (out && outsz) out[0] = 0;
+    if (timeout_ms <= 0) return 124;
 #ifdef WIFI_TEST
-    if (test_command) return test_command(out, outsz, cmd);
+    if (test_command) {
+        int rc = test_command(out, outsz, cmd);
+        /* A full capture is not complete evidence, including fixture output.
+         * Refuse conservatively even when the child would have fit exactly. */
+        if (out && outsz && strnlen(out, outsz) >= outsz - 1) {
+            out[0] = 0;
+            return 125;
+        }
+        return rc;
+    }
 #endif
     if (g_stop) return -1;
     int fds[2];
@@ -408,7 +517,7 @@ static int run_command(char *out, size_t outsz, const char *cmd, int timeout_ms)
     if (!g_in_child) setpgid(pid, pid);
     fcntl(fds[0], F_SETFL, O_NONBLOCK);
     size_t used = 0;
-    bool eof = false, reaped = false;
+    bool eof = false, reaped = false, capture_full = false;
     int st = 0;
     int64_t until = now_ms() + timeout_ms;
     while (!eof || !reaped) {
@@ -420,6 +529,7 @@ static int run_command(char *out, size_t outsz, const char *cmd, int timeout_ms)
                 if (take > outsz - used - 1) take = outsz - used - 1;
                 memcpy(out + used, buf, take); used += take; out[used] = 0;
             }
+            if (out && outsz && used >= outsz - 1) capture_full = true;
         }
         if (nr == 0) eof = true;
         if (!reaped && waitpid(pid, &st, WNOHANG) == pid) reaped = true;
@@ -439,6 +549,10 @@ static int run_command(char *out, size_t outsz, const char *cmd, int timeout_ms)
         poll(&pfd, 1, 30);
     }
     close(fds[0]);
+    if (capture_full) {
+        out[0] = 0;
+        return 125; /* incomplete readback must never prove absence */
+    }
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
@@ -450,7 +564,9 @@ static int sh(const char *fmt, ...)
     vsnprintf(cmd, sizeof(cmd), fmt, ap);
     va_end(ap);
 
-    return run_command(NULL, 0, cmd, g_probe_child ? 1500 : 8000);
+    int timeout = w2_txn_command_timeout(g_probe_child ? 1500 : 8000);
+    if (timeout <= 0) return 124;
+    return run_command(NULL, 0, cmd, timeout);
 }
 
 static int sh_out(char *out, size_t outsz, const char *fmt, ...)
@@ -460,7 +576,9 @@ static int sh_out(char *out, size_t outsz, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(cmd, sizeof(cmd), fmt, ap);
     va_end(ap);
-    return run_command(out, outsz, cmd, g_probe_child ? 1500 : 8000);
+    int timeout = w2_txn_command_timeout(g_probe_child ? 1500 : 8000);
+    if (timeout <= 0) return 124;
+    return run_command(out, outsz, cmd, timeout);
 }
 
 /* Single-quote a value for /bin/sh. */
@@ -562,17 +680,142 @@ static void wfa_log_error(const char *path, const char *what, int err)
     log_msg("write_file_atomic %s %s failed: %s", path, what, strerror(err));
 }
 
+/* True only when every existing ancestor is a real directory.  A missing
+ * parent is not created here; callers that need one must create it with the
+ * checked helper below. */
+static bool w2_real_ancestors(const char *path)
+{
+    char copy[512];
+    if (path == NULL || strlen(path) >= sizeof(copy)) return false;
+    snprintf(copy, sizeof(copy), "%s", path);
+    char *slash = strrchr(copy, '/');
+    while (slash && slash != copy) {
+        *slash = 0;
+        struct stat st;
+        if (lstat(copy, &st) == 0) {
+            if (!S_ISDIR(st.st_mode)) return false;
+        } else if (errno != ENOENT) {
+            return false;
+        }
+        slash = strrchr(copy, '/');
+    }
+    return true;
+}
+
+static bool w2_single_regular(const char *path, struct stat *st_out)
+{
+    struct stat st;
+    if (path == NULL || !w2_real_ancestors(path) ||
+        lstat(path, &st) != 0) return false;
+    if (!S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+        (uint32_t)st.st_uid != (uint32_t)geteuid()) return false;
+    if (st_out) *st_out = st;
+    return true;
+}
+
+static bool w2_file_equals_text(const char *path, const char *text)
+{
+    char buf[4096];
+    size_t len;
+    if (text == NULL || !w2_single_regular(path, NULL)) return false;
+    len = strlen(text);
+    int n = read_file(path, buf, sizeof(buf));
+    return n == (int)len && len < sizeof(buf) && !memcmp(buf, text, len);
+}
+
+static bool w2_atomic_target_ok(const char *path, const char *tmp)
+{
+    struct stat st;
+    if (!w2_real_ancestors(path)) return false;
+    if (lstat(path, &st) == 0) {
+        if (!S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+            (uint32_t)st.st_uid != (uint32_t)geteuid()) return false;
+    } else if (errno != ENOENT) {
+        return false;
+    }
+    if (lstat(tmp, &st) == 0) {
+        if (!S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+            (uint32_t)st.st_uid != (uint32_t)geteuid()) return false;
+    } else if (errno != ENOENT) {
+        return false;
+    }
+    return true;
+}
+
+static bool w2_unlink_if_same(const char *path, const struct stat *expected)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0) return errno == ENOENT;
+    if (expected && (st.st_dev != expected->st_dev || st.st_ino != expected->st_ino ||
+                     st.st_nlink != 1 || !S_ISREG(st.st_mode))) return false;
+    return unlink(path) == 0 || errno == ENOENT;
+}
+
+/* Create every missing component as a real directory, refusing any existing
+ * symlink/non-directory.  Used for the generated helper/rule parents. */
+static bool w2_mkdir_mode_checked(const char *path, mode_t mode)
+{
+    char copy[512];
+    if (path == NULL || path[0] != '/' || strlen(path) >= sizeof(copy)) return false;
+    snprintf(copy, sizeof(copy), "%s", path);
+    for (char *p = copy + 1; ; p++) {
+        if (*p != '/' && *p != '\0') continue;
+        char saved = *p;
+        *p = 0;
+        struct stat st;
+        if (lstat(copy, &st) == 0) {
+            if (!S_ISDIR(st.st_mode)) return false;
+            /* Private credential leaves must retain private owner/mode;
+             * shared ancestors keep their established directory modes. */
+            if (saved == '\0' && mode == 0700 &&
+                (st.st_uid != geteuid() || (st.st_mode & 07777) != 0700))
+                return false;
+        } else if (errno == ENOENT) {
+            if (mkdir(copy, mode) != 0) return false;
+        } else {
+            return false;
+        }
+        *p = saved;
+        if (saved == '\0') break;
+    }
+    return true;
+}
+
+static bool w2_mkdir_checked(const char *path)
+{
+    return w2_mkdir_mode_checked(path, 0755);
+}
+
 static int write_file_atomic(const char *path, const char *data, mode_t mode)
 {
     char tmp[512];
     snprintf(tmp, sizeof(tmp), "%s.tmp.%d", path, (int)getpid());
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    if (!w2_atomic_target_ok(path, tmp)) {
+        wfa_log_error(path, "unsafe destination", EINVAL);
+        return -1;
+    }
+    struct stat old_tmp;
+    /* Refuse any pre-existing temp path.  It was not created by this call and
+     * may be owner data; never unlink it to make O_EXCL succeed. */
+    if (lstat(tmp, &old_tmp) == 0 || errno != ENOENT) {
+        wfa_log_error(path, "preexisting temp", EEXIST);
+        return -1;
+    }
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
     if (fd < 0) {
         wfa_log_error(path, "open", errno);
         return -1;
     }
+    struct stat tst;
+    if (fstat(fd, &tst) != 0 || !S_ISREG(tst.st_mode) || tst.st_nlink != 1 ||
+        (uint32_t)tst.st_uid != (uint32_t)geteuid()) {
+        int saved = errno ? errno : EINVAL;
+        close(fd);
+        wfa_log_error(path, "temp identity", saved);
+        return -1;
+    }
     struct stat original;
-    if (stat(path, &original) == 0) {
+    if (lstat(path, &original) == 0) {
         struct stat current;
         char label[256];
         ssize_t ln = getxattr(path, "security.SMACK64", label, sizeof(label));
@@ -596,7 +839,7 @@ static int write_file_atomic(const char *path, const char *data, mode_t mode)
         }
         if (label_error) {
             int saved = errno;
-            close(fd); unlink(tmp); errno = saved;
+            close(fd); w2_unlink_if_same(tmp, &tst); errno = saved;
             wfa_log_error(path, "label/owner", saved);
             return -1;
         }
@@ -607,18 +850,36 @@ static int write_file_atomic(const char *path, const char *data, mode_t mode)
                    !strcmp(path, APPLY_RESULT) || !strcmp(path, BT_STATE) ||
                    !strcmp(path, SSH_BOUND) || !strcmp(path, SCAN_RESULT);
     int sync_rc = runtime ? 0 : fsync(fd);
+    if (fchmod(fd, mode) != 0) {
+        int saved = errno;
+        close(fd); w2_unlink_if_same(tmp, &tst); errno = saved;
+        wfa_log_error(path, "mode", saved);
+        return -1;
+    }
+    struct stat after;
+    if (fstat(fd, &after) != 0 || after.st_dev != tst.st_dev ||
+        after.st_ino != tst.st_ino || after.st_nlink != 1) {
+        int saved = errno ? errno : EINVAL;
+        close(fd); w2_unlink_if_same(tmp, &tst); errno = saved;
+        wfa_log_error(path, "fstat identity", saved);
+        return -1;
+    }
     close(fd);
     if (w != (ssize_t)len || sync_rc != 0) {
         int saved = errno;
-        unlink(tmp); errno = saved;
+        w2_unlink_if_same(tmp, &tst); errno = saved;
         wfa_log_error(path, "write/fsync", saved);
         return -1;
     }
-    chmod(tmp, mode);
     if (rename(tmp, path) != 0) {
         int saved = errno;
-        unlink(tmp); errno = saved;
+        w2_unlink_if_same(tmp, &tst); errno = saved;
         wfa_log_error(path, "rename", saved);
+        return -1;
+    }
+    if (!w2_single_regular(path, &after) || after.st_dev != tst.st_dev ||
+        after.st_ino != tst.st_ino) {
+        wfa_log_error(path, "published identity", EINVAL);
         return -1;
     }
     return 0;
@@ -1055,6 +1316,8 @@ static void config_load(void)
             str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), v);
         } else if (!strcmp(k, "carplay_btaddr")) {
             str_copy(g_cfg.cp_btaddr, sizeof(g_cfg.cp_btaddr), v);
+        } else if (!strcmp(k, "carplay_vendor_ie")) {
+            g_cfg.cp_vendor_ie = atoi(v) != 0;
         } else if (!strcmp(k, "ssh")) {
             g_cfg.ssh_enabled = atoi(v) != 0;
         } else if (!strcmp(k, "carplay_control")) {
@@ -1111,6 +1374,7 @@ static bool config_save(void)
              "carplay_name=%s\n"
              "carplay_id=%s\n"
              "carplay_btaddr=%s\n"
+             "carplay_vendor_ie=%d\n"
              "ssh=%d\n"
              "ssh_port=%d\n"
              "client_route_policy=%s\n"
@@ -1128,6 +1392,7 @@ static bool config_save(void)
              g_cfg.cp_channel, g_cfg.cp_hidden ? 1 : 0, g_cfg.cp_max_sta,
              g_cfg.cp_manufacturer, g_cfg.cp_model, g_cfg.cp_name,
              g_cfg.cp_id, g_cfg.cp_btaddr,
+             g_cfg.cp_vendor_ie ? 1 : 0,
              g_cfg.ssh_enabled ? 1 : 0, g_cfg.ssh_port,
              g_cfg.client_route_policy == CLIENT_ROUTE_FALLBACK
                  ? "fallback" : "modem_safe",
@@ -1163,6 +1428,12 @@ static bool newest_match(const char *pattern, char *out, size_t n)
 
 static bool find_usb_file(const char *name, char *out, size_t n)
 {
+#ifdef WIFI_TEST
+    if (test_authorized_keys_source && !strcmp(name, "authorized_keys")) {
+        str_copy(out, n, test_authorized_keys_source);
+        return true;
+    }
+#endif
     char pat[256];
     snprintf(pat, sizeof(pat), "/media/usb/*/*/%s", name);
     if (newest_match(pat, out, n)) return true;
@@ -1319,24 +1590,98 @@ static bool import_wifi(void)
     return parse_wifi_txt(path);
 }
 
+static bool read_optional_regular(const char *path, char *buf, size_t cap,
+                                  bool *existed)
+{
+    struct stat st;
+    if (existed != NULL) *existed = false;
+    if (path == NULL || !w2_real_ancestors(path)) return false;
+    if (lstat(path, &st) != 0)
+        return errno == ENOENT;
+    if (!S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+        (uint32_t)st.st_uid != (uint32_t)geteuid())
+        return false;
+    int n = read_file(path, buf, cap);
+    if (n < 0 || n >= (int)cap - 1) return false;
+    if (existed != NULL) *existed = true;
+    return true;
+}
+
+static bool restore_optional_regular(const char *path, const char *old_text,
+                                     bool existed, const char *new_text)
+{
+    if (existed) {
+        if (write_file_atomic(path, old_text, 0600) != 0 ||
+            !w2_file_equals_text(path, old_text))
+            return false;
+        return true;
+    }
+    struct stat st;
+    if (lstat(path, &st) != 0)
+        return errno == ENOENT;
+    if (!w2_file_equals_text(path, new_text)) return false;
+    return unlink(path) == 0 || errno == ENOENT;
+}
+
+/* Explicit owner import: write BOTH destinations with the same bytes and
+ * verify each.  A failure restores both previous files.  This is the only
+ * path allowed to replace a different valid regular key set. */
+static bool write_key_pair_exact(const char *text)
+{
+    char eff[512], old_keys[16384], old_home[16384];
+    bool had_keys = false, had_home = false;
+    if (text == NULL || text[0] == '\0') return false;
+    snprintf(eff, sizeof(eff), SSH_HOME "/.ssh/authorized_keys");
+    if (!read_optional_regular(SSH_KEYS, old_keys, sizeof(old_keys),
+                               &had_keys) ||
+        !read_optional_regular(eff, old_home, sizeof(old_home), &had_home)) {
+        set_msg("SSH import refused: unsafe key destination");
+        return false;
+    }
+    if (write_file_atomic(SSH_KEYS, text, 0600) != 0 ||
+        !w2_file_equals_text(SSH_KEYS, text)) {
+        (void)restore_optional_regular(SSH_KEYS, old_keys, had_keys, text);
+        set_msg("SSH import failed: canonical key write/readback");
+        return false;
+    }
+    if (write_file_atomic(eff, text, 0600) != 0 ||
+        !w2_file_equals_text(eff, text)) {
+        bool keys_ok = restore_optional_regular(SSH_KEYS, old_keys, had_keys,
+                                                text);
+        bool home_ok = restore_optional_regular(eff, old_home, had_home, text);
+        set_msg("SSH import failed: home key write/readback%s",
+                keys_ok && home_ok ? "" : " (rollback incomplete)");
+        return false;
+    }
+#ifndef WIFI_TEST
+    sh("chsmack -a _ " SSH_KEYS " " SSH_DIR " " SSH_HOME " " SSH_HOME "/.ssh 2>/dev/null");
+#endif
+    return true;
+}
+
 static bool import_authorized_keys(void)
 {
-    char path[512];
+    char path[512], buf[16384];
+    struct stat st;
     if (!find_usb_file("authorized_keys", path, sizeof(path))) {
         set_msg("authorized_keys not found on USB");
         return false;
     }
-    char buf[16384];
-    if (read_file(path, buf, sizeof(buf)) <= 0) {
+    if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_nlink != 1)
+        return false;
+    int n = read_file(path, buf, sizeof(buf));
+    if (n <= 0 || n >= (int)sizeof(buf) - 1) {
         set_msg("cannot read %s", path);
         return false;
     }
-    mkdir(SSH_DIR, 0700);
-    if (write_file_atomic(SSH_KEYS, buf, 0600) != 0) {
-        set_msg("cannot write %s", SSH_KEYS);
+    if (!w2_mkdir_mode_checked(SSH_DIR, 0700) ||
+        !w2_mkdir_mode_checked(SSH_HOME, 0700) ||
+        !w2_mkdir_mode_checked(SSH_HOME "/.ssh", 0700)) {
+        set_msg("SSH import refused: unsafe credential parents");
         return false;
     }
-    set_msg("imported SSH keys from %s", path);
+    if (!write_key_pair_exact(buf)) return false;
+    set_msg("imported SSH keys from %s (both destinations verified)", path);
     return true;
 }
 
@@ -3307,6 +3652,101 @@ static bool fw_port_add(const char *proto, int port)
            sh("%s -I WIFI1B_APP_CP -p %s --dport %d -j ACCEPT 2>/dev/null", tool, proto, port) == 0;
 }
 
+static bool fw_rule_line_has(const char *line, const char *chain,
+                             const char *proto, int port)
+{
+    char chain_tag[64], port_tag[32], proto_tag[16];
+    snprintf(chain_tag, sizeof(chain_tag), "-A %s ", chain);
+    snprintf(port_tag, sizeof(port_tag), "--dport %d ", port);
+    snprintf(proto_tag, sizeof(proto_tag), "-p %s ", proto);
+    return strstr(line, chain_tag) != NULL &&
+           strstr(line, proto_tag) != NULL &&
+           strstr(line, port_tag) != NULL &&
+           strstr(line, "-j ACCEPT") != NULL;
+}
+
+static bool fw_block_has_port(const char *block, const char *chain,
+                              const char *proto, int port)
+{
+    char copy[16384];
+    str_copy(copy, sizeof(copy), block);
+    char *save = NULL;
+    for (char *line = strtok_r(copy, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        if (fw_rule_line_has(line, chain, proto, port)) return true;
+    }
+    return false;
+}
+
+/* Read-only contract check for the owned chains.  The IPv4 and IPv6 lists are
+ * compared with markers so a combined dump still proves each family
+ * separately; no rule is added here. */
+static bool carplay_fw_text_ok(const char *text)
+{
+    const char *v4 = strstr(text, "__WIFI1B_V4__");
+    const char *v6 = strstr(text, "__WIFI1B_V6__");
+    if (v4 == NULL || v6 == NULL || v6 < v4) return false;
+    const char *v4_end = v6;
+    char block4[8192], block6[8192];
+    size_t len4 = (size_t)(v4_end - v4);
+    if (len4 >= sizeof(block4)) return false;
+    memcpy(block4, v4, len4);
+    block4[len4] = '\0';
+    str_copy(block6, sizeof(block6), v6);
+    const int udp[] = {67, 5353, 5020, 6000, 6003, 6011};
+    const int tcp[] = {5000, 5001, 6030, 7000};
+    const int udp6[] = {547, 5353, 5020, 6000, 6003, 6011};
+    const int tcp6[] = {5000, 5001, 6030, 7000};
+    if (!strstr(block4, "-A INPUT -i wlan0 -j WIFI1B_APP_CP") ||
+        !strstr(block4, "-A OUTPUT -o wlan0 -j WIFI1B_APP_CP") ||
+        !strstr(block6, "-A INPUT -i wlan0 -j WIFI1B_APP_CP") ||
+        !strstr(block6, "-A OUTPUT -o wlan0 -j WIFI1B_APP_CP"))
+        return false;
+    for (size_t i = 0; i < sizeof(udp) / sizeof(udp[0]); i++)
+        if (!fw_block_has_port(block4, "WIFI1B_APP_CP", "udp", udp[i]))
+            return false;
+    for (size_t i = 0; i < sizeof(tcp) / sizeof(tcp[0]); i++)
+        if (!fw_block_has_port(block4, "WIFI1B_APP_CP", "tcp", tcp[i]))
+            return false;
+    for (size_t i = 0; i < sizeof(udp6) / sizeof(udp6[0]); i++)
+        if (!fw_block_has_port(block6, "WIFI1B_APP_CP", "udp", udp6[i]))
+            return false;
+    for (size_t i = 0; i < sizeof(tcp6) / sizeof(tcp6[0]); i++)
+        if (!fw_block_has_port(block6, "WIFI1B_APP_CP", "tcp", tcp6[i]))
+            return false;
+    if (!strstr(block6, "-p ipv6-icmp -j ACCEPT") ||
+        !strstr(block6, "-d ff00::/8 -j ACCEPT"))
+        return false;
+    return true;
+}
+
+static bool carplay_fw_readback(char *out, size_t n)
+{
+    char tool[256], tool6[256], cmd[1400];
+    if (out == NULL || n == 0) return false;
+    out[0] = '\0';
+    fw_tool(tool, sizeof(tool));
+    fw6_tool(tool6, sizeof(tool6));
+    snprintf(cmd, sizeof(cmd),
+             "{ echo __WIFI1B_V4__; "
+             "%s -S INPUT 2>/dev/null; %s -S OUTPUT 2>/dev/null; "
+             "%s -S WIFI1B_APP_CP 2>/dev/null; "
+             "echo __WIFI1B_V6__; "
+             "%s -S INPUT 2>/dev/null; %s -S OUTPUT 2>/dev/null; "
+             "%s -S WIFI1B_APP_CP 2>/dev/null; }",
+             tool, tool, tool, tool6, tool6, tool6);
+    return sh_out(out, n, "%s", cmd) == 0;
+}
+
+static bool carplay_fw_verify(void)
+{
+    char text[16384];
+    bool ok = carplay_fw_readback(text, sizeof(text)) &&
+              carplay_fw_text_ok(text);
+    g_carplay_fw_ok = ok;
+    return ok;
+}
+
 static bool carplay_fw_open(void)
 {
     /* AirPlay / CarPlay / DHCP / mDNS on the AP interface.  The stock
@@ -3334,7 +3774,13 @@ static bool carplay_fw_open(void)
     fw6_tool(tool6, sizeof(tool6));
     if (!fw_rule_add(tool6, "WIFI1B_APP_CP", "-p ipv6-icmp -j ACCEPT")) ok = false;
     if (!fw_rule_add(tool6, "WIFI1B_APP_CP", "-d ff00::/8 -j ACCEPT")) ok = false;
-    return ok;
+    /* A vendor firewall reload can silently remove our hooks/rules.  Do not
+     * report success until the live chain and both families agree. */
+    if (!ok || !carplay_fw_verify()) {
+        g_carplay_fw_ok = false;
+        return false;
+    }
+    return true;
 }
 
 static void carplay_fw_close(void)
@@ -3342,6 +3788,7 @@ static void carplay_fw_close(void)
     char tool[256];
     fw_tool(tool, sizeof(tool)); fw_chain_close(tool, "WIFI1B_APP_CP");
     fw6_tool(tool, sizeof(tool)); fw_chain_close(tool, "WIFI1B_APP_CP");
+    g_carplay_fw_ok = false;
 }
 
 static bool line_prefix_present(const char *path, const char *prefix)
@@ -3518,7 +3965,7 @@ static bool ssh_running(void)
     return owned_dropbear_pid() > 0;
 }
 
-static void ssh_stop(void)
+static void ssh_stop_common(bool rewrite_rule)
 {
     char buf[64];
     if (read_file(SSH_PID, buf, sizeof(buf)) > 0) {
@@ -3543,16 +3990,29 @@ static void ssh_stop(void)
     }
     char tool[256]; fw_tool(tool, sizeof(tool));
     fw_chain_close(tool, "WIFI1B_APP_SSH");
-    usb0_fw_close(0);
-    /* Keep usb0 configured for the Pi, but close its SSH port until the
-     * next ssh_start chooses one. */
-    usb0_rule_write(0);
+    if (rewrite_rule) {
+        /* Normal stop: close the usb0 chain and park the rule at port 0.
+         * Cleanup intentionally leaves both in place as evidence for the
+         * exact --usb0-cleanup validator. */
+        if (!usb0_rule_write(0))
+            log_msg("SSH: usb0 port-0 state could not be applied");
+    }
     g_ssh_active_port = 0;
     g_ssh_fw_open = false;
     g_ssh_port_fallback = false;
     g_ssh_bound_ip[0] = 0;
     unlink(SSH_PID);
     unlink(SSH_BOUND);
+}
+
+static void ssh_stop(void)
+{
+    ssh_stop_common(true);
+}
+
+static void ssh_stop_cleanup(void)
+{
+    ssh_stop_common(false);
 }
 
 /* The vendor firewall can be reloaded, and a daemon restart can leave
@@ -3576,8 +4036,9 @@ static void ssh_fw_tick(void)
     } else {
         g_ssh_fw_open = false;
     }
-    if (usb0_present() && !usb0_fw_open(g_ssh_active_port))
-        log_msg("SSH: usb0 firewall rule missing on port %d", g_ssh_active_port);
+    if (usb0_present() && !usb0_rule_write(g_ssh_active_port))
+        log_msg("SSH: usb0 exact state could not be reasserted on port %d",
+                g_ssh_active_port);
 }
 
 /* A full filesystem can leave status.json.tmp.<pid> files behind when the
@@ -3594,7 +4055,7 @@ static void cleanup_stale_tmp(void)
         snprintf(path, sizeof(path), APP_DIR "/%s", de->d_name);
         struct stat st;
         if (stat(path, &st) == 0 && now - st.st_mtime > 3600)
-            unlink(path);
+            log_msg("stale atomic temp preserved (manual review): %s", path);
     }
     closedir(d);
 }
@@ -3839,6 +4300,71 @@ static bool apply_mode_work(bool pair)
 #endif
 
 
+/* Route-audit results merge only route policy/readback into the existing
+ * absolute lease.  They are not a new DHCP lease and must never refresh
+ * valid/expiry/T1/T2 or turn a missing router into a ready lease. */
+static bool accept_route_audit_result(const char *text)
+{
+    char copy[4096], *save = NULL;
+    int gen = -1, ok = -1;
+    int audit = 0, route_ok = 0, wifi_default = 0, modem = 0, legacy = 0;
+    unsigned int metric = 0, proto = 0;
+    if (text == NULL) return false;
+    str_copy(copy, sizeof(copy), text);
+    char *l1 = strtok_r(copy, "\n", &save);
+    char *msg = strtok_r(NULL, "\n", &save);
+    (void)msg;
+    char extra;
+    if (l1 == NULL || sscanf(l1, "%d %d %c", &gen, &ok, &extra) != 2 ||
+        ok != 1 || gen != g_apply_gen)
+        return false;
+    if (!g_dhcp_lease.valid || g_dhcp_lease.ip == 0 ||
+        g_dhcp_lease.gateway == 0 ||
+        g_dhcp_lease.prefix <= 0 || g_dhcp_lease.prefix > 32 ||
+        !w2_lease_router_consistent(g_dhcp_lease.ip, g_dhcp_lease.prefix,
+                                    g_dhcp_lease.gateway))
+        return false;
+    if (g_client_expiry_at_ms > 0 && now_ms() >= g_client_expiry_at_ms)
+        return false;
+    for (char *line = strtok_r(NULL, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq++ = 0;
+        int v = atoi(eq);
+        if (!strcmp(line, "client_route_audit")) audit = v == 1;
+        else if (!strcmp(line, "client_lease_route_ok")) route_ok = v == 1;
+        else if (!strcmp(line, "client_wifi_default")) wifi_default = v == 1;
+        else if (!strcmp(line, "client_modem_ipv4")) modem = v == 1;
+        else if (!strcmp(line, "client_modem_unknown")) {
+            if (v == 1) return false;
+        }
+        else if (!strcmp(line, "client_legacy_route_removed")) legacy = v;
+        else if (!strcmp(line, "client_route_metric")) {
+            unsigned int tmp = 0;
+            if (w2_route_token_u32(eq, &tmp)) metric = tmp;
+        } else if (!strcmp(line, "client_route_proto")) {
+            unsigned int tmp = 0;
+            if (w2_route_token_u32(eq, &tmp)) proto = tmp;
+        }
+    }
+    if (audit != 1 || route_ok != 1) return false;
+    if (wifi_default) {
+        if (metric == 0 || proto == 0) return false;
+    } else if (metric != 0 || proto != 0) {
+        return false;
+    }
+    g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = wifi_default != 0;
+    g_dhcp_lease.route_metric = metric;
+    g_dhcp_lease.route_proto = proto;
+    g_client_modem_ipv4 = modem != 0;
+    g_client_modem_unknown = false;
+    g_client_legacy_routes_removed = 0;
+    (void)legacy;
+    return true;
+}
+
 /* Cancel an in-flight apply: the newest user intent wins.  The child runs in
  * its own process group so shell/connmanctl descendants are signaled too,
  * not just the worker PID. */
@@ -3847,6 +4373,10 @@ static void apply_cancel(void)
     if (g_apply_pid <= 0) return;
     g_apply_cancelled = true;
     g_cancel_ms = now_ms();
+    /* A DHCP transaction may already have changed the exact address/route.
+     * Let its bounded worker finish and harvest the result for cleanup before
+     * the superseding work runs. Other work kinds keep prompt cancellation. */
+    if (g_apply_dhcp_capable) return;
     kill(-g_apply_pid, SIGTERM);
     kill(g_apply_pid, SIGTERM);
 }
@@ -3869,8 +4399,11 @@ static bool accept_apply_result(char *buf)
     char lease_ip[32] = "", lease_server[32] = "", lease_gateway[32] = "";
     char lease_iface[16] = "";
     int lease_updated = 0, lease_valid = 0, lease_route_ok = 0;
+    int lease_cleanup_pending = 0, lease_fs_unconfirmed = 0;
     int lease_prefix = 0, lease_s = 0, lease_t1 = 0, lease_t2 = 0;
-    int lease_wifi_default = 0, lease_modem_ipv4 = 0, lease_legacy_removed = 0;
+    int child_fw_ok = 0;
+    int lease_wifi_default = 0, lease_modem_ipv4 = 0;
+    int lease_modem_unknown = 0, lease_legacy_removed = 0;
     bool have_wifi_default = false;
     unsigned int lease_metric = 0, lease_proto = 0;
     while ((line = strtok_r(NULL, "\n", &save))) {
@@ -3887,8 +4420,12 @@ static bool accept_apply_result(char *buf)
         else if (!strcmp(line, "bt_discoverable")) g_bt_discoverable = v == 1;
         else if (!strcmp(line, "bt_pairable")) g_bt_pairable = v == 1;
         else if (!strcmp(line, "pair_stop_ok") && v == 1) g_pairing_stop_requested = false;
-        else if (!strcmp(line, "bt_address")) str_copy(g_cfg.cp_btaddr, sizeof(g_cfg.cp_btaddr), eq);
-        else if (!strcmp(line, "cp_id")) str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), eq);
+        else if (!strcmp(line, "bt_address")) { /* child observation only */ }
+        /* Child-derived identity/hardware observations are never persisted by
+         * the parent; the AP identity is an explicit user/stock value and the
+         * Bluetooth address is refreshed by the parent itself. */
+        else if (!strcmp(line, "cp_id")) { }
+        else if (!strcmp(line, "carplay_fw_ok")) child_fw_ok = v == 1;
         else if (!strcmp(line, "pair_message")) str_copy(g_pair_msg, sizeof(g_pair_msg), eq);
         else if (!strcmp(line, "dhcp_tx")) g_dhcp_tx = v;
         else if (!strcmp(line, "dhcp_rx_offer")) g_dhcp_rx_offer = v;
@@ -3907,11 +4444,14 @@ static bool accept_apply_result(char *buf)
         else if (!strcmp(line, "client_lease_t1_s")) lease_t1 = v;
         else if (!strcmp(line, "client_lease_t2_s")) lease_t2 = v;
         else if (!strcmp(line, "client_lease_route_ok")) lease_route_ok = v == 1;
+        else if (!strcmp(line, "client_lease_cleanup_pending")) lease_cleanup_pending = v == 1;
+        else if (!strcmp(line, "client_lease_fs_unconfirmed")) lease_fs_unconfirmed = v == 1;
         else if (!strcmp(line, "client_wifi_default")) {
             lease_wifi_default = v == 1;
             have_wifi_default = true;
         }
         else if (!strcmp(line, "client_modem_ipv4")) lease_modem_ipv4 = v == 1;
+        else if (!strcmp(line, "client_modem_unknown")) lease_modem_unknown = v == 1;
         else if (!strcmp(line, "client_legacy_route_removed")) lease_legacy_removed = v;
         else if (!strcmp(line, "client_route_metric")) {
             unsigned int tmp;
@@ -3921,19 +4461,54 @@ static bool accept_apply_result(char *buf)
             if (w2_route_token_u32(eq, &tmp)) lease_proto = tmp;
         }
     }
-    if (lease_updated) {
+    g_dhcp_owner_fs_unconfirmed = lease_fs_unconfirmed != 0;
+    if (lease_cleanup_pending) {
+        /* Pending cleanup wins over any "updated" flag. Adopt the exact
+         * retained owner so the bounded tick can retry even in Off/carplay
+         * modes; a route-only owner has no IP but still needs the interface. */
+        struct in_addr ip_addr;
+        bool have_ip = inet_pton(AF_INET, lease_ip, &ip_addr) == 1 &&
+                       lease_prefix > 0 && lease_prefix <= 32;
+        if (lease_iface[0] != '\0' && (have_ip || lease_ip[0] == '\0')) {
+            memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
+            /* Not clean: the exact owner is retained only for retry. */
+            g_dhcp_lease.updated = false;
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.ip = have_ip ? ntohl(ip_addr.s_addr) : 0;
+            g_dhcp_lease.prefix = have_ip ? lease_prefix : 0;
+            str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), lease_iface);
+            g_client_t1_at_ms = g_client_t2_at_ms = g_client_expiry_at_ms = 0;
+            g_dhcp_next_try_ms = 0;
+        } else {
+            /* Keep the parent's existing exact owner rather than forgetting
+             * it on a malformed pending result. */
+            log_msg("dhcp client: malformed cleanup-pending lease readback");
+            g_dhcp_lease.valid = false;
+            g_dhcp_lease.route_ok = false;
+            g_dhcp_lease.wifi_default = false;
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.updated = false;
+            g_client_t1_at_ms = g_client_t2_at_ms = g_client_expiry_at_ms = 0;
+            g_dhcp_next_try_ms = 0;
+        }
+    } else if (lease_updated) {
         struct in_addr ip_addr = {0}, server_addr = {0}, gateway_addr = {0};
         if (!have_wifi_default) lease_wifi_default = lease_route_ok;
-        bool gateway_ok = lease_gateway[0] == '\0' ||
+        bool gateway_ok = lease_gateway[0] != '\0' &&
                           inet_pton(AF_INET, lease_gateway, &gateway_addr) == 1;
         bool parsed = inet_pton(AF_INET, lease_ip, &ip_addr) == 1 &&
                       gateway_ok &&
                       (lease_server[0] == '\0' || inet_pton(AF_INET, lease_server, &server_addr) == 1);
+        bool router_ok = parsed && ntohl(gateway_addr.s_addr) != 0 &&
+                         w2_lease_router_consistent(ntohl(ip_addr.s_addr),
+                                                    lease_prefix,
+                                                    ntohl(gateway_addr.s_addr));
         bool route_meta = !lease_route_ok ||
                           (lease_wifi_default
                                ? (lease_metric > 0 && lease_proto > 0)
                                : (lease_metric == 0 && lease_proto == 0));
-        if (lease_valid && parsed && route_meta &&
+        if (lease_valid && parsed && router_ok && route_meta &&
+            !lease_modem_unknown &&
             lease_prefix > 0 && lease_prefix <= 32 &&
             lease_s >= 60 && lease_t1 > 0 && lease_t2 > lease_t1 &&
             lease_t2 < lease_s && lease_iface[0] != '\0') {
@@ -3941,6 +4516,9 @@ static bool accept_apply_result(char *buf)
             g_dhcp_lease.valid = true;
             g_dhcp_lease.updated = true;
             g_dhcp_lease.route_ok = lease_route_ok;
+            /* A complete validated result owns this exact state; a stale
+             * pending flag from the previous lease must not trigger RELEASE. */
+            g_dhcp_lease.cleanup_pending = false;
             g_dhcp_lease.ip = ntohl(ip_addr.s_addr);
             g_dhcp_lease.server = lease_server[0] ? ntohl(server_addr.s_addr) : 0;
             g_dhcp_lease.gateway = ntohl(gateway_addr.s_addr);
@@ -3952,7 +4530,10 @@ static bool accept_apply_result(char *buf)
             g_dhcp_lease.route_metric = lease_metric;
             g_dhcp_lease.route_proto = lease_proto;
             g_client_modem_ipv4 = lease_modem_ipv4 != 0;
-            g_client_legacy_routes_removed = lease_legacy_removed;
+            g_client_modem_unknown = lease_modem_unknown != 0;
+            /* No legacy route is ever deleted; a result cannot create proof. */
+            g_client_legacy_routes_removed = 0;
+            (void)lease_legacy_removed;
             str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), lease_iface);
             g_client_t1_at_ms = now + (int64_t)lease_t1 * 1000;
             g_client_t2_at_ms = now + (int64_t)lease_t2 * 1000;
@@ -3960,8 +4541,13 @@ static bool accept_apply_result(char *buf)
             g_dhcp_retry_failures = 0;
             g_dhcp_next_try_ms = 0;
         } else {
-            if (lease_valid)
-                log_msg("dhcp client: ignoring malformed lease readback");
+            if (lease_valid) {
+                /* A ready-looking lease without the ACK router/gateway is
+                 * malformed.  Keep the current absolute lease instead of
+                 * clearing it on a bad worker result. */
+                log_msg("dhcp client: malformed lease readback ignored; current lease preserved");
+                return false;
+            }
             memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
             g_dhcp_lease.updated = true;
             g_client_t1_at_ms = g_client_t2_at_ms = g_client_expiry_at_ms = 0;
@@ -3975,7 +4561,81 @@ static bool accept_apply_result(char *buf)
         set_msg("State applied, but preferences could not be saved; they may revert at reboot");
     }
     if (g_work_kind != WORK_DHCP) bt_state_save();
+    if (g_work_kind == WORK_MODE) {
+        g_carplay_last_apply_ok = !g_apply_failed;
+        g_carplay_last_apply_fw_ok = child_fw_ok == 1 && !g_apply_failed;
+        g_carplay_last_apply_at = (int64_t)time(NULL);
+        carplay_state_save();
+    }
     return true;
+}
+
+static bool apply_result_generation(const char *text, int *gen)
+{
+    int ok = 0;
+    if (text == NULL || gen == NULL) return false;
+    if (sscanf(text, "%d %d", gen, &ok) != 2) return false;
+    return ok == 0 || ok == 1;
+}
+
+/* A superseded/cancelled DHCP worker may already have changed the exact
+ * address or ledged route. Harvest only ownership facts for bounded cleanup;
+ * never publish a stale lease as ready and never replays config/messages. */
+static void adopt_superseded_dhcp_result(const char *text)
+{
+    char copy[4096];
+    char ip[32] = "", iface[16] = "";
+    int updated = 0, valid = 0, pending = 0, prefix = 0;
+    int fs_unconfirmed = 0;
+    char *save = NULL;
+
+    if (text == NULL) return;
+    str_copy(copy, sizeof(copy), text);
+    for (char *line = strtok_r(copy, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq++ = 0;
+        int v = atoi(eq);
+        if (!strcmp(line, "client_lease_updated")) updated = v == 1;
+        else if (!strcmp(line, "client_lease_valid")) valid = v == 1;
+        else if (!strcmp(line, "client_lease_cleanup_pending")) pending = v == 1;
+        else if (!strcmp(line, "client_lease_fs_unconfirmed")) fs_unconfirmed = v == 1;
+        else if (!strcmp(line, "client_lease_ip")) str_copy(ip, sizeof(ip), eq);
+        else if (!strcmp(line, "client_lease_iface")) str_copy(iface, sizeof(iface), eq);
+        else if (!strcmp(line, "client_lease_prefix")) prefix = v;
+    }
+
+    g_dhcp_owner_fs_unconfirmed = fs_unconfirmed != 0;
+    struct in_addr ip_addr;
+    bool have_ip = inet_pton(AF_INET, ip, &ip_addr) == 1 &&
+                   prefix > 0 && prefix <= 32;
+    if (pending || (updated && valid)) {
+        /* A completed-but-superseded lease is an exact owner to remove. */
+        if (iface[0] != '\0' && (have_ip || ip[0] == '\0')) {
+            memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
+            g_dhcp_lease.ip = have_ip ? ntohl(ip_addr.s_addr) : 0;
+            g_dhcp_lease.prefix = have_ip ? prefix : 0;
+            str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), iface);
+            g_dhcp_lease.valid = false;
+            g_dhcp_lease.route_ok = false;
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.updated = false;
+            g_client_t1_at_ms = g_client_t2_at_ms = g_client_expiry_at_ms = 0;
+            g_dhcp_next_try_ms = 0;
+            log_msg("dhcp client: superseded result retained for cleanup (%s/%d %s)",
+                    have_ip ? ip : "route-only", prefix, iface);
+        } else {
+            log_msg("dhcp client: superseded cleanup result lacks exact owner");
+        }
+    } else if (updated && !valid) {
+        /* A clean failure/release with no retained owner: forget the old
+         * lease so it cannot be advertised. */
+        memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
+        g_dhcp_lease.updated = true;
+        g_client_t1_at_ms = g_client_t2_at_ms = g_client_expiry_at_ms = 0;
+        log_msg("dhcp client: superseded result confirmed clean cleanup");
+    }
 }
 
 static void request_work(work_t kind, bool pair)
@@ -3999,16 +4659,23 @@ static void request_work(work_t kind, bool pair)
     g_apply_failed = false;
     if (kind == WORK_MODE) g_last_mode_ms = g_last_apply_ms;
     if (kind == WORK_DHCP) g_last_dhcp_work_ms = g_last_apply_ms;
+    if (kind == WORK_ROUTE_AUDIT) g_last_route_audit_ms = g_last_apply_ms;
     if (kind == WORK_DUMP) g_last_dump_try_ms = g_last_apply_ms;
     g_pending_kind = kind;
     g_pending_pair = pair;
     g_work_pending = true;
-    if (kind != WORK_DHCP) config_save();  /* persist user intent, including Off, before slow work */
+    if (kind != WORK_DHCP && kind != WORK_ROUTE_AUDIT)
+        config_save();  /* persist user intent, including Off, before slow work */
     set_msg("%s", kind == WORK_SCAN ? "Scanning..." :
             kind == WORK_DUMP ? "Saving logs..." :
             kind == WORK_SSH ? "Updating SSH..." :
             kind == WORK_PAIR_STOP ? "Stopping pairing..." :
-            kind == WORK_DHCP ? "Renewing client lease..." : "Applying mode...");
+            kind == WORK_DHCP ?
+                (g_dhcp_work_step == W2_DHCP_RELEASE
+                    ? "Clearing expired client lease..."
+                    : "Renewing client lease...") :
+            kind == WORK_ROUTE_AUDIT ? "Auditing owned route..." :
+            "Applying mode...");
     start_pending_work();
     write_status();
 }
@@ -4023,6 +4690,15 @@ static void start_pending_work(void)
     g_work_pending = false;
     g_apply_cancelled = false;
     unlink(APPLY_RESULT);
+    bool dhcp_capable = g_work_kind == WORK_DHCP ||
+        g_work_kind == WORK_ROUTE_AUDIT ||
+        (g_work_kind == WORK_MODE &&
+         ((g_cfg.mode == MODE_CLIENT && g_cfg.wlan_on) ||
+          g_dhcp_lease.cleanup_pending || g_dhcp_lease.ip != 0 ||
+          g_dhcp_lease.iface[0] != '\0' ||
+          access(WIFI1B_DHCP_OWNER_JOURNAL, F_OK) == 0 ||
+          access(WIFI1B_CLIENT_ROUTE_LEDGER, F_OK) == 0));
+    w2_txn_begin(dhcp_capable);
     pid_t pid = fork();
     if (pid == 0) {
         g_in_child = true;
@@ -4033,6 +4709,9 @@ static void start_pending_work(void)
         close_child_fds(-1);
         g_apply_pid = 0;
         bool ok = false;
+        bool release_work = (g_work_kind == WORK_DHCP &&
+                             g_dhcp_work_step == W2_DHCP_RELEASE) ||
+                            g_work_kind == WORK_ROUTE_AUDIT;
 #ifdef WIFI_TEST
         if (test_work) ok = test_work(g_work_kind, g_current_pair);
         else
@@ -4042,7 +4721,9 @@ static void start_pending_work(void)
          * reservation must not block the out-of-band listener at boot. */
         if (g_work_kind != WORK_MODE && g_work_kind != WORK_DUMP &&
             g_work_kind != WORK_SSH &&
-            radio_begin("wifi1b_daemon", g_work_kind == WORK_SCAN || (g_cfg.wlan_on && g_cfg.mode != MODE_OFF)) != 1) {
+            radio_begin("wifi1b_daemon",
+                        release_work || g_work_kind == WORK_SCAN ||
+                        (g_cfg.wlan_on && g_cfg.mode != MODE_OFF)) != 1) {
             set_msg("Radio busy/reserved; turn the owning WiFi app Off first");
         }
         else if (g_work_kind == WORK_MODE) ok = apply_mode_work(g_current_pair);
@@ -4055,6 +4736,10 @@ static void start_pending_work(void)
             ok = g_pair_stop_confirmed;
         } else if (g_work_kind == WORK_DHCP) {
             ok = w2_dhcp_client_renew(g_dhcp_work_step);
+            if (release_work) radio_release();
+        } else if (g_work_kind == WORK_ROUTE_AUDIT) {
+            ok = w2_client_route_audit();
+            radio_release();
         } else if (g_work_kind == WORK_DUMP) ok = dump_logs_to_usb(true);
         else if (g_work_kind == WORK_SCAN) {
             char scan[32768];
@@ -4067,40 +4752,52 @@ static void start_pending_work(void)
         if (lease_relevant && (g_cfg.mode != MODE_CLIENT || !g_cfg.wlan_on)) {
             g_dhcp_lease.valid = false;
             g_dhcp_lease.route_ok = false;
-            g_dhcp_lease.updated = true;
+            /* Pending cleanup wins over the mode transition's clean flag. */
+            g_dhcp_lease.updated = !g_dhcp_lease.cleanup_pending;
         }
+        if (g_work_kind == WORK_DHCP && g_dhcp_work_step == W2_DHCP_RELEASE && !ok)
+            g_dhcp_lease.updated = false;
         if (!lease_relevant) g_dhcp_lease.updated = false;
         if (g_dhcp_lease.ip) w2_ip4_str(g_dhcp_lease.ip, lease_ip, sizeof(lease_ip));
         if (g_dhcp_lease.server) w2_ip4_str(g_dhcp_lease.server, lease_server, sizeof(lease_server));
         if (g_dhcp_lease.gateway) w2_ip4_str(g_dhcp_lease.gateway, lease_gateway, sizeof(lease_gateway));
         char buf[4096];
         snprintf(buf, sizeof(buf), "%d %d\n%s\ncp_band=%d\ncp_channel=%d\n"
-                 "ssh_port=%d\ncarplay_ie=%d\nssh_active_port=%d\nssh_fallback=%d\n"
+                 "ssh_port=%d\ncarplay_ie=%d\ncarplay_fw_ok=%d\nssh_active_port=%d\nssh_fallback=%d\n"
                  "bt_discoverable=%d\nbt_pairable=%d\npair_stop_ok=%d\nbt_address=%s\ncp_id=%s\npair_message=%s\n"
                  "dhcp_tx=%d\ndhcp_rx_offer=%d\ndhcp_rx_ack=%d\ndhcp_attempts=%d\n"
                  "dhcp_bssid=%s\ndhcp_error=%s\n"
+                 "client_route_audit=%d\n"
                  "client_lease_updated=%d\nclient_lease_valid=%d\n"
+                 "client_lease_cleanup_pending=%d\n"
+                 "client_lease_fs_unconfirmed=%d\n"
                  "client_lease_ip=%s\nclient_lease_server=%s\nclient_lease_gateway=%s\n"
                  "client_lease_prefix=%d\nclient_lease_lease_s=%d\n"
                  "client_lease_t1_s=%d\nclient_lease_t2_s=%d\n"
                  "client_lease_route_ok=%d\nclient_wifi_default=%d\n"
-                 "client_modem_ipv4=%d\nclient_legacy_route_removed=%d\n"
+                 "client_modem_ipv4=%d\nclient_modem_unknown=%d\n"
+                 "client_legacy_route_removed=%d\n"
                  "client_route_metric=%u\n"
                  "client_route_proto=%u\nclient_lease_iface=%s\n",
                  g_apply_gen, ok ? 1 : 0, g_last_msg,
                  g_cfg.cp_band, g_cfg.cp_channel, g_cfg.ssh_port,
-                 g_carplay_ie, g_ssh_active_port, g_ssh_port_fallback,
+                 g_carplay_ie, g_carplay_fw_ok ? 1 : 0,
+                 g_ssh_active_port, g_ssh_port_fallback,
                  g_bt_discoverable, g_bt_pairable, g_pair_stop_confirmed,
                  g_cfg.cp_btaddr, g_cfg.cp_id, g_pair_msg,
                  g_dhcp_tx, g_dhcp_rx_offer, g_dhcp_rx_ack, g_dhcp_attempts,
                  g_dhcp_bssid, g_dhcp_error,
+                 g_work_kind == WORK_ROUTE_AUDIT ? 1 : 0,
                  g_dhcp_lease.updated ? 1 : 0, g_dhcp_lease.valid ? 1 : 0,
+                 g_dhcp_lease.cleanup_pending ? 1 : 0,
+                 g_dhcp_owner_fs_unconfirmed ? 1 : 0,
                  lease_ip, lease_server, lease_gateway,
                  g_dhcp_lease.prefix, g_dhcp_lease.lease_s,
                  g_dhcp_lease.t1_s, g_dhcp_lease.t2_s,
                  g_dhcp_lease.route_ok ? 1 : 0,
                  g_dhcp_lease.wifi_default ? 1 : 0,
                  g_client_modem_ipv4 ? 1 : 0,
+                 g_client_modem_unknown ? 1 : 0,
                  g_client_legacy_routes_removed,
                  g_dhcp_lease.route_metric,
                  g_dhcp_lease.route_proto, g_dhcp_lease.iface);
@@ -4118,6 +4815,7 @@ static void start_pending_work(void)
             g_dhcp_next_try_ms = now_ms() + delay;
         }
         set_msg("apply: fork failed");
+        w2_txn_end();
         return;
     }
     setpgid(pid, pid);
@@ -4127,18 +4825,30 @@ static void start_pending_work(void)
 
 static void apply_reap(void)
 {
-    if (g_apply_pid <= 0) { start_pending_work(); return; }
+    if (g_apply_pid <= 0) { w2_txn_end(); start_pending_work(); return; }
     int st = 0;
     pid_t pid = g_apply_pid;
     pid_t r = waitpid(pid, &st, WNOHANG);
     if (r == 0) {
-        if (g_apply_cancelled && now_ms() - g_cancel_ms > 300) {
-            kill(-pid, SIGKILL); kill(pid, SIGKILL);
-        } else if (!g_apply_cancelled && now_ms() - g_apply_start_ms > 150000) {
+        int64_t deadline = g_txn_active ? g_apply_deadline_ms
+                                        : g_apply_start_ms + 150000;
+        if (!g_apply_cancelled && now_ms() >= deadline) {
             g_apply_failed = true;
             if (g_work_kind == WORK_MODE) g_network_failed = true;
-            set_msg("apply timed out");
+            set_msg("apply transaction deadline exceeded");
             apply_cancel();
+        }
+        if (g_apply_cancelled) {
+            if (g_apply_dhcp_capable) {
+                /* The worker unwinds through remaining-time command/wait
+                 * budgets.  Only after that grace may its process group be
+                 * killed; the durable owner journal is the reconciliation. */
+                if (now_ms() >= deadline + WIFI1B_TXN_GRACE_MS) {
+                    kill(-pid, SIGKILL); kill(pid, SIGKILL);
+                }
+            } else if (now_ms() - g_cancel_ms > 300) {
+                kill(-pid, SIGKILL); kill(pid, SIGKILL);
+            }
         }
         return;
     }
@@ -4147,14 +4857,51 @@ static void apply_reap(void)
     kill(-pid, SIGKILL);
     g_apply_pid = 0;
     char buf[4096] = "";
-    bool valid = !g_apply_cancelled && WIFEXITED(st) && WEXITSTATUS(st) == 0 &&
-                 read_file(APPLY_RESULT, buf, sizeof(buf)) > 0 && accept_apply_result(buf);
-    unlink(APPLY_RESULT);
-    if (g_work_kind == WORK_MODE && (!g_apply_cancelled || !g_work_pending)) g_ap_restart_requested = false;
-    if (!valid && !g_apply_cancelled) {
+    bool have_result = read_file(APPLY_RESULT, buf, sizeof(buf)) > 0;
+    bool stale_dhcp = false;
+    int result_gen = -1;
+    bool current_gen = have_result &&
+        apply_result_generation(buf, &result_gen) && result_gen == g_apply_gen;
+    bool child_failed = !WIFEXITED(st) || WEXITSTATUS(st) != 0;
+    bool txn_over = g_txn_active && now_ms() > g_apply_deadline_ms;
+    if (g_apply_dhcp_capable && have_result &&
+        (g_apply_cancelled || !current_gen || child_failed || txn_over)) {
+        /* A WORK_MODE client transaction contains a DHCP acquisition too;
+         * harvest it exactly like a WORK_DHCP worker. */
+        adopt_superseded_dhcp_result(buf);
+        (void)w2_dhcp_reconcile_owned_state();
+        stale_dhcp = true;
+    } else if (g_apply_dhcp_capable &&
+               (!have_result || child_failed || txn_over)) {
+        /* Forced exit/no result: adopt only durable exact ownership, never a
+         * stale ready lease. */
         g_apply_failed = true;
         if (g_work_kind == WORK_MODE) g_network_failed = true;
-        set_msg("worker failed; result absent, invalid or stale");
+        set_msg("worker result missing or failed; exact owner reconciliation pending");
+        (void)w2_dhcp_reconcile_owned_state();
+        g_dhcp_lease.valid = false;
+        g_dhcp_lease.route_ok = false;
+        if (g_dhcp_lease.ip != 0 || g_dhcp_lease.prefix != 0 ||
+            g_dhcp_lease.cleanup_pending) {
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.updated = false;
+        } else {
+            g_dhcp_lease.updated = true;
+        }
+        stale_dhcp = true;
+    }
+    bool is_audit = g_work_kind == WORK_ROUTE_AUDIT;
+    bool valid = !stale_dhcp && !g_apply_cancelled &&
+                 WIFEXITED(st) && WEXITSTATUS(st) == 0 && have_result &&
+                 (is_audit ? accept_route_audit_result(buf)
+                           : accept_apply_result(buf));
+    unlink(APPLY_RESULT);
+    if (g_work_kind == WORK_MODE && (!g_apply_cancelled || !g_work_pending)) g_ap_restart_requested = false;
+    if (!valid && !g_apply_cancelled && !stale_dhcp) {
+        g_apply_failed = true;
+        if (g_work_kind == WORK_MODE) g_network_failed = true;
+        set_msg(is_audit ? "route audit refused; keeping current intent" :
+                "worker failed; result absent, invalid or stale");
     }
     if (g_work_kind == WORK_MODE && !g_apply_cancelled && (!valid || g_apply_failed)) {
         /* A failed client-mode apply must not leave an old lease advertised. */
@@ -4162,7 +4909,7 @@ static void apply_reap(void)
         g_dhcp_lease.route_ok = false;
         g_client_t1_at_ms = g_client_t2_at_ms = g_client_expiry_at_ms = 0;
     }
-    if (g_work_kind == WORK_DHCP && !g_apply_cancelled) {
+    if (g_work_kind == WORK_DHCP && !g_apply_cancelled && !stale_dhcp) {
         if (valid && !g_apply_failed) {
             g_dhcp_retry_failures = 0;
             g_dhcp_next_try_ms = 0;
@@ -4180,6 +4927,7 @@ static void apply_reap(void)
     }
     g_apply_cancelled = false;
     g_last_probe_ms = 0;
+    w2_txn_end();
     start_pending_work();
     if (!g_apply_pid && !g_work_pending && g_dump_requested) {
         g_dump_requested = false;
@@ -4212,16 +4960,36 @@ static dhcp_tick_t dhcp_lease_action(bool valid, int64_t now, int64_t t1,
  * gets to remove the stale address/route. */
 static void dhcp_lease_tick(void)
 {
-    if (g_stop || !g_cfg.wlan_on || g_cfg.mode != MODE_CLIENT) return;
+    if (g_stop) return;
     if (g_apply_pid > 0 || g_work_pending) return;
+    (void)w2_dhcp_reconcile_owned_state();
     int64_t now = now_ms();
-    if (g_dhcp_lease.valid && g_client_expiry_at_ms > 0 &&
+    if (g_cfg.mode == MODE_CLIENT && g_cfg.wlan_on &&
+        g_dhcp_lease.valid && g_client_expiry_at_ms > 0 &&
         now >= g_client_expiry_at_ms) {
         g_dhcp_lease.valid = false;
         g_dhcp_lease.route_ok = false;
+        g_dhcp_lease.cleanup_pending = true;
         g_client_t1_at_ms = g_client_t2_at_ms = 0;
     }
     if (now < g_dhcp_next_try_ms) return;
+    /* Exact-owner cleanup is not limited to client mode: a mode-off or
+     * CarPlay transition can leave a pending address/route that must still
+     * be retried until both readbacks are absent. */
+    if (g_dhcp_lease.cleanup_pending) {
+        g_dhcp_work_step = W2_DHCP_RELEASE;
+        request_work(WORK_DHCP, false);
+        return;
+    }
+    if (g_cfg.mode != MODE_CLIENT || !g_cfg.wlan_on) return;
+    /* Remove an expired/stale lease before trying to acquire another one. */
+    if (!g_dhcp_lease.valid &&
+        (g_dhcp_lease.ip != 0 || g_dhcp_lease.iface[0] != '\0')) {
+        g_dhcp_lease.cleanup_pending = true;
+        g_dhcp_work_step = W2_DHCP_RELEASE;
+        request_work(WORK_DHCP, false);
+        return;
+    }
     dhcp_tick_t action = dhcp_lease_action(g_dhcp_lease.valid, now,
                                            g_client_t1_at_ms,
                                            g_client_t2_at_ms,
@@ -4257,15 +5025,9 @@ static void route_audit_tick(void)
     if (g_apply_pid > 0 || g_work_pending) return;
     if (g_cfg.mode != MODE_CLIENT || !g_cfg.wlan_on || !g_dhcp_lease.valid)
         return;
-    bool before_default = g_dhcp_lease.wifi_default;
-    unsigned int before_metric = g_dhcp_lease.route_metric;
-    if (!w2_client_route_audit()) {
-        log_msg("route audit: failed; keeping current intent");
-        return;
-    }
-    if (before_default != g_dhcp_lease.wifi_default ||
-        before_metric != g_dhcp_lease.route_metric)
-        write_status();
+    /* Never mutate routes in the parent/HTTP loop.  The serialized DHCP-
+     * capable worker owns the radio reservation and transaction budget. */
+    request_work(WORK_ROUTE_AUDIT, false);
 }
 
 static void watchdog(void)
@@ -4338,6 +5100,14 @@ static void watchdog(void)
             apply_mode(false);
             return;
         }
+        if (g_observed_ms > 0 && now - g_observed_ms < 15000 &&
+            g_observed.gen == g_apply_gen && !g_observed.carplay_fw_ok) {
+            /* A vendor firewall reload can remove our owned hooks.  The next
+             * apply reconciles the chain; readiness stays false meanwhile. */
+            log_msg("watchdog: owned CarPlay firewall chain missing; re-applying");
+            apply_mode(false);
+            return;
+        }
     } else if (g_cfg.mode == MODE_CLIENT) {
         char ip[64];
         /* The built-in DHCP client is a one-shot inside the apply; the
@@ -4366,6 +5136,70 @@ static const char *mode_name(void)
     return g_cfg.mode == MODE_CARPLAY ? "carplay" : "client";
 }
 
+#ifndef CARPLAY_BROKER_STATUS
+#define CARPLAY_BROKER_STATUS "/run/wifi1b/broker-status.json"
+#endif
+
+/* Broker runtime state is the only source for a session observation.  It is
+ * never derived from AP/services or a hardcoded constant, and a stale status
+ * file is not evidence. */
+static void observe_broker_status(observation_t *o)
+{
+    o->broker_observed = false;
+    o->broker_state[0] = '\0';
+    int fd = open(CARPLAY_BROKER_STATUS,
+                  O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        st.st_size >= 16384 ||
+        (uint32_t)st.st_uid != (uint32_t)geteuid() ||
+        (st.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        close(fd);
+        return;
+    }
+    char text[16384];
+    ssize_t n = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (n <= 0 || n != (ssize_t)st.st_size) return;
+    text[n] = '\0';
+    time_t now = time(NULL);
+    if (now <= 0 || st.st_mtime <= 0 || now - st.st_mtime > 5 ||
+        st.st_mtime - now > 5)
+        return;
+    const char *state = strstr(text, "\"state\":\"");
+    if (state != NULL) {
+        state += strlen("\"state\":\"");
+        size_t i = 0;
+        while (i + 1 < sizeof(o->broker_state) &&
+               state[i] != '"' && state[i] != '\0') {
+            o->broker_state[i] = state[i];
+            i++;
+        }
+        o->broker_state[i] = '\0';
+    }
+    const char *peer_key = "\"peer\":\"";
+    const char *peer = strstr(text, peer_key);
+    char peer_text[18] = "";
+    unsigned char peer_mac[6];
+    if (peer != NULL) {
+        peer += strlen(peer_key);
+        if (strcspn(peer, "\"") == 17u) {
+            memcpy(peer_text, peer, 17);
+            peer_text[17] = '\0';
+        }
+    }
+    const char *rx = strstr(text, "\"rx_packets\":");
+    unsigned long rx_packets = 0;
+    if (rx != NULL) rx_packets = strtoul(rx + strlen("\"rx_packets\":"),
+                                         NULL, 10);
+    o->broker_observed =
+        strstr(text, "\"state\":\"running\"") != NULL &&
+        strstr(text, "\"receiver_observed\":true") != NULL &&
+        strstr(text, "\"ap_on_air\":true") != NULL &&
+        parse_mac6(peer_text, peer_mac) && rx_packets > 0u;
+}
+
 static void collect_observation(observation_t *o)
 {
     memset(o, 0, sizeof(*o));
@@ -4383,6 +5217,10 @@ static void collect_observation(observation_t *o)
     if (o->associated) wlan_link(o->ssid, sizeof(o->ssid), &o->signal);
     o->carplay_svc = sh("systemctl is-active --quiet carplay_iAP2.service 2>/dev/null") == 0;
     o->mdns_svc = sh("systemctl is-active --quiet carplay_mdnsd.service 2>/dev/null") == 0;
+    o->carplay_fw_ok = false;
+    if (g_cfg.mode == MODE_CARPLAY && g_cfg.wlan_on && o->ap_on)
+        o->carplay_fw_ok = carplay_fw_verify();
+    observe_broker_status(o);
     o->ssh_ours = ssh_running();
     o->vendor_ssh_22 = port_listening(22) && !(o->ssh_ours && g_ssh_active_port == 22);
     o->debug_console = file_exists("/tmp/secure_console_disable");
@@ -4435,6 +5273,69 @@ static void probe_tick(void)
     g_probe_pid = pid; g_probe_fd = fds[0]; g_probe_start_ms = now;
 }
 
+static void carplay_state_load(void)
+{
+    char text[512];
+    g_carplay_last_apply_ok = false;
+    g_carplay_last_apply_fw_ok = false;
+    g_carplay_last_apply_at = 0;
+    if (read_file(CARPLAY_STATE, text, sizeof(text)) <= 0) return;
+    char *save = NULL;
+    for (char *line = strtok_r(text, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq++ = 0;
+        if (!strcmp(line, "last_apply_ok")) g_carplay_last_apply_ok = atoi(eq) == 1;
+        else if (!strcmp(line, "last_apply_fw_ok")) g_carplay_last_apply_fw_ok = atoi(eq) == 1;
+        else if (!strcmp(line, "last_apply_at")) g_carplay_last_apply_at = atoll(eq);
+    }
+}
+
+/* Persist the last accepted apply result so a restart can report the prior
+ * outcome honestly.  Readiness still requires a fresh probe; a stored success
+ * alone never sets carplay_ready. */
+static void carplay_state_save(void)
+{
+    char text[256];
+    snprintf(text, sizeof(text),
+             "version=1\nlast_apply_ok=%d\nlast_apply_fw_ok=%d\n"
+             "last_apply_at=%lld\n",
+             g_carplay_last_apply_ok ? 1 : 0,
+             g_carplay_last_apply_fw_ok ? 1 : 0,
+             (long long)g_carplay_last_apply_at);
+    (void)write_file_atomic(CARPLAY_STATE, text, 0600);
+}
+
+static const char *carplay_gate_name(bool mode_carplay, bool wlan_on,
+                                     bool network_failed, bool fresh,
+                                     bool ap_on, bool fw_ok, bool identity,
+                                     bool iap2, bool mdns, bool broker,
+                                     int clients, bool *components_ok,
+                                     bool *session_observed)
+{
+    /* A broker-published session with no associated client is contradictory
+     * or stale; never let it make carplay_ready true while the association
+     * gate is still failing. */
+    *session_observed = mode_carplay && wlan_on && fresh && ap_on && fw_ok &&
+                        broker && clients > 0;
+    *components_ok = mode_carplay && wlan_on && !network_failed && fresh &&
+                     ap_on && fw_ok && identity && iap2 && mdns;
+    if (mode_carplay && wlan_on && !network_failed) {
+        if (!fresh) return "ap-snapshot";
+        if (!ap_on) return "ap-readback";
+        if (!fw_ok) return "firewall";
+        if (!identity) return "identity";
+        if (!iap2) return "iap2";
+        if (!mdns) return "mdns";
+        if (!broker) return "spp";
+        if (clients == 0) return "association";
+        return "projection";
+    }
+    if (mode_carplay && network_failed) return "apply";
+    return "inactive";
+}
+
 static void build_status(char *out, size_t n)
 {
     bool fresh = g_observed_ms > 0 && now_ms() - g_observed_ms < 15000 &&
@@ -4453,6 +5354,7 @@ static void build_status(char *out, size_t n)
     char imp_e[512], cps_e[256], cpsk_e[256], bt_e[128], id_e[128];
     char client_e[256], pair_e[512];
     char dhcp_bssid_e[64], dhcp_error_e[256];
+    char broker_e[64];
     char ap_sec_e[96], ap_ll_e[160], ap_v6e_e[256];
     char client_gw_e[64], client_lease_ip[32] = "";
     char radio_owner[32];
@@ -4479,13 +5381,20 @@ static void build_status(char *out, size_t n)
     } else if (g_dhcp_lease.ip && g_client_expiry_at_ms > 0) {
         client_lease_state = "expired";
     }
-    /* Local service state is not a CarPlay session. Until a discovery,
-     * iAP2 and projection handshake is actually observed, "ready" must
-     * stay false and the UI reports the components separately. */
-    const bool carplay_session_observed = false;
-    const bool carplay_components_ok =
-        g_cfg.mode == MODE_CARPLAY && g_cfg.wlan_on && !g_network_failed &&
-        o->ap_on && g_carplay_ie && o->carplay_svc && o->mdns_svc;
+    /* Local service state is not a CarPlay session.  A session observation
+     * comes only from a fresh broker status file; readiness requires the live
+     * owned firewall chain and a fresh AP snapshot as well. */
+    bool carplay_components_ok = false;
+    bool carplay_session_observed = false;
+    const char *carplay_gate =
+        carplay_gate_name(g_cfg.mode == MODE_CARPLAY, g_cfg.wlan_on,
+                          g_network_failed, fresh, o->ap_on,
+                          o->carplay_fw_ok, g_carplay_ie,
+                          o->carplay_svc, o->mdns_svc, o->broker_observed,
+                          o->clients, &carplay_components_ok,
+                          &carplay_session_observed);
+    long long carplay_apply_age = g_carplay_last_apply_at > 0
+        ? (long long)time(NULL) - (long long)g_carplay_last_apply_at : -1;
     if (!radio_record_name(radio_owner, sizeof(radio_owner))) radio_owner[0] = 0;
     json_escape(ssid_e, sizeof(ssid_e), o->ssid);
     json_escape(ip_e, sizeof(ip_e), effective_ip);
@@ -4495,7 +5404,10 @@ static void build_status(char *out, size_t n)
     json_escape(cps_e, sizeof(cps_e), g_cfg.cp_ssid);
     json_escape(cpsk_e, sizeof(cpsk_e), g_cfg.cp_psk);
     json_escape(bt_e, sizeof(bt_e), g_cfg.cp_btaddr);
-    json_escape(id_e, sizeof(id_e), g_cfg.cp_id);
+    json_escape(id_e, sizeof(id_e),
+                carplay_id_allowed(g_cfg.cp_id) &&
+                        !carplay_id_equals_bt()
+                    ? g_cfg.cp_id : "");
     json_escape(client_e, sizeof(client_e), g_cfg.ssid);
     json_escape(pair_e, sizeof(pair_e), g_pair_msg);
     json_escape(dhcp_bssid_e, sizeof(dhcp_bssid_e), g_dhcp_bssid);
@@ -4503,6 +5415,7 @@ static void build_status(char *out, size_t n)
     json_escape(ap_sec_e, sizeof(ap_sec_e), o->ap.security);
     json_escape(ap_ll_e, sizeof(ap_ll_e), o->ap.linklocal);
     json_escape(ap_v6e_e, sizeof(ap_v6e_e), o->ap.ipv6_error);
+    json_escape(broker_e, sizeof(broker_e), o->broker_state);
     char gateway_text[32] = "";
     if (g_dhcp_lease.gateway) w2_ip4_str(g_dhcp_lease.gateway, gateway_text, sizeof(gateway_text));
     json_escape(client_gw_e, sizeof(client_gw_e), gateway_text);
@@ -4539,6 +5452,7 @@ static void build_status(char *out, size_t n)
              "\"client_route_policy\":\"%s\","
              "\"client_wifi_default\":%s,"
              "\"client_modem_ipv4\":%s,"
+             "\"client_modem_unknown\":%s,"
              "\"client_legacy_route_removed\":%d,"
              "\"client_route_metric\":%u,"
              "\"client_route_proto\":%u,"
@@ -4564,10 +5478,18 @@ static void build_status(char *out, size_t n)
              "\"carplay_ready\":%s,"
              "\"carplay_components_ok\":%s,"
              "\"carplay_session_observed\":%s,"
+             "\"carplay_session_source\":\"%s\","
+             "\"carplay_gate\":\"%s\","
+             "\"carplay_firewall_ok\":%s,"
+             "\"carplay_broker_state\":\"%s\","
+             "\"carplay_last_apply_ok\":%s,"
+             "\"carplay_last_apply_fw_ok\":%s,"
+             "\"carplay_last_apply_age_s\":%lld,"
              "\"carplay_ap_up\":%s,"
              "\"carplay_ie_configured\":%s,"
              "\"carplay_ie_observed\":false,"
-             "\"carplay_ie_observation\":\"unverified\","
+             "\"carplay_ie_observation\":\"ie_unverified\","
+             "\"carplay_vendor_ie_requested\":%s,"
              "\"carplay_control\":\"%s\","
              "\"carplay_ie\":%s,"
              "\"carplay_iap2\":%s,"
@@ -4618,6 +5540,7 @@ static void build_status(char *out, size_t n)
                  ? "fallback" : "modem_safe",
              g_dhcp_lease.wifi_default ? "true" : "false",
              g_client_modem_ipv4 ? "true" : "false",
+             g_client_modem_unknown ? "true" : "false",
              g_client_legacy_routes_removed,
              g_dhcp_lease.route_metric,
              g_dhcp_lease.route_proto,
@@ -4631,13 +5554,21 @@ static void build_status(char *out, size_t n)
              o->ap.state == AP_READY ? "true" : "false",
              o->ap.channel_matches_config ? "true" : "false",
              ap_v6e_e,
-             /* "ready" requires an observed CarPlay session. The local
-              * AP/IE/service checks are reported separately. */
+             /* Ready requires fresh AP/firewall state plus a fresh broker
+              * session observation; a stored apply result is diagnostic only. */
              (carplay_components_ok && carplay_session_observed) ? "true" : "false",
              carplay_components_ok ? "true" : "false",
              carplay_session_observed ? "true" : "false",
+             carplay_session_observed ? "broker" : "none",
+             carplay_gate,
+             o->carplay_fw_ok ? "true" : "false",
+             broker_e,
+             g_carplay_last_apply_ok ? "true" : "false",
+             g_carplay_last_apply_fw_ok ? "true" : "false",
+             carplay_apply_age,
              o->ap_on ? "true" : "false",
              g_carplay_ie ? "true" : "false",
+             g_cfg.cp_vendor_ie ? "true" : "false",
              g_cfg.carplay_control ? "stock" : "wifi1b",
              g_carplay_ie ? "true" : "false",
              o->carplay_svc ? "true" : "false",
@@ -4765,7 +5696,10 @@ static void scan_networks(char *out, size_t n)
     if (was_off) {
         g_cfg.wlan_on = false;
         g_cfg.mode = MODE_OFF;
+        bool scan_txn = !g_txn_active;
+        if (scan_txn) w2_txn_begin(false);
         apply_mode_work(false);
+        if (scan_txn) w2_txn_end();
     }
     set_msg("scan: %d network(s) found", count);
     write_status();
@@ -5451,15 +6385,146 @@ static void usage(const char *argv0)
             "usage: %s [--port 8093] [--status-file PATH]\n"
             "       %s --status|--mode off|client|carplay|--import|--ssh on|off\n"
             "       %s --ensure-user|--choose-port PORT|--ssh-gate\n"
-            "       %s --usb0-rule PORT|--dump-logs\n",
+            "       %s --usb0-rule PORT|--usb0-apply PORT|--usb0-cleanup|--dump-logs\n",
             argv0, argv0, argv0, argv0);
+}
+
+static bool shutdown_cleanup_work(void)
+{
+    g_cfg.wlan_on = false;
+    g_cfg.mode = MODE_OFF;
+    w2_txn_end();
+    w2_txn_begin(false); /* fresh bounded cleanup/handoff budget */
+    bool ok = apply_mode_work(false);
+    w2_txn_end();
+    return ok;
+}
+
+static int shutdown_sequence(void)
+{
+    /* Coordinated shutdown: cancel any in-flight apply and undo the network
+     * state we own so stopping the daemon does not leave owned routes,
+     * addresses, firewall rules or supplicant state behind. */
+    apply_cancel();
+    g_work_pending = false; g_dump_requested = false;
+    /* Wait only to the transaction's real monotonic deadline (plus a short
+     * unwind grace).  The worker itself caps every command/wait by the
+     * remaining budget; this is not a nominal 35 s over more 8 s commands. */
+    int64_t until = now_ms() + 1500;
+    if (g_apply_pid > 0 && g_apply_dhcp_capable) {
+        int64_t deadline = g_txn_active ? g_apply_deadline_ms
+                                        : now_ms() + WIFI1B_TXN_BUDGET_MS;
+        until = deadline + WIFI1B_TXN_GRACE_MS;
+        if (until < now_ms() + 1000) until = now_ms() + 1000;
+    }
+    while (g_apply_pid > 0 && now_ms() < until) {
+        apply_reap();
+        usleep(20000);
+    }
+    if (g_apply_pid > 0) {
+        set_msg("shutdown: apply transaction deadline reached; exact owner reconciliation required");
+        kill(-g_apply_pid, SIGKILL);
+        kill(g_apply_pid, SIGKILL);
+        while (waitpid(g_apply_pid, NULL, WNOHANG) == 0) {
+            if (now_ms() >= until + 2000) break;
+            usleep(20000);
+        }
+        g_apply_pid = 0;
+    }
+    if (g_apply_dhcp_capable)
+        (void)w2_dhcp_reconcile_owned_state();
+    if (g_probe_pid > 0) {
+        kill(-g_probe_pid, SIGKILL); kill(g_probe_pid, SIGKILL);
+        waitpid(g_probe_pid, NULL, WNOHANG);
+    }
+    /* Cleanup is unconditional: configured Off is not proof an interrupted
+     * previous apply removed its firewall/AP/SSH state. Keep it bounded and
+     * outside the parent, including on SIGTERM when g_stop is already set. */
+    int shutdown_rc = 0;
+    pid_t cleanup = fork();
+    if (cleanup == 0) {
+        setpgid(0, 0); g_in_child = true; g_stop = 0;
+        g_shutdown_cleanup = true;
+        close_child_fds(-1);
+        bool cleanup_ok = shutdown_cleanup_work();
+        _exit(cleanup_ok ? 0 : 1);
+    }
+    if (cleanup > 0) {
+        setpgid(cleanup, cleanup);
+        until = now_ms() + WIFI1B_TXN_BUDGET_MS + WIFI1B_TXN_GRACE_MS;
+        int cst = 0;
+        pid_t cr = 0;
+        while ((cr = waitpid(cleanup, &cst, WNOHANG)) == 0 && now_ms() < until)
+            usleep(20000);
+        if (cr == 0) {
+            kill(-cleanup, SIGKILL); kill(cleanup, SIGKILL);
+            while (waitpid(cleanup, &cst, 0) < 0 && errno == EINTR) {}
+        }
+        bool cleanup_ok = cr == cleanup && WIFEXITED(cst) &&
+                          WEXITSTATUS(cst) == 0;
+        if (!cleanup_ok) {
+            set_msg("shutdown cleanup not confirmed; exact address/route owner retained");
+            log_msg("shutdown: cleanup did not confirm absence; handoff refused");
+            write_status();
+            shutdown_rc = 1;
+        }
+    } else {
+        shutdown_rc = 1;
+    }
+    return shutdown_rc;
 }
 
 /* The Orange Pi ECM gadget is the out-of-band SSH path.  The helper is
  * deliberately a generated first-party script so udev and the daemon share
  * one implementation: static 10.55.0.2/24, no default route, and only the
  * currently selected SSH port open on usb0. */
-static const char *usb0_helper_text =
+/* Read-only firewall tool resolver.  Never creates the APP_DIR symlink that
+ * fw_tool() may use as an xtables-multi fallback, so a side-effect-free
+ * unknown-ownership cleanup cannot write anything. */
+static void fw_tool_ro(char *out, size_t n)
+{
+    if (file_exists("/usr/sbin/iptables")) {
+        str_copy(out, n, "/usr/sbin/iptables");
+        return;
+    }
+    if (file_exists("/sbin/iptables")) {
+        str_copy(out, n, "/sbin/iptables");
+        return;
+    }
+    if (file_exists("/usr/sbin/xtables-multi")) {
+        snprintf(out, n, "/usr/sbin/xtables-multi iptables");
+        return;
+    }
+    if (file_exists("/sbin/xtables-multi")) {
+        snprintf(out, n, "/sbin/xtables-multi iptables");
+        return;
+    }
+    str_copy(out, n, "iptables");
+}
+
+/* ------------------------------------------------------------------ */
+/* USB0 ownership and live-state contract                              */
+/* ------------------------------------------------------------------ */
+
+typedef enum {
+    USB0_LIVE_UNKNOWN = -1,
+    USB0_LIVE_ABSENT = 0,
+    USB0_LIVE_OWNED = 1,
+    USB0_LIVE_FOREIGN = 2
+} usb0_live_state;
+
+typedef enum {
+    USB0_FILE_UNKNOWN = -1,
+    USB0_FILE_ABSENT = 0,
+    USB0_FILE_OWNED = 1,
+    USB0_FILE_FOREIGN = 2
+} usb0_file_state;
+
+/* The pinned V22 helper bytes.  This is the old shell implementation; it is
+ * accepted only as a legacy fingerprint, never by shape alone.  The current
+ * helper delegates all network mutation to the daemon's checked
+ * --usb0-apply path so udev cannot run unchecked ifconfig/route/iptables. */
+static const char *usb0_helper_legacy_text =
     "#!/bin/sh\n"
     "# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors\n"
     "# SPDX-License-Identifier: AGPL-3.0-only\n"
@@ -5487,60 +6552,802 @@ static const char *usb0_helper_text =
     "fi\n"
     "exit 0\n";
 
-static void usb0_rule_write(int port)
+static bool usb0_file_equals(const char *path, const char *text)
 {
-    static int last_port = -1;
-    if (port < 0 || port > 65535) port = 0;
-    bool helper_ok = file_exists(USB0_HELPER) && file_exists(USB0_RULE_PATH);
-    if (helper_ok && last_port == port) {
-        if (usb0_present()) {
-            /* Re-assert the static address if the interface lost it, and
-             * the firewall rule after a vendor reload. */
-            (void)sh("/bin/sh %s %s %d 2>/dev/null", USB0_HELPER,
-                     WIFI1B_USB0_IFACE, port);
-            if (port > 0) (void)usb0_fw_open(port);
-        }
-        return;
-    }
+    return w2_file_equals_text(path, text);
+}
 
-    mkdir(APP_DIR, 0755);
-    mkdir(APP_DIR "/bin", 0755);
-    if (write_file_atomic(USB0_HELPER, usb0_helper_text, 0755) != 0) {
-        log_msg("usb0: cannot write %s", USB0_HELPER);
-        return;
+static bool usb0_helper_build(char *out, size_t cap)
+{
+    if (out == NULL || cap == 0) return false;
+    int n = snprintf(out, cap,
+        "#!/bin/sh\n"
+        "# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors\n"
+        "# SPDX-License-Identifier: AGPL-3.0-only\n"
+        "# TARGET: Gen5W_L EU 260128\n"
+        "# Generated by wifi1b_daemon.  Checked network work is in C.\n"
+        "IFACE=\"${1:-usb0}\"\n"
+        "PORT=\"${2:-0}\"\n"
+        "[ \"$IFACE\" = \"usb0\" ] || exit 2\n"
+        "case \"$PORT\" in ''|*[!0-9]*) exit 2 ;; esac\n"
+        "DAEMON=\"" APP_DIR "/wifi1b_daemon\"\n"
+        "[ -x \"$DAEMON\" ] || exit 3\n"
+        "exec \"$DAEMON\" --usb0-apply \"$PORT\"\n");
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool usb0_rule_build(char *out, size_t cap, int port)
+{
+    if (out == NULL || cap == 0 || port < 0 || port > 65535) return false;
+    int n = snprintf(out, cap,
+        "ACTION==\"add\", SUBSYSTEM==\"net\", KERNEL==\"%s\", "
+        "RUN+=\"/bin/sh %s %s %d\"\n",
+        WIFI1B_USB0_IFACE, USB0_HELPER, WIFI1B_USB0_IFACE, port);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool usb0_owner_build(char *out, size_t cap, int port)
+{
+    if (out == NULL || cap == 0 || port < 0 || port > 65535) return false;
+    int n = snprintf(out, cap,
+        "v1 scope=wifi1b-usb0 port=%d address=" WIFI1B_USB0_IP "/24\n",
+        port);
+    return n > 0 && (size_t)n < cap;
+}
+
+static usb0_file_state usb0_read_state(const char *path, const char *expected,
+                                       struct stat *st_out,
+                                       bool *legacy_out)
+{
+    char buf[4096];
+    struct stat st;
+    if (st_out != NULL) memset(st_out, 0, sizeof(*st_out));
+    if (legacy_out != NULL) *legacy_out = false;
+    if (path == NULL) return USB0_FILE_UNKNOWN;
+    if (lstat(path, &st) != 0)
+        return errno == ENOENT ? USB0_FILE_ABSENT : USB0_FILE_UNKNOWN;
+    if (!S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+        (uint32_t)st.st_uid != (uint32_t)geteuid())
+        return USB0_FILE_FOREIGN;
+    int n = read_file(path, buf, sizeof(buf));
+    if (n <= 0 || n >= (int)sizeof(buf) - 1)
+        return USB0_FILE_UNKNOWN;
+    if (expected != NULL && strcmp(buf, expected) == 0) {
+        if (st_out != NULL) *st_out = st;
+        return USB0_FILE_OWNED;
     }
-    chmod(USB0_HELPER, 0755);
+    if (legacy_out != NULL && strcmp(buf, usb0_helper_legacy_text) == 0) {
+        *legacy_out = true;
+        if (st_out != NULL) *st_out = st;
+        return USB0_FILE_OWNED;
+    }
+    return USB0_FILE_FOREIGN;
+}
+
+static usb0_file_state usb0_helper_state(struct stat *st_out, bool *legacy)
+{
+    char expected[4096];
+    if (!usb0_helper_build(expected, sizeof(expected)))
+        return USB0_FILE_UNKNOWN;
+    return usb0_read_state(USB0_HELPER, expected, st_out, legacy);
+}
+
+static bool usb0_rule_parse_port(const char *text, int *port_out)
+{
+    const char *prefix = "ACTION==\"add\", SUBSYSTEM==\"net\", "
+                         "KERNEL==\"usb0\", RUN+=\"/bin/sh ";
+    const char *helper = USB0_HELPER " usb0 ";
+    if (text == NULL || port_out == NULL) return false;
+    if (strncmp(text, prefix, strlen(prefix)) != 0) return false;
+    const char *p = text + strlen(prefix);
+    if (strncmp(p, helper, strlen(helper)) != 0) return false;
+    p += strlen(helper);
+    errno = 0;
+    char *end = NULL;
+    long value = strtol(p, &end, 10);
+    if (errno != 0 || end == p || value < 0 || value > 65535)
+        return false;
+    if (strcmp(end, "\"\n") != 0) return false;
+    *port_out = (int)value;
+    return true;
+}
+
+static usb0_file_state usb0_rule_state(int *port_out, struct stat *st_out)
+{
+    char buf[4096], expected[512];
+    struct stat st;
+    if (port_out != NULL) *port_out = 0;
+    if (st_out != NULL) memset(st_out, 0, sizeof(*st_out));
+    if (lstat(USB0_RULE_PATH, &st) != 0)
+        return errno == ENOENT ? USB0_FILE_ABSENT : USB0_FILE_UNKNOWN;
+    if (!S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+        (uint32_t)st.st_uid != (uint32_t)geteuid())
+        return USB0_FILE_FOREIGN;
+    int n = read_file(USB0_RULE_PATH, buf, sizeof(buf));
+    if (n <= 0 || n >= (int)sizeof(buf) - 1)
+        return USB0_FILE_UNKNOWN;
+    int port = 0;
+    if (!usb0_rule_parse_port(buf, &port) ||
+        !usb0_rule_build(expected, sizeof(expected), port) ||
+        strcmp(buf, expected) != 0)
+        return USB0_FILE_FOREIGN;
+    if (port_out != NULL) *port_out = port;
+    if (st_out != NULL) *st_out = st;
+    return USB0_FILE_OWNED;
+}
+
+static usb0_file_state usb0_owner_state(int *port_out, struct stat *st_out)
+{
+    char buf[512], expected[256];
+    struct stat st;
+    if (port_out != NULL) *port_out = 0;
+    if (st_out != NULL) memset(st_out, 0, sizeof(*st_out));
+    if (lstat(USB0_OWNER, &st) != 0)
+        return errno == ENOENT ? USB0_FILE_ABSENT : USB0_FILE_UNKNOWN;
+    if (!S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+        (uint32_t)st.st_uid != (uint32_t)geteuid())
+        return USB0_FILE_FOREIGN;
+    int n = read_file(USB0_OWNER, buf, sizeof(buf));
+    if (n <= 0 || n >= (int)sizeof(buf) - 1)
+        return USB0_FILE_UNKNOWN;
+    int port = 0;
+    char tail = 0;
+    if (sscanf(buf, "v1 scope=wifi1b-usb0 port=%d address=" WIFI1B_USB0_IP
+               "/24%c", &port, &tail) != 2 ||
+        port < 0 || port > 65535 ||
+        !usb0_owner_build(expected, sizeof(expected), port) ||
+        strcmp(buf, expected) != 0)
+        return USB0_FILE_FOREIGN;
+    if (port_out != NULL) *port_out = port;
+    if (st_out != NULL) *st_out = st;
+    return USB0_FILE_OWNED;
+}
+
+/* Exact canonical TCP ACCEPT: -p tcp [ -m tcp ] --dport N -j ACCEPT.  No
+ * UDP, extra matches, source/destination selectors, negations or junk. */
+static bool usb0_canonical_rule(const char *line, int *port_out)
+{
+    char copy[512], *tokens[32] = {0};
+    int count = 0;
+    char *save = NULL;
+    if (line == NULL || port_out == NULL) return false;
+    snprintf(copy, sizeof(copy), "%s", line);
+    for (char *tok = strtok_r(copy, " \t", &save); tok && count < 32;
+         tok = strtok_r(NULL, " \t", &save))
+        tokens[count++] = tok;
+    int i = 0;
+    if (i >= count || strcmp(tokens[i++], "-A") != 0) return false;
+    if (i >= count || strcmp(tokens[i++], "WIFI1B_USB0_SSH") != 0) return false;
+    if (i >= count || strcmp(tokens[i++], "-p") != 0) return false;
+    if (i >= count || strcmp(tokens[i++], "tcp") != 0) return false;
+    if (i < count && strcmp(tokens[i], "-m") == 0) {
+        i++;
+        if (i >= count || strcmp(tokens[i++], "tcp") != 0) return false;
+    }
+    if (i >= count || strcmp(tokens[i++], "--dport") != 0) return false;
+    if (i >= count) return false;
+    errno = 0;
+    char *end = NULL;
+    long port = strtol(tokens[i++], &end, 10);
+    if (errno != 0 || end == tokens[i - 1] || *end != '\0' ||
+        port <= 0 || port > 65535)
+        return false;
+    if (i >= count || strcmp(tokens[i++], "-j") != 0) return false;
+    if (i >= count || strcmp(tokens[i++], "ACCEPT") != 0) return false;
+    if (i != count) return false;
+    *port_out = (int)port;
+    return true;
+}
+
+static bool usb0_hook_exact(const char *line)
+{
+    char copy[256], *tokens[16] = {0};
+    int count = 0;
+    char *save = NULL;
+    if (line == NULL) return false;
+    snprintf(copy, sizeof(copy), "%s", line);
+    for (char *tok = strtok_r(copy, " \t", &save); tok && count < 16;
+         tok = strtok_r(NULL, " \t", &save))
+        tokens[count++] = tok;
+    return count == 6 && strcmp(tokens[0], "-A") == 0 &&
+           strcmp(tokens[1], "INPUT") == 0 &&
+           strcmp(tokens[2], "-i") == 0 &&
+           strcmp(tokens[3], WIFI1B_USB0_IFACE) == 0 &&
+           strcmp(tokens[4], "-j") == 0 &&
+           strcmp(tokens[5], "WIFI1B_USB0_SSH") == 0;
+}
+
+static usb0_live_state usb0_addr_probe(bool *present)
+{
+    char out[16384];
+    bool scoped = true;
+    bool ours = false, foreign = false;
+    if (present != NULL) *present = false;
+    if (sh_out(out, sizeof(out),
+               "ip -o -4 addr show dev %s 2>/dev/null",
+               WIFI1B_USB0_IFACE) != 0) {
+        scoped = false;
+        if (sh_out(out, sizeof(out), "ip -o -4 addr show 2>/dev/null") != 0)
+            return USB0_LIVE_UNKNOWN;
+    }
+    char *save = NULL;
+    for (char *line = strtok_r(out, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        if (!scoped && strstr(line, ": " WIFI1B_USB0_IFACE " ") == NULL)
+            continue;
+        const char *owned = strstr(line, "inet " WIFI1B_USB0_IP "/24");
+        if (owned != NULL && (owned[17] == ' ' || owned[17] == '\0'))
+            ours = true;
+        else if (strstr(line, "inet ") != NULL)
+            foreign = true;
+    }
+    if (present != NULL) *present = ours && !foreign;
+    if (ours && foreign) return USB0_LIVE_FOREIGN;
+    if (foreign) return USB0_LIVE_FOREIGN;
+    if (ours) return USB0_LIVE_OWNED;
+    return USB0_LIVE_ABSENT;
+}
+
+static usb0_live_state usb0_default_probe(void)
+{
+    char out[4096];
+    if (sh_out(out, sizeof(out), "ip -4 route show default 2>/dev/null") != 0)
+        return USB0_LIVE_UNKNOWN;
+    char *save = NULL;
+    for (char *line = strtok_r(out, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char copy[512], *tokens[64] = {0};
+        int count = 0;
+        char *tsave = NULL;
+        char *p = trim(line);
+        if (strncmp(p, "default", 7) != 0) continue;
+        snprintf(copy, sizeof(copy), "%s", p);
+        for (char *tok = strtok_r(copy, " \t", &tsave); tok && count < 64;
+             tok = strtok_r(NULL, " \t", &tsave))
+            tokens[count++] = tok;
+        bool have_dev = false;
+        for (int i = 0; i + 1 < count; i++) {
+            if (strcmp(tokens[i], "dev") != 0) continue;
+            have_dev = true;
+            if (strcmp(tokens[i + 1], WIFI1B_USB0_IFACE) == 0)
+                return USB0_LIVE_FOREIGN;
+            break;
+        }
+        if (!have_dev) return USB0_LIVE_FOREIGN;
+    }
+    return USB0_LIVE_ABSENT;
+}
+
+#ifdef WIFI_TEST
+/* Test/repro compatibility wrapper: exact chain-only parser with no hook
+ * context.  It accepts an absent/empty owned chain and exactly one canonical
+ * TCP ACCEPT for the expected port; anything else is false. */
+static bool usb0_chain_owned(const char *out, int port)
+{
+    char copy[4096];
+    int rules = 0, found = 0;
+    bool have_chain = false;
+    if (out == NULL) return false;
+    snprintf(copy, sizeof(copy), "%s", out);
+    char *save = NULL;
+    for (char *line = strtok_r(copy, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *p = trim(line);
+        if (p[0] == '\0') continue;
+        if (strncmp(p, "-N WIFI1B_USB0_SSH", 18) == 0 && p[18] == '\0') {
+            have_chain = true;
+            continue;
+        }
+        if (strncmp(p, "-A WIFI1B_USB0_SSH", 18) == 0) {
+            int value = 0;
+            have_chain = true;
+            if (!usb0_canonical_rule(p, &value) || rules > 0) return false;
+            rules++;
+            found = value;
+            continue;
+        }
+        if (strstr(p, "WIFI1B_USB0_SSH") != NULL) return false;
+    }
+    if (rules == 0) return true;
+    (void)have_chain;
+    return port > 0 && found == port;
+}
+#endif
+
+static usb0_live_state usb0_chain_probe(int expected_port, bool require_port,
+                                        int *found_port, bool *chain_present,
+                                        bool *hook_present,
+                                        char *rule_spec, size_t rule_spec_cap)
+{
+    char out[32768], input[16384], tool[256];
+    bool have_chain = false;
+    int found = 0, rules = 0, hooks = 0;
+    if (found_port != NULL) *found_port = 0;
+    if (chain_present != NULL) *chain_present = false;
+    if (hook_present != NULL) *hook_present = false;
+    if (rule_spec != NULL && rule_spec_cap > 0) rule_spec[0] = '\0';
+    fw_tool_ro(tool, sizeof(tool));
+    if (sh_out(out, sizeof(out), "%s -S WIFI1B_USB0_SSH 2>/dev/null",
+               tool) != 0) {
+        if (sh_out(out, sizeof(out), "%s -S 2>/dev/null", tool) != 0)
+            return USB0_LIVE_UNKNOWN;
+    }
+    char *save = NULL;
+    for (char *line = strtok_r(out, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *p = trim(line);
+        if (p[0] == '\0') continue;
+        if (strncmp(p, "-N WIFI1B_USB0_SSH", 18) == 0 &&
+            p[18] == '\0') {
+            have_chain = true;
+            continue;
+        }
+        if (strncmp(p, "-A WIFI1B_USB0_SSH", 18) == 0) {
+            int port = 0;
+            have_chain = true;
+            if (!usb0_canonical_rule(p, &port) || rules > 0)
+                return USB0_LIVE_FOREIGN;
+            rules++;
+            found = port;
+            if (rule_spec != NULL && rule_spec_cap > 0) {
+                const char *spec = p + 19; /* after "-A WIFI1B_USB0_SSH " */
+                if (*spec == '\0' ||
+                    snprintf(rule_spec, rule_spec_cap, "%s", spec) >=
+                        (int)rule_spec_cap)
+                    return USB0_LIVE_FOREIGN;
+            }
+            continue;
+        }
+        /* The unfiltered -S output also contains the exact INPUT hook; it is
+         * validated separately below and is not chain junk. */
+        if (usb0_hook_exact(p)) continue;
+        if (strstr(p, "WIFI1B_USB0_SSH") != NULL)
+            return USB0_LIVE_FOREIGN;
+    }
+    if (sh_out(input, sizeof(input), "%s -S INPUT 2>/dev/null", tool) != 0)
+        return USB0_LIVE_UNKNOWN;
+    save = NULL;
+    for (char *line = strtok_r(input, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *p = trim(line);
+        if (strstr(p, "WIFI1B_USB0_SSH") == NULL) continue;
+        if (!usb0_hook_exact(p) || hooks > 0)
+            return USB0_LIVE_FOREIGN;
+        hooks++;
+    }
+    if (!have_chain) {
+        if (hooks != 0) return USB0_LIVE_FOREIGN;
+        return USB0_LIVE_ABSENT;
+    }
+    if (rules == 0) found = 0;
+    if (require_port && rules == 1 && found != expected_port)
+        return USB0_LIVE_FOREIGN;
+    if (chain_present != NULL) *chain_present = true;
+    if (hook_present != NULL) *hook_present = hooks == 1;
+    if (found_port != NULL) *found_port = found;
+    return USB0_LIVE_OWNED;
+}
+
+static bool usb0_apply_owned_ex(int port, int allow_port)
+{
+    char helper[4096], rule[512], owner[256], tool[256], spec[512];
+    int owner_port = 0, rule_port = 0, chain_port = 0;
+    bool chain_present = false, hook_present = false, addr_present = false;
+    if (port < 0 || port > 65535) return false;
+    if (!usb0_helper_build(helper, sizeof(helper)) ||
+        !usb0_rule_build(rule, sizeof(rule), port) ||
+        !usb0_owner_build(owner, sizeof(owner), port))
+        return false;
+    bool helper_legacy = false;
+    if (usb0_helper_state(NULL, &helper_legacy) != USB0_FILE_OWNED ||
+        helper_legacy ||
+        usb0_rule_state(&rule_port, NULL) != USB0_FILE_OWNED ||
+        rule_port != port ||
+        usb0_owner_state(&owner_port, NULL) != USB0_FILE_OWNED ||
+        owner_port != port) {
+        log_msg("usb0 apply: files are not the exact owned set");
+        return false;
+    }
+    usb0_live_state addr = usb0_addr_probe(&addr_present);
+    usb0_live_state def = usb0_default_probe();
+    usb0_live_state chain = usb0_chain_probe(-1, false, &chain_port,
+                                             &chain_present, &hook_present,
+                                             spec, sizeof(spec));
+    if (addr == USB0_LIVE_UNKNOWN || addr == USB0_LIVE_FOREIGN ||
+        def == USB0_LIVE_UNKNOWN || def == USB0_LIVE_FOREIGN ||
+        chain == USB0_LIVE_UNKNOWN || chain == USB0_LIVE_FOREIGN ||
+        (chain_present && chain_port != 0 && chain_port != port &&
+         chain_port != allow_port)) {
+        log_msg("usb0 apply: foreign or unknown live state preserved");
+        return false;
+    }
+    if (!usb0_present()) return true;
+    fw_tool_ro(tool, sizeof(tool));
+    if (!addr_present) {
+        if (sh("ip -4 addr add " WIFI1B_USB0_IP "/24 dev %s 2>/dev/null",
+               WIFI1B_USB0_IFACE) != 0 ||
+            sh("ip link set dev %s up 2>/dev/null", WIFI1B_USB0_IFACE) != 0) {
+            log_msg("usb0 apply: address add failed");
+            return false;
+        }
+    }
+    if (!chain_present) {
+        if (sh("%s -N WIFI1B_USB0_SSH 2>/dev/null", tool) != 0) {
+            log_msg("usb0 apply: chain create failed");
+            return false;
+        }
+        chain_present = true;
+        chain_port = 0;
+    }
+    if (!hook_present) {
+        if (sh("%s -I INPUT -i %s -j WIFI1B_USB0_SSH 2>/dev/null",
+               tool, WIFI1B_USB0_IFACE) != 0) {
+            log_msg("usb0 apply: hook add failed");
+            return false;
+        }
+    }
+    if (chain_port != 0 && chain_port != port) {
+        if (spec[0] == '\0' ||
+            sh("%s -D WIFI1B_USB0_SSH %s 2>/dev/null", tool, spec) != 0) {
+            log_msg("usb0 apply: old exact chain rule delete failed");
+            return false;
+        }
+        chain_port = 0;
+    }
+    if (port > 0 && chain_port != port) {
+        if (sh("%s -A WIFI1B_USB0_SSH -p tcp -m tcp --dport %d "
+               "-j ACCEPT 2>/dev/null", tool, port) != 0) {
+            log_msg("usb0 apply: exact chain rule add failed");
+            return false;
+        }
+    }
+    addr = usb0_addr_probe(&addr_present);
+    def = usb0_default_probe();
+    chain = usb0_chain_probe(port, true, &chain_port, &chain_present,
+                             &hook_present, spec, sizeof(spec));
+    if (addr != USB0_LIVE_OWNED || !addr_present ||
+        def != USB0_LIVE_ABSENT ||
+        chain != USB0_LIVE_OWNED || !chain_present || !hook_present ||
+        (port == 0 ? chain_port != 0 : chain_port != port)) {
+        log_msg("usb0 apply: post-apply readback failed");
+        return false;
+    }
+    g_usb0_fw_port = port;
+    log_msg("usb0: exact link state applied (ssh_port=%d)", port);
+    return true;
+}
+
+static bool usb0_apply_owned(int port)
+{
+    return usb0_apply_owned_ex(port, -1);
+}
+
+static void usb0_cleanup_result(const char *status, const char *helper_state,
+                                const char *rule_state,
+                                const char *address_state,
+                                const char *chain_state, const char *error)
+{
+    printf("WIFI1B_USB0_CLEANUP\nstatus=%s\n", status);
+    printf("helper=%s\nrule=%s\naddress=%s\nchain=%s\n",
+           helper_state, rule_state, address_state, chain_state);
+    if (error && *error) printf("error=%s\n", error);
+}
+
+static bool usb0_path_absent(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) == 0) return false;
+    return errno == ENOENT;
+}
+
+static const char *usb0_file_name(usb0_file_state state)
+{
+    switch (state) {
+    case USB0_FILE_ABSENT: return "absent";
+    case USB0_FILE_OWNED: return "owned";
+    case USB0_FILE_FOREIGN: return "foreign";
+    default: return "unknown";
+    }
+}
+
+static const char *usb0_live_name(usb0_live_state state)
+{
+    switch (state) {
+    case USB0_LIVE_ABSENT: return "absent";
+    case USB0_LIVE_OWNED: return "owned";
+    case USB0_LIVE_FOREIGN: return "foreign";
+    default: return "unknown";
+    }
+}
+
+static bool usb0_cleanup_owned(void)
+{
+    char helper[4096], rule[512], owner[256], tool[256], spec[512];
+    struct stat hst, rst, ost;
+    int owner_port = 0, rule_port = 0, chain_port = 0;
+    bool chain_present = false, hook_present = false;
+    bool addr_present = false;
+    if (!usb0_helper_build(helper, sizeof(helper)) ||
+        !usb0_rule_build(rule, sizeof(rule), 0) ||
+        !usb0_owner_build(owner, sizeof(owner), 0))
+        return false;
+    usb0_file_state hs = usb0_helper_state(&hst, NULL);
+    usb0_file_state rs = usb0_rule_state(&rule_port, &rst);
+    usb0_file_state os = usb0_owner_state(&owner_port, &ost);
+    usb0_live_state addr = usb0_addr_probe(&addr_present);
+    usb0_live_state def = usb0_default_probe();
+    usb0_live_state chain = usb0_chain_probe(-1, false, &chain_port,
+                                             &chain_present, &hook_present,
+                                             spec, sizeof(spec));
+    const char *helper_name = usb0_file_name(hs);
+    const char *rule_name = usb0_file_name(rs);
+    const char *address_name = usb0_live_name(addr);
+    const char *chain_name = usb0_live_name(chain);
+    (void)helper;
+    (void)rule;
+    (void)owner;
+
+    if (os == USB0_FILE_ABSENT) {
+        if (hs == USB0_FILE_ABSENT && rs == USB0_FILE_ABSENT &&
+            addr == USB0_LIVE_ABSENT && def == USB0_LIVE_ABSENT &&
+            chain == USB0_LIVE_ABSENT) {
+            usb0_cleanup_result("OK", "absent", "absent", "absent",
+                                "absent", "");
+            return true;
+        }
+        usb0_cleanup_result("FAIL", helper_name, rule_name, address_name,
+                            chain_name, "unknown_usb0_ownership");
+        return false;
+    }
+    if (os != USB0_FILE_OWNED ||
+        hs == USB0_FILE_FOREIGN || hs == USB0_FILE_UNKNOWN ||
+        rs == USB0_FILE_FOREIGN || rs == USB0_FILE_UNKNOWN ||
+        addr == USB0_LIVE_FOREIGN || addr == USB0_LIVE_UNKNOWN ||
+        def != USB0_LIVE_ABSENT ||
+        chain == USB0_LIVE_FOREIGN || chain == USB0_LIVE_UNKNOWN ||
+        (rs == USB0_FILE_OWNED && rule_port != owner_port) ||
+        (chain == USB0_LIVE_OWNED && chain_port != 0 &&
+         chain_port != owner_port)) {
+        const char *why = "foreign_or_unknown_usb0_state";
+        if (os == USB0_FILE_ABSENT || os == USB0_FILE_UNKNOWN)
+            why = "owner_record_missing_or_invalid";
+        else if (os == USB0_FILE_FOREIGN)
+            why = "owner_record_content";
+        else if (hs == USB0_FILE_FOREIGN || hs == USB0_FILE_UNKNOWN)
+            why = "helper_unknown";
+        else if (rs == USB0_FILE_FOREIGN || rs == USB0_FILE_UNKNOWN)
+            why = "rule_unknown";
+        else if (addr == USB0_LIVE_FOREIGN)
+            why = "foreign_usb0_address";
+        else if (addr == USB0_LIVE_UNKNOWN)
+            why = "address_state_unknown";
+        else if (def == USB0_LIVE_FOREIGN)
+            why = "foreign_usb0_default";
+        else if (def == USB0_LIVE_UNKNOWN)
+            why = "default_state_unknown";
+        else if (chain == USB0_LIVE_FOREIGN)
+            why = "foreign_usb0_chain";
+        else if (chain == USB0_LIVE_UNKNOWN)
+            why = "chain_state_unknown";
+        else if (rs == USB0_FILE_OWNED && rule_port != owner_port)
+            why = "rule_port_mismatch";
+        usb0_cleanup_result("FAIL", helper_name, rule_name, address_name,
+                            chain_name, why);
+        return false;
+    }
+    /* Prevalidation passed.  Only now may SSH be stopped or any live object
+     * be mutated; an unknown ownership state above was side-effect free. */
+    g_shutdown_cleanup = true;
+    ssh_stop_cleanup();
+    fw_tool_ro(tool, sizeof(tool));
+    if (hook_present &&
+        sh("%s -D INPUT -i %s -j WIFI1B_USB0_SSH 2>/dev/null",
+           tool, WIFI1B_USB0_IFACE) != 0) {
+        usb0_cleanup_result("FAIL", helper_name, rule_name, address_name,
+                            chain_name, "chain_hook_delete");
+        return false;
+    }
+    if (chain_present) {
+        if (chain_port != 0) {
+            if (spec[0] == '\0' ||
+                sh("%s -D WIFI1B_USB0_SSH %s 2>/dev/null", tool, spec) != 0) {
+                usb0_cleanup_result("FAIL", helper_name, rule_name,
+                                    address_name, chain_name,
+                                    "chain_rule_delete");
+                return false;
+            }
+        }
+        if (sh("%s -X WIFI1B_USB0_SSH 2>/dev/null", tool) != 0) {
+            usb0_cleanup_result("FAIL", helper_name, rule_name, address_name,
+                                chain_name, "chain_delete");
+            return false;
+        }
+    }
+    if (addr_present &&
+        sh("ip -4 addr del " WIFI1B_USB0_IP "/24 dev %s 2>/dev/null",
+           WIFI1B_USB0_IFACE) != 0) {
+        usb0_cleanup_result("FAIL", helper_name, rule_name, address_name,
+                            chain_name, "address_delete");
+        return false;
+    }
+    /* Post-delete kernel readback must prove absence before any proof file is
+     * unlinked.  A zero command exit by itself is not evidence. */
+    bool post_addr_present = false;
+    usb0_live_state post_addr = usb0_addr_probe(&post_addr_present);
+    usb0_live_state post_def = usb0_default_probe();
+    int post_chain_port = 0;
+    bool post_chain_present = false, post_hook_present = false;
+    usb0_live_state post_chain = usb0_chain_probe(
+        -1, false, &post_chain_port, &post_chain_present, &post_hook_present,
+        spec, sizeof(spec));
+    if (post_addr != USB0_LIVE_ABSENT || post_addr_present ||
+        post_def != USB0_LIVE_ABSENT ||
+        post_chain != USB0_LIVE_ABSENT || post_chain_present ||
+        post_hook_present) {
+        usb0_cleanup_result("FAIL", helper_name, rule_name,
+                            usb0_live_name(post_addr),
+                            usb0_live_name(post_chain),
+                            "post_delete_readback");
+        return false;
+    }
+    if (hs == USB0_FILE_OWNED) {
+        if (!w2_unlink_if_same(USB0_HELPER, &hst)) {
+            usb0_cleanup_result("FAIL", "owned", rule_name, "absent",
+                                "absent", "helper_delete");
+            return false;
+        }
+    }
+    if (rs == USB0_FILE_OWNED) {
+        if (!w2_unlink_if_same(USB0_RULE_PATH, &rst)) {
+            usb0_cleanup_result("FAIL", "removed", "owned", "absent",
+                                "absent", "rule_delete");
+            return false;
+        }
+    }
+#ifndef WIFI_TEST
+    if (rule_name != NULL && strcmp(rule_name, "absent") != 0)
+        (void)sh("udevadm control --reload-rules 2>/dev/null");
+#endif
+    if (!w2_unlink_if_same(USB0_OWNER, &ost)) {
+        usb0_cleanup_result("FAIL", "removed", "removed", "absent", "absent",
+                            "owner_record_delete");
+        return false;
+    }
+    if ((hs == USB0_FILE_OWNED && !usb0_path_absent(USB0_HELPER)) ||
+        (rs == USB0_FILE_OWNED && !usb0_path_absent(USB0_RULE_PATH)) ||
+        !usb0_path_absent(USB0_OWNER)) {
+        usb0_cleanup_result("FAIL", "removed", "removed", "absent", "absent",
+                            "post_delete_file_readback");
+        return false;
+    }
+    usb0_cleanup_result("OK",
+                        hs == USB0_FILE_OWNED ? "removed" : "absent",
+                        rs == USB0_FILE_OWNED ? "removed" : "absent",
+                        addr_present ? "removed" : "absent",
+                        chain_present ? "removed" : "absent", "");
+    return true;
+}
+
+static bool usb0_rule_write(int port)
+{
+    char helper[4096], rule[512], owner[256], spec[512], tool[256];
+    struct stat hst, rst, ost;
+    int owner_port = 0, rule_port = 0, chain_port = 0;
+    bool helper_legacy = false, chain_present = false, hook_present = false;
+    bool addr_present = false;
+    if (port < 0 || port > 65535) port = 0;
+    if (!usb0_helper_build(helper, sizeof(helper)) ||
+        !usb0_rule_build(rule, sizeof(rule), port) ||
+        !usb0_owner_build(owner, sizeof(owner), port))
+        return false;
+    usb0_file_state hs = usb0_helper_state(&hst, &helper_legacy);
+    usb0_file_state rs = usb0_rule_state(&rule_port, &rst);
+    usb0_file_state os = usb0_owner_state(&owner_port, &ost);
+    usb0_live_state addr = usb0_addr_probe(&addr_present);
+    usb0_live_state def = usb0_default_probe();
+    usb0_live_state chain = usb0_chain_probe(-1, false, &chain_port,
+                                             &chain_present, &hook_present,
+                                             spec, sizeof(spec));
+    if (hs == USB0_FILE_UNKNOWN || hs == USB0_FILE_FOREIGN ||
+        rs == USB0_FILE_UNKNOWN || rs == USB0_FILE_FOREIGN ||
+        os == USB0_FILE_UNKNOWN || os == USB0_FILE_FOREIGN ||
+        addr == USB0_LIVE_UNKNOWN || addr == USB0_LIVE_FOREIGN ||
+        def != USB0_LIVE_ABSENT ||
+        chain == USB0_LIVE_UNKNOWN || chain == USB0_LIVE_FOREIGN) {
+        log_msg("usb0: unknown or foreign ownership state preserved; no write");
+        return false;
+    }
+    if (os == USB0_FILE_OWNED) {
+        if (rs == USB0_FILE_OWNED && rule_port != owner_port) {
+            log_msg("usb0: owner/rule port mismatch preserved");
+            return false;
+        }
+        if (chain_present && chain_port != 0 && chain_port != owner_port &&
+            !(rs == USB0_FILE_OWNED && chain_port == rule_port)) {
+            log_msg("usb0: chain port does not match owner/rule; preserved");
+            return false;
+        }
+    } else {
+        bool fresh = hs == USB0_FILE_ABSENT && rs == USB0_FILE_ABSENT &&
+                     addr == USB0_LIVE_ABSENT && !chain_present;
+        bool legacy = hs == USB0_FILE_OWNED && rs == USB0_FILE_OWNED &&
+                      addr != USB0_LIVE_FOREIGN && def == USB0_LIVE_ABSENT;
+        if (!fresh && !legacy) {
+            log_msg("usb0: partial/unknown ownership preserved; no write");
+            return false;
+        }
+        if (legacy && chain_present && chain_port != 0 &&
+            chain_port != rule_port) {
+            log_msg("usb0: legacy chain port mismatch preserved");
+            return false;
+        }
+    }
+    /* A port change must not leave the old exact rule behind when the Pi is
+     * currently absent.  The chain rule was prevalidated as our exact old
+     * owner/legacy rule; delete only that exact rule, never a generic flush. */
+    if (chain_present && chain_port != 0 && chain_port != port) {
+        fw_tool_ro(tool, sizeof(tool));
+        if (spec[0] == '\0' ||
+            sh("%s -D WIFI1B_USB0_SSH %s 2>/dev/null", tool, spec) != 0) {
+            log_msg("usb0: old exact chain rule delete failed; preserved");
+            return false;
+        }
+        int after_port = 0;
+        bool after_present = false, after_hook = false;
+        if (usb0_chain_probe(-1, false, &after_port, &after_present,
+                             &after_hook, spec, sizeof(spec)) !=
+                USB0_LIVE_OWNED ||
+            after_port != 0) {
+            log_msg("usb0: old chain rule readback failed; preserved");
+            return false;
+        }
+    }
+    char rule_dir[256];
+    snprintf(rule_dir, sizeof(rule_dir), "%s", USB0_RULE_PATH);
+    char *rule_slash = strrchr(rule_dir, '/');
+    if (rule_slash && rule_slash != rule_dir) *rule_slash = 0;
+    else rule_dir[0] = 0;
+    if (!w2_mkdir_checked(APP_DIR) || !w2_mkdir_checked(APP_DIR "/bin") ||
+        (rule_dir[0] && !w2_mkdir_checked(rule_dir))) {
+        log_msg("usb0: unsafe helper/rule parent directory");
+        return false;
+    }
+    if (hs != USB0_FILE_OWNED || helper_legacy) {
+        if (write_file_atomic(USB0_HELPER, helper, 0755) != 0 ||
+            !usb0_file_equals(USB0_HELPER, helper)) {
+            log_msg("usb0: helper write/readback failed");
+            return false;
+        }
+    }
+    if (rs != USB0_FILE_OWNED || rule_port != port) {
+        if (write_file_atomic(USB0_RULE_PATH, rule, 0644) != 0 ||
+            !usb0_file_equals(USB0_RULE_PATH, rule)) {
+            log_msg("usb0: rule write/readback failed");
+            return false;
+        }
+    }
+    if (os != USB0_FILE_OWNED || owner_port != port) {
+        if (write_file_atomic(USB0_OWNER, owner, 0600) != 0 ||
+            !usb0_file_equals(USB0_OWNER, owner)) {
+            log_msg("usb0: ownership record write/readback failed");
+            return false;
+        }
+    }
 #ifndef WIFI_TEST
     sh("chsmack -a _ %s 2>/dev/null", USB0_HELPER);
-#endif
-
-    char rule[512];
-    snprintf(rule, sizeof(rule),
-             "ACTION==\"add\", SUBSYSTEM==\"net\", KERNEL==\"%s\", "
-             "RUN+=\"/bin/sh %s %s %d\"\n",
-             WIFI1B_USB0_IFACE, USB0_HELPER, WIFI1B_USB0_IFACE, port);
-    char dir[256];
-    snprintf(dir, sizeof(dir), "%s", USB0_RULE_PATH);
-    char *slash = strrchr(dir, '/');
-    if (slash) {
-        *slash = 0;
-        if (*dir) mkdir(dir, 0755);
-    }
-    if (write_file_atomic(USB0_RULE_PATH, rule, 0644) != 0)
-        log_msg("usb0: cannot write %s", USB0_RULE_PATH);
-    chmod(USB0_RULE_PATH, 0644);
-#ifndef WIFI_TEST
     sh("udevadm control --reload-rules 2>/dev/null");
-
-    if (usb0_present()) {
-        if (sh("/bin/sh %s %s %d 2>/dev/null", USB0_HELPER,
-               WIFI1B_USB0_IFACE, port) != 0)
-            log_msg("usb0: immediate link apply failed");
-        if (port > 0) (void)usb0_fw_open(port);
-    }
 #endif
-    last_port = port;
+    if (usb0_present()) {
+        int old_port = os == USB0_FILE_OWNED ? owner_port :
+                       (rs == USB0_FILE_OWNED ? rule_port : -1);
+        if (!usb0_apply_owned_ex(port, old_port)) {
+            log_msg("usb0: exact live apply failed; owner/rule retained for retry");
+            return false;
+        }
+    }
+    if (!usb0_present()) g_usb0_fw_port = 0;
     log_msg("usb0: Pi ECM link rule updated (ssh_port=%d)", port);
+    return true;
 }
 
 /* Bring up the USB ECM link to the Pi when it is connected.  The head unit's
@@ -5549,17 +7356,32 @@ static void usb0_rule_write(int port)
  * no-op when no Pi is attached. */
 static void usbnet_bootstrap(void)
 {
+#ifndef WIFI_TEST
     int fd = open("/sys/module/micom/parameters/secure_console", O_WRONLY);
     if (fd >= 0) {
         (void)write(fd, "0\n", 2);
         close(fd);
     }
     (void)system("modprobe usbnet 2>/dev/null; modprobe cdc_ether 2>/dev/null");
-    usb0_rule_write(g_cfg.ssh_enabled ? g_cfg.ssh_port : 0);
+    (void)usb0_rule_write(g_cfg.ssh_enabled ? g_cfg.ssh_port : 0);
+#endif
 }
 
 int main(int argc, char **argv)
 {
+#ifdef WIFI_TEST
+    if (test_command == NULL && getenv("WIFI1B_TEST_NET_STUB") != NULL)
+        test_command = w2_test_net_stub;
+    if (argc > 1 && !strcmp(argv[1], "--test-shutdown-exit"))
+        return shutdown_cleanup_work() ? 0 : 1;
+    if (argc > 1 && !strcmp(argv[1], "--test-sigterm-mainloop")) {
+        signal(SIGTERM, on_signal);
+        signal(SIGINT, on_signal);
+        (void)write_file_atomic(APP_DIR "/sigterm-ready", "ready\n", 0600);
+        while (!g_stop) usleep(10000);
+        return shutdown_sequence();
+    }
+#endif
     umask(0077);
     int port = DEFAULT_HTTP_PORT;
     bool dhcpd_mode = false;
@@ -5582,10 +7404,33 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--choose-port") && i + 1 < argc) { one_shot = "choose-port"; one_port = argv[++i]; }
         else if (!strcmp(argv[i], "--ssh-gate")) one_shot = "ssh-gate";
         else if (!strcmp(argv[i], "--usb0-rule") && i + 1 < argc) { one_shot = "usb0-rule"; one_usb0_port = argv[++i]; }
+        else if (!strcmp(argv[i], "--usb0-apply") && i + 1 < argc) { one_shot = "usb0-apply"; one_usb0_port = argv[++i]; }
+        else if (!strcmp(argv[i], "--usb0-cleanup")) one_shot = "usb0-cleanup";
         else if (!strcmp(argv[i], "--dump-logs")) one_shot = "dump-logs";
         else if (!strcmp(argv[i], "--dhcpd")) dhcpd_mode = true;
         else if (!strcmp(argv[i], "--dhcp-client")) one_shot = "dhcp-client";
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(argv[0]); return 0; }
+    }
+
+    if (one_shot && !strcmp(one_shot, "usb0-cleanup")) {
+        /* Explicit one-shot cleanup: no config load, user creation, startup
+         * bootstrap or SSH activation. */
+        g_log_stderr = true;
+        g_shutdown_cleanup = true;
+        return usb0_cleanup_owned() ? 0 : 1;
+    }
+    if (one_shot && !strcmp(one_shot, "usb0-apply")) {
+        /* udev helper one-shot: parse the port, require the exact owned files,
+         * apply only usb0, and never load config or activate SSH. */
+        char *end = NULL;
+        long parsed = one_usb0_port ? strtol(one_usb0_port, &end, 10) : -1;
+        if (one_usb0_port == NULL || end == one_usb0_port || *end != '\0' ||
+            parsed < 0 || parsed > 65535)
+            return 2;
+        g_log_stderr = true;
+        g_shutdown_cleanup = true;
+        if (!usb0_present()) return 0;
+        return usb0_apply_owned((int)parsed) ? 0 : 1;
     }
 
     if (dhcpd_mode) {
@@ -5611,15 +7456,16 @@ int main(int argc, char **argv)
         unlink(BT_STATE);
     }
     config_load();
-    /* The Pi link rule needs the configured SSH port, so bootstrap only after
-     * the config is known.  One-shot queries stay side-effect free. */
-    if (!one_shot) usbnet_bootstrap();
+    carplay_state_load();
     /* Shared wlan0 contract: our peer is the WiFi app. Before any worker. */
     radio_configure("wifi_daemon", "/rw_data/wifi/status.json");
     int instance_fd = -1;
     if (!one_shot) {
         instance_fd = radio_instance_lock(APP_DIR "/daemon.lock");
         if (instance_fd < 0) { fprintf(stderr, "Wifi1b daemon already running or lock unavailable\n"); return 1; }
+        /* The Pi link rule/apply must run only after this instance owns the
+         * daemon lock; a losing second instance must mutate nothing. */
+        usbnet_bootstrap();
     }
     if (g_config_migrated && !pure_query)
         config_save();
@@ -5631,6 +7477,7 @@ int main(int argc, char **argv)
             random_psk(g_cfg.cp_psk, sizeof(g_cfg.cp_psk));
             config_save();
         }
+        prepare_carplay_identity();
     }
 
     signal(SIGINT, on_signal);
@@ -5669,7 +7516,9 @@ int main(int argc, char **argv)
             else g_cfg.mode = MODE_OFF;
             g_cfg.wlan_on = g_cfg.mode != MODE_OFF;
             config_save();
+            w2_txn_begin(false);
             bool ok = apply_mode_work(false);
+            w2_txn_end();
             collect_observation(&g_observed);
             g_observed_ms = now_ms();
             char buf[8192];
@@ -5705,8 +7554,8 @@ int main(int argc, char **argv)
                 parsed < 0 || parsed > 65535)
                 return 2;
             int p = (int)parsed;
-            usb0_rule_write(p);
-            bool ok = file_exists(USB0_HELPER) && file_exists(USB0_RULE_PATH);
+            bool wrote = usb0_rule_write(p);
+            bool ok = wrote && file_exists(USB0_HELPER) && file_exists(USB0_RULE_PATH);
             printf("{\"ok\":%s,\"helper\":\"%s\",\"rule\":\"%s\","
                    "\"port\":%d,\"usb0\":%s}\n",
                    ok ? "true" : "false", USB0_HELPER, USB0_RULE_PATH,
@@ -5721,7 +7570,13 @@ int main(int argc, char **argv)
         }
         if (!strcmp(one_shot, "dhcp-client")) {
             char ip[64] = "";
+            bool applies = getenv("WIFI1B_DHCP_TEST_NOAPPLY") == NULL;
+            if (applies && radio_begin("wifi1b_daemon", true) != 1) {
+                printf("{\"ok\":false,\"ip\":\"\"}\n");
+                return 1;
+            }
             bool ok = w2_dhcp_client("wlan0", ip, sizeof(ip));
+            if (applies) radio_release();
             printf("{\"ok\":%s,\"ip\":\"%s\"}\n", ok ? "true" : "false", ip);
             return ok ? 0 : 1;
         }
@@ -5827,41 +7682,9 @@ int main(int argc, char **argv)
         }
     }
 
-    /* Coordinated shutdown: cancel any in-flight apply and undo the network
-     * state we own (tether, firewall rules, supplicant, SSH) so stopping the
-     * daemon does not leave ConnMan tethering or iptables rules behind. */
-    apply_cancel();
-    g_work_pending = false; g_dump_requested = false;
-    int64_t until = now_ms() + 1500;
-    while (g_apply_pid > 0 && now_ms() < until) {
-        apply_reap();
-        usleep(20000);
-    }
-    if (g_probe_pid > 0) {
-        kill(-g_probe_pid, SIGKILL); kill(g_probe_pid, SIGKILL);
-        waitpid(g_probe_pid, NULL, WNOHANG);
-    }
-    /* Cleanup is unconditional: configured Off is not proof an interrupted
-     * previous apply removed its firewall/AP/SSH state. Keep it bounded and
-     * outside the parent, including on SIGTERM when g_stop is already set. */
-    pid_t cleanup = fork();
-    if (cleanup == 0) {
-        setpgid(0, 0); g_in_child = true; g_stop = 0;
-        g_shutdown_cleanup = true;
-        close_child_fds(-1);
-        g_cfg.wlan_on = false; g_cfg.mode = MODE_OFF;
-        apply_mode_work(false);
-        _exit(0);
-    }
-    if (cleanup > 0) {
-        setpgid(cleanup, cleanup);
-        until = now_ms() + 18000;
-        while (waitpid(cleanup, NULL, WNOHANG) == 0 && now_ms() < until) usleep(20000);
-        kill(-cleanup, SIGKILL); kill(cleanup, SIGKILL);
-        waitpid(cleanup, NULL, WNOHANG);
-    }
+    int shutdown_rc = shutdown_sequence();
     home_monitor_cleanup();
     close(srv);
     log_msg("wifi1b_daemon stopped");
-    return 0;
+    return shutdown_rc;
 }

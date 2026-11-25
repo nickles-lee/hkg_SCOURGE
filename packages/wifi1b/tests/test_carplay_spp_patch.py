@@ -440,24 +440,35 @@ def test_synthetic_builder() -> None:
         # A failed publish must retract only files this invocation created.
         original_link = os.link
         original_unlink = Path.unlink
-        for mode in ("second-link", "post-link-unlink", "foreign-replacement"):
+        for mode in ("second-link", "post-link-unlink", "foreign-replacement",
+                     "persistent-temp-denial", "foreign-temp-replacement"):
             fault_out = tmp / ("fault-" + mode)
             fault_output = fault_out / "vbtd-63.spp-rx.patched"
             fault_manifest = fault_out / "vbtd-63.spp-rx.manifest.json"
             calls = [0]
             fired = [False]
+            temp_output = [None]
+            before_fds = len(os.listdir("/proc/self/fd"))
 
             def failing_link(source, destination):
                 calls[0] += 1
+                if calls[0] == 1:
+                    temp_output[0] = Path(source)
                 if calls[0] == 2 and mode != "post-link-unlink":
                     fired[0] = True
                     if mode == "foreign-replacement":
                         fault_output.unlink()
                         fault_output.write_bytes(b"preserve-foreign-replacement\n")
+                    if mode == "foreign-temp-replacement":
+                        original_unlink(temp_output[0])
+                        temp_output[0].write_bytes(b"preserve-foreign-temp\n")
                     raise OSError(errno.ENOSPC, "injected second-link failure")
                 return original_link(source, destination)
 
             def failing_unlink(path, *args, **kwargs):
+                if (mode == "persistent-temp-denial" and path.parent == fault_out and
+                        path.name.startswith(".vbtd-63.spp-rx.")):
+                    raise OSError(errno.EACCES, "injected persistent temp unlink denial")
                 if (mode == "post-link-unlink" and not fired[0] and
                         path.name.startswith(".vbtd-63.spp-rx.patched.") and
                         fault_output.exists()):
@@ -470,12 +481,83 @@ def test_synthetic_builder() -> None:
                 message = expect_refusal(BUILDER.build_patch, input_path, fault_out,
                                          locks, allow_test_geometry=True)
             assert fired[0] and "cannot publish output" in message
+            assert len(os.listdir("/proc/self/fd")) == before_fds
             assert not fault_manifest.exists()
             if mode == "foreign-replacement":
                 assert fault_output.read_bytes() == b"preserve-foreign-replacement\n"
                 assert "changed output preserved" in message
+            elif mode == "foreign-temp-replacement":
+                assert not fault_output.exists()
+                assert temp_output[0].read_bytes() == b"preserve-foreign-temp\n"
+                assert "changed private temp preserved" in message
+                assert str(temp_output[0]) in message
+                assert list(fault_out.iterdir()) == [temp_output[0]]
+            elif mode == "persistent-temp-denial":
+                assert not fault_output.exists()
+                leftovers = list(fault_out.iterdir())
+                assert len(leftovers) == 2
+                assert "rollback incomplete" in message
+                assert "cannot remove owned private temp" in message
+                assert all(str(path) in message for path in leftovers)
             else:
                 assert not fault_output.exists()
+                assert list(fault_out.iterdir()) == []
+
+        # Creation-time failures must be tracked even before a file wrapper
+        # could be constructed. The builder now owns raw fds, never fdopen.
+        original_fstat = os.fstat
+        original_stat = os.stat
+        original_fdopen = os.fdopen
+        for mode in ("fstat-output", "fstat-manifest", "fstat-no-identity",
+                     "fdopen-output", "fdopen-manifest"):
+            fault_out = tmp / ("creation-" + mode)
+            fired = [False]
+            before_fds = len(os.listdir("/proc/self/fd"))
+
+            def is_temp_fd(fd, manifest=False):
+                try:
+                    target = Path(os.readlink(f"/proc/self/fd/{fd}"))
+                except OSError:
+                    return False
+                prefix = ".vbtd-63.spp-rx.manifest." if manifest else ".vbtd-63.spp-rx.patched."
+                return target.parent == fault_out and target.name.startswith(prefix)
+
+            def failing_fstat(fd):
+                if mode.startswith("fstat") and is_temp_fd(fd, mode == "fstat-manifest"):
+                    fired[0] = True
+                    raise OSError(errno.EIO, "injected creation fstat failure")
+                return original_fstat(fd)
+
+            def failing_stat(path, *args, **kwargs):
+                if (mode == "fstat-no-identity" and
+                        str(path).startswith("/proc/self/fd/")):
+                    raise OSError(errno.EACCES, "injected unavailable descriptor identity")
+                return original_stat(path, *args, **kwargs)
+
+            def failing_fdopen(fd, *args, **kwargs):
+                if is_temp_fd(fd, mode == "fdopen-manifest"):
+                    fired[0] = True
+                    raise OSError(errno.EIO, "unexpected artifact fdopen call")
+                return original_fdopen(fd, *args, **kwargs)
+
+            with patch.object(BUILDER.os, "fstat", failing_fstat), \
+                    patch.object(BUILDER.os, "stat", failing_stat), \
+                    patch.object(BUILDER.os, "fdopen", failing_fdopen):
+                if mode.startswith("fdopen"):
+                    BUILDER.build_patch(input_path, fault_out, locks,
+                                        allow_test_geometry=True)
+                    assert not fired[0], "artifact writer must not transfer fd ownership"
+                else:
+                    message = expect_refusal(BUILDER.build_patch, input_path,
+                                             fault_out, locks, allow_test_geometry=True)
+                    assert fired[0] and "creation fstat failure" in message
+            assert len(os.listdir("/proc/self/fd")) == before_fds
+            if mode == "fstat-no-identity":
+                leftovers = list(fault_out.iterdir())
+                assert len(leftovers) == 1
+                assert "unverified private temp preserved" in message
+                assert str(leftovers[0]) in message
+            elif mode.startswith("fstat"):
                 assert list(fault_out.iterdir()) == []
 
         # A patched output is not accepted as an input.

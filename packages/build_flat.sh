@@ -10,10 +10,26 @@ HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 OUT=${1:-"$HERE/../out/appcombo-flat"}
 mkdir -p "$OUT"
 OUT=$(CDPATH= cd -- "$OUT" && pwd)
+CLEANUP_SOURCE="$HERE/common/runtime_cleanup.sh"
+[ -f "$CLEANUP_SOURCE" ] && [ ! -L "$CLEANUP_SOURCE" ] || {
+    echo "missing canonical cleanup helper: $CLEANUP_SOURCE" >&2; exit 1; }
+cleanup_sha=$(sha256sum "$CLEANUP_SOURCE" | cut -d' ' -f1)
+# A stale top-level helper from an older three-file build is removed only when
+# it is byte-identical to our canonical helper.  Any unknown file is preserved
+# and the build refuses rather than unlinking owner data.
+if [ -e "$OUT/runtime_cleanup.sh" ] || [ -L "$OUT/runtime_cleanup.sh" ]; then
+    if [ -f "$OUT/runtime_cleanup.sh" ] && [ ! -L "$OUT/runtime_cleanup.sh" ] &&
+       [ "$(sha256sum "$OUT/runtime_cleanup.sh" | cut -d' ' -f1)" = "$cleanup_sha" ]; then
+        rm -f "$OUT/runtime_cleanup.sh"
+    else
+        echo "refusing to overwrite unknown file: $OUT/runtime_cleanup.sh" >&2
+        exit 1
+    fi
+fi
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/scourge-flat.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/tree"
-# Standalone V23: Battery + Tweaks/Reboot + Wifi1b only.  No WiFi reinstall and
+# Standalone V24: Battery + Tweaks/Reboot + Wifi1b only.  No WiFi reinstall and
 # no one-way migration stage; compose marks the bundle combo/standalone.
 SCOURGE_STANDALONE=1 sh "$HERE/compose.sh" "$STAGE/tree" battery,tweaks,wifi1b
 if [ ! -f "$STAGE/tree/combo/standalone" ] ||
@@ -42,11 +58,12 @@ python3 "$HERE/common/test_layout_qt.py" \
     "$STAGE/final.qml"
 (cd "$STAGE/tree" && tar -czf "$STAGE/appcombo.tar.gz" .)
 digest=$(sha256sum "$STAGE/appcombo.tar.gz" | cut -d' ' -f1)
-cleanup_sha=$(sha256sum "$HERE/common/runtime_cleanup.sh" | cut -d' ' -f1)
 # Inject the canonical helper function definitions verbatim.  The flat pair
 # stays two files; no external cleanup helper is copied or extracted.
+[ "$(sha256sum "$CLEANUP_SOURCE" | cut -d' ' -f1)" = "$cleanup_sha" ] || {
+    echo "canonical cleanup helper changed during build" >&2; exit 1; }
 awk -v tarball="$digest" -v cleanup_sha="$cleanup_sha" \
-    -v helper="$HERE/common/runtime_cleanup.sh" '
+    -v helper="$CLEANUP_SOURCE" '
     /^# @RUNTIME_CLEANUP_SHELL@$/ {
         while ((getline line < helper) > 0) print line
         close(helper)
@@ -64,11 +81,11 @@ if grep -Eq '@[A-Z_][A-Z0-9_]*@' "$STAGE/run_stuff.sh"; then
 fi
 sh -n "$STAGE/run_stuff.sh"
 cp -f "$STAGE/appcombo.tar.gz" "$STAGE/run_stuff.sh" "$OUT/"
-rm -f "$OUT/runtime_cleanup.sh"
 cat > "$OUT/README.txt" <<'EOF'
-SCOURGE AppComboFlatV23MicomStandalone — Battery, Tweaks/Reboot and Wifi1b
+SCOURGE AppComboFlatV24MicomStandalone — Battery, Tweaks/Reboot and Wifi1b
 =========================================================================
-Version: V23 (BlueLink-safe modem routing + Orange Pi USB-SSH integration)
+Version: V24 (BlueLink-safe modem routing + Orange Pi USB-SSH integration)
+See docs/wireless-carplay/V24.md in the source repository for the gate ledger.
 This bundle does NOT install the WiFi app, does NOT reinstall WiFi, and has
 NO one-way migration stage. It installs Battery, Tweaks/Reboot and Wifi1b on
 the canonical standalone Battery/Tweaks base. Wifi1b also works beside an
@@ -76,12 +93,12 @@ existing WiFi app; if WiFi is still installed, this bundle leaves it untouched
 and only adds Wifi1b.
 No manual WiFi Off step is needed: the installer preflight stops only its own
 radio daemons before backing up or changing files.
-V23 networking:
+V24 networking:
 - WiFi client remains active and SSH works, but while the telematics modem
   (rmnet_usb0/rmnet_usb1) has an IPv4 address Wifi1b installs NO WiFi default
   route. WiFi is an SSH-only link in that state, exactly as requested.
-- The V21 `route replace default via wlan0` route is detected and removed
-  during client connect; no reboot is needed for an over-the-top install.
+- Unverified legacy wlan0 defaults and ownership records are preserved.
+  Wifi1b refuses route changes rather than guessing ownership from a format.
 - If the modem data call has no IPv4 address, Wifi1b installs a bounded
   high-metric proto-66 fallback so WiFi can still carry traffic.
 - A 30 s audit re-checks the intent: modem data present removes the WiFi
@@ -101,10 +118,10 @@ wrapper verifies the archive SHA256 and readback before running any stage; do
 not extract the archive. The canonical cleanup helper is embedded in
 run_stuff.sh; no third file is needed.
 Bounded runtime log truncation happens first. Removed-WiFi cleanup is
-evidence-gated: it runs only with readable QML absence evidence, no existing
-or dangling WiFi page/service, no running owned WiFi daemon, and a verified
-private WiFi archive or a prior removal receipt. Otherwise owner credentials
-and backups are preserved and reported.
+evidence-gated: it runs only with readable QML/asset absence evidence, no
+existing or dangling WiFi page/service, no running owned WiFi daemon, and a
+newly verified private archive of the current WiFi state. Otherwise owner
+credentials and backups are preserved and reported.
 SENSITIVE: appcombo.tar.gz contains the compiled Wifi1b payload, which may
 include owner credentials from the private source, plus any
 SCOURGE_WIFI1B_TXT/SCOURGE_WIFI_TXT or SCOURGE_AUTHORIZED_KEYS inputs.

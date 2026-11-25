@@ -126,6 +126,20 @@ def inner(binary: Path, app: Path) -> int:
         ["unshare", "-n", "sh", "-c", "ip link set lo up; exec sleep 300"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
+        own_netns = os.readlink("/proc/self/ns/net")
+        deadline = time.monotonic() + 5
+        while True:
+            if peer.poll() is not None:
+                raise AssertionError("peer network namespace exited")
+            try:
+                if os.readlink(f"/proc/{peer.pid}/ns/net") != own_netns:
+                    break
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                print("SKIP namespace integration: peer netns did not appear")
+                return 0
+            time.sleep(0.05)
         try:
             run(["ip", "link", "set", "cpeer0", "netns", str(peer.pid)])
         except subprocess.CalledProcessError as error:
@@ -135,7 +149,15 @@ def inner(binary: Path, app: Path) -> int:
         run(["ip", "link", "set", "lo", "up"])
         run(["ip", "link", "set", "wlan0", "up"])
         nsenter(peer.pid, ["ip", "link", "set", "lo", "up"])
-        nsenter(peer.pid, ["ip", "link", "set", "cpeer0", "up"])
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                nsenter(peer.pid, ["ip", "link", "set", "cpeer0", "up"])
+                break
+            except subprocess.CalledProcessError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
         nsenter(peer.pid, ["ip", "-4", "addr", "add", "10.42.0.2/24",
                            "dev", "cpeer0"])
         run(["ip", "-4", "addr", "add", "10.42.0.1/24", "dev", "wlan0"])

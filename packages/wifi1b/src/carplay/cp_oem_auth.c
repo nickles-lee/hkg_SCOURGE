@@ -114,6 +114,11 @@ static uint64_t auth_now_ms(void)
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
+static bool auth_deadline_reached(uint64_t deadline)
+{
+    return auth_now_ms() >= deadline;
+}
+
 static int auth_remaining_ms(uint64_t deadline)
 {
     uint64_t now = auth_now_ms();
@@ -160,12 +165,12 @@ static void auth_close_fd(cp_oem_auth *auth)
     }
 }
 
-static cp_oem_auth_error auth_connect_locked(cp_oem_auth *auth)
+static cp_oem_auth_error auth_connect_locked(cp_oem_auth *auth,
+                                             uint64_t deadline)
 {
     struct sockaddr_un addr;
     struct ucred cred;
     socklen_t cred_len = (socklen_t)sizeof(cred);
-    uint64_t deadline;
     int fd;
     int flags;
     int so_error = 0;
@@ -174,6 +179,9 @@ static cp_oem_auth_error auth_connect_locked(cp_oem_auth *auth)
 
     if (auth->fd >= 0) {
         return CP_OEM_AUTH_OK;
+    }
+    if (auth_deadline_reached(deadline)) {
+        return CP_OEM_AUTH_ERR_RPC_TIMEOUT;
     }
     err = auth_check_socket(auth, auth->socket_path);
     if (err != CP_OEM_AUTH_OK) {
@@ -194,9 +202,19 @@ static cp_oem_auth_error auth_connect_locked(cp_oem_auth *auth)
     addr.sun_family = AF_UNIX;
     memcpy(addr.sun_path, auth->socket_path, strlen(auth->socket_path) + 1u);
 
-    deadline = auth_now_ms() + (uint64_t)auth->timeout_ms;
-    if (connect(fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        if (errno != EINPROGRESS) {
+    for (;;) {
+        int rc;
+
+        if (auth_deadline_reached(deadline)) {
+            (void)close(fd);
+            return CP_OEM_AUTH_ERR_RPC_TIMEOUT;
+        }
+        rc = connect(fd, (const struct sockaddr *)&addr, sizeof(addr));
+        if (rc == 0 || (rc != 0 && errno == EISCONN)) {
+            break;
+        }
+        if (errno != EINPROGRESS && errno != EALREADY && errno != EINTR &&
+            errno != EAGAIN && errno != EWOULDBLOCK) {
             (void)close(fd);
             return CP_OEM_AUTH_ERR_RPC;
         }
@@ -204,6 +222,8 @@ static cp_oem_auth_error auth_connect_locked(cp_oem_auth *auth)
             (void)close(fd);
             return CP_OEM_AUTH_ERR_RPC_TIMEOUT;
         }
+        so_error = 0;
+        so_len = (socklen_t)sizeof(so_error);
         if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &so_len) != 0 ||
             so_len != (socklen_t)sizeof(so_error) || so_error != 0) {
             (void)close(fd);
@@ -227,6 +247,9 @@ static cp_oem_auth_error auth_send_record(cp_oem_auth *auth,
     for (;;) {
         ssize_t sent;
 
+        if (auth_deadline_reached(deadline)) {
+            return CP_OEM_AUTH_ERR_RPC_TIMEOUT;
+        }
         if (!auth_wait_fd(auth->fd, POLLOUT, deadline)) {
             return CP_OEM_AUTH_ERR_RPC_TIMEOUT;
         }
@@ -248,6 +271,10 @@ static ssize_t auth_recv_record(cp_oem_auth *auth, uint64_t deadline,
     for (;;) {
         ssize_t received;
 
+        if (auth_deadline_reached(deadline)) {
+            *error = CP_OEM_AUTH_ERR_RPC_TIMEOUT;
+            return -1;
+        }
         if (!auth_wait_fd(auth->fd, POLLIN, deadline)) {
             *error = CP_OEM_AUTH_ERR_RPC_TIMEOUT;
             return -1;
@@ -300,7 +327,8 @@ static cp_oem_auth_error auth_rpc_exchange_locked(
         return CP_OEM_AUTH_ERR_ARGUMENT;
     }
 
-    err = auth_connect_locked(auth);
+    deadline = auth_now_ms() + (uint64_t)auth->timeout_ms;
+    err = auth_connect_locked(auth, deadline);
     if (err != CP_OEM_AUTH_OK) {
         return err;
     }
@@ -321,7 +349,6 @@ static cp_oem_auth_error auth_rpc_exchange_locked(
         memcpy(auth->tx + CP_OEM_AUTH_RPC_REQUEST_LEN, payload, payload_len);
     }
 
-    deadline = auth_now_ms() + (uint64_t)auth->timeout_ms;
     err = auth_send_record(auth, auth->tx,
                            CP_OEM_AUTH_RPC_REQUEST_LEN + payload_len,
                            deadline);
@@ -492,19 +519,29 @@ cp_boot_auth_provider cp_oem_auth_boot_provider(cp_oem_auth *auth)
     return provider;
 }
 
+static cp_oem_auth_error auth_mock_ready_locked(cp_oem_auth *auth)
+{
+    if (!auth->backend_initialized) {
+        cp_oem_auth_error err = cp_oem_auth_native_initialize(&auth->ops);
+
+        auth->backend_initialized = true;
+        auth->backend_error = err;
+        if (err != CP_OEM_AUTH_OK) {
+            return err;
+        }
+    }
+    return auth->backend_error;
+}
+
 static cp_oem_auth_error auth_mock_certificate_locked(cp_oem_auth *auth,
                                                       uint8_t *out,
                                                       size_t cap,
                                                       size_t *out_len)
 {
-    cp_oem_auth_error err;
+    cp_oem_auth_error err = auth_mock_ready_locked(auth);
 
-    if (!auth->backend_initialized) {
-        err = cp_oem_auth_native_initialize(&auth->ops);
-        auth->backend_initialized = true;
-        if (err != CP_OEM_AUTH_OK) {
-            return err;
-        }
+    if (err != CP_OEM_AUTH_OK) {
+        return err;
     }
     return cp_oem_auth_native_certificate(&auth->ops, out, cap, out_len);
 }
@@ -515,14 +552,10 @@ static cp_oem_auth_error auth_mock_signature_locked(cp_oem_auth *auth,
                                                     uint8_t *out, size_t cap,
                                                     size_t *out_len)
 {
-    cp_oem_auth_error err;
+    cp_oem_auth_error err = auth_mock_ready_locked(auth);
 
-    if (!auth->backend_initialized) {
-        err = cp_oem_auth_native_initialize(&auth->ops);
-        auth->backend_initialized = true;
-        if (err != CP_OEM_AUTH_OK) {
-            return err;
-        }
+    if (err != CP_OEM_AUTH_OK) {
+        return err;
     }
     return cp_oem_auth_native_signature(&auth->ops, challenge, challenge_len,
                                         out, cap, out_len);
@@ -625,8 +658,23 @@ void cp_oem_auth_destroy(cp_oem_auth *auth)
         return;
     }
     if (auth->initialized) {
-        if (pthread_mutex_lock(&auth->lock) == 0) {
-            auth_close_fd(auth);
+        bool locked = false;
+        int fd = auth->fd;
+
+        /* Close before attempting the lock so a lock fault cannot leak the
+         * helper connection.  Concurrent destroy/use remains caller misuse. */
+        auth->fd = -1;
+        if (fd >= 0) {
+            (void)close(fd);
+        }
+#ifdef CP_OEM_AUTH_TEST
+        if (!auth->force_destroy_lock_failure) {
+#endif
+            locked = pthread_mutex_lock(&auth->lock) == 0;
+#ifdef CP_OEM_AUTH_TEST
+        }
+#endif
+        if (locked) {
             cp_oem_auth_secure_zero(auth->rx, sizeof(auth->rx));
             cp_oem_auth_secure_zero(auth->tx, sizeof(auth->tx));
             auth->initialized = false;

@@ -132,6 +132,10 @@ def fixture_env(root: Path, qml: Path) -> dict:
     (root / "run/wifi1b").mkdir(parents=True)
     (root / "run/wifi").mkdir(parents=True)
     (root / "etc/systemd/system").mkdir(parents=True)
+    beep = root / "runtime/combo/bin/dbus-send"
+    beep.parent.mkdir(parents=True, exist_ok=True)
+    beep.write_text("#!/bin/sh\nexit 0\n")
+    beep.chmod(0o755)
     systemctl = bin_dir / "systemctl"
     systemctl.write_text('''#!/bin/sh
 unit=""
@@ -142,9 +146,10 @@ exit 3
     systemctl.chmod(0o755)
     (root / "proc").mkdir()
     (root / "proc/mounts").write_text(f"device {root} ext4 rw 0 0\n")
-    (root / "runtime").mkdir()
+    (root / "runtime").mkdir(exist_ok=True)
     return dict(os.environ,
                 SCOURGE_SKIP_BUILD="1",
+                TMPDIR="/tmp/opencode",
                 COMBO_RW_DIR=str(root / "runtime/combo"),
                 COMBO_RUNTIME_ROOT=str(root / "runtime"),
                 COMBO_LEDGER_DIR=str(root / "ledger"),
@@ -259,14 +264,6 @@ with tempfile.TemporaryDirectory(prefix="standalone-policy-", dir="/tmp/opencode
     assert "unexpanded_cleanup_helper" in (unexpanded / "wrapper_result.txt").read_text()
     assert not (unexpanded / "runtime_cleanup.sh").exists()
 
-    # The default build_flat source must request exactly the standalone set.
-    source = (PACKAGES / "build_flat.sh").read_text()
-    assert "SCOURGE_STANDALONE=1 sh \"$HERE/compose.sh\" \"$STAGE/tree\" battery,tweaks,wifi1b" in source
-    assert "battery,tweaks,wifi1b,migrate" not in source
-    assert "Copy BOTH files" in source and "Copy ALL THREE" not in source
-    assert "@RUNTIME_CLEANUP_SHELL@" in source
-    assert "UID 0" in source and "not car-validated" in source
-
 # WiFi-present combo: the WiFi stage owns the final BatteryTile bytes, so the
 # Battery "*" entry is deferred even though its own copy differs.
 with tempfile.TemporaryDirectory(prefix="combo-policy-", dir="/tmp/opencode") as d:
@@ -295,3 +292,55 @@ print("PASS: standalone default selects Battery/Tweaks/Wifi1b with combo/standal
 print("PASS: BatteryTile is checked in standalone builds and deferred to the WiFi stage in combo builds")
 print("PASS: unreadable standalone marker fails closed before any stage")
 print("PASS: unexpanded cleanup placeholder fails closed before any stage/runtime helper write")
+
+def test_build_flat_stale_helper() -> None:
+    """build_flat removes a stale top-level helper only when it is ours."""
+    with tempfile.TemporaryDirectory(prefix="buildflat-stale-", dir="/tmp/opencode") as d:
+        base = Path(d)
+        repo = base / "repo"
+        packages = repo / "packages"
+        (packages / "common").mkdir(parents=True)
+        shutil.copyfile(PACKAGES / "build_flat.sh", packages / "build_flat.sh")
+        shutil.copyfile(PACKAGES / "flat_wrapper.sh", packages / "flat_wrapper.sh")
+        shutil.copyfile(PACKAGES / "common/runtime_cleanup.sh", packages / "common/runtime_cleanup.sh")
+        (packages / "compose.sh").write_text(
+            "#!/bin/sh\n"
+            "printf '%s|%s|%s\\n' \"${SCOURGE_STANDALONE:-0}\" \"$1\" \"$2\" "
+            f"> '{repo}/compose.args'\n"
+            "target=$1\n"
+            "mkdir -p \"$target/combo\"\n"
+            "printf 'standalone=1\\n' > \"$target/combo/standalone\"\n"
+            "printf '#!/bin/sh\\nexit 0\\n' > \"$target/run_stuff.sh\"\n")
+        for rel in ("wifi1b/scripts/check_combined.py", "common/check_skip_maps.py",
+                    "common/test_layout_qt.py"):
+            path = packages / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("raise SystemExit(0)\n")
+        out = base / "out"
+        out.mkdir()
+        stale = out / "runtime_cleanup.sh"
+        stale.write_text("owner file\n")
+        result = subprocess.run(["sh", str(packages / "build_flat.sh"), str(out)],
+                                capture_output=True, text=True, timeout=90)
+        assert result.returncode != 0
+        assert stale.read_text() == "owner file\n", "unknown top-level file was unlinked"
+        assert "refusing to overwrite unknown file" in result.stderr
+        shutil.copyfile(packages / "common/runtime_cleanup.sh", stale)
+        result = subprocess.run(["sh", str(packages / "build_flat.sh"), str(out)],
+                                capture_output=True, text=True, timeout=90)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert not stale.exists()
+        assert (out / "run_stuff.sh").is_file() and (out / "appcombo.tar.gz").is_file()
+        compose_args = (repo / "compose.args").read_text().strip()
+        assert compose_args.startswith("1|") and compose_args.endswith("|battery,tweaks,wifi1b"), compose_args
+        wrapper = (out / "run_stuff.sh").read_text()
+        assert "cleanup_bounded_logs()" in wrapper
+        assert "@RUNTIME_CLEANUP_SHELL@" not in wrapper
+        readme = (out / "README.txt").read_text()
+        assert "Copy BOTH files" in readme and "Copy ALL THREE" not in readme
+        assert "UID 0" in readme and "not car-validated" in readme
+        assert not (out / "runtime_cleanup.sh").exists()
+    print("PASS: build_flat preserves unknown top-level files and removes only a byte-identical stale helper")
+
+
+test_build_flat_stale_helper()

@@ -2,7 +2,24 @@
 
 ## Resume here
 
-Branch: `wireless-carplay-integration`.
+Current branch: `carplay-vbtd51-broker`, rebased checkpoints `7c62c35`
+(build-only broker/units/reproduction map) and `4663025` (live P2 docs).
+Not pushed.
+Current V24 integration and release gates: [V24.md](V24.md).
+Historical V23 offline checkpoint: [V23.md](V23.md).
+Reviewed defect checkpoints: [CONFIRMED-FIXES.md](CONFIRMED-FIXES.md).
+Exact stock-gap/patch/address map for reproduction:
+[REPRODUCTION.md](REPRODUCTION.md).
+What is actually proven: [VALIDATION.md](VALIDATION.md).
+Executable car-session plan: [TEST-PLAN.md](TEST-PLAN.md).
+
+Live 2026-11-18 P2 result: the stock CAFF SerialPort object appeared with
+`status="connected"`, local/remote UUID CAFF. `SendData(ay 1 0x00)` returned
+`i 0` (stub ACK; no RFCOMM capture, delivery unproven). The object persisted
+after `StopListenSPP`; `ap_clients` stayed 0, `carplay_ready:false`,
+`carplay_session_observed:false`. No registration patch is needed; P1 RX,
+broker/MFi deployment and AP bootstrap remain.
+The original `wireless-carplay-integration` branch is preserved as history.
 
 Goal: complete a wireless bootstrap compatible with the pinned LIVI reference,
 while retaining the OEM projection/media engine and unchanged wired CarPlay.
@@ -25,13 +42,15 @@ pinned); remove the previous two-model requirement. GLM was unavailable
 | Checkpoint | Work | Status |
 |---|---|---|
 | C0 | Preserve existing WIP; update review policy; dedicated branch | Complete: `4279a70` |
-| C1 | Bounded wire codec, identification and bootstrap state-machine tests | Independent Flash-Max PASS: reviewed tree `bd674f4e`; offline-only checkpoint |
-| C2 | AP IPv6/readiness/firewall and current-network snapshot | Pending |
-| C3 | Recover and verify OEM Bluetooth RX/TX/listener and MFi/identity ABI | Static research complete for SPP; live bus/transport proof still pending |
-| C4 | Integrate wireless transport and authenticated bootstrap | Pending |
-| C5 | Connect existing OEM discovery/receiver and lifecycle observations | Pending |
-| C6 | Installer/restore, regression gates, reviewed experimental V20 pair | Pending |
-| C7 | Parked vehicle/iPhone validation, explicitly owner-authorized | Not authorized |
+| C1 | Bounded wire codec, identification and bootstrap state-machine tests | Offline independent PASS: original `6e4d7f1`; auth/session/link follow-ups `cc18b9d`, `8287120`, `3815f5f`. No phone validation |
+| C2 | AP IPv6/readiness/firewall and current-network snapshot | Offline/namespace independent PASS at `8014e6c`; V23 modem-policy integration and target behavior require separate gates |
+| C3 | Recover and verify OEM Bluetooth RX/TX/listener and MFi/identity ABI | Static research complete; live 2026-11-18 P2 registration/TX object PASS; P1 RX and MFi chip still pending |
+| C4 | Integrate wireless transport and authenticated bootstrap | Deferred auth, SPP transport and serialized runtime broker independently reviewed offline. All remain unactivated; trusted target receiver integration and live phone/OEM validation still gated |
+| C5 | Connect existing OEM discovery/receiver and lifecycle observations | Offline passive-probe/pin follow-up PASS at `dd970f3`; trusted live receiver mapping and lifecycle integration pending |
+| C6 | Installer/restore, regression gates, experimental release pair | V23 independent offline review and fresh private build/artifact gates PASS at `42f5e4b`, including 32 side-by-side groups; phone/car proof remains unverified and optional firmware SPP readback remains blocked |
+| C7 | Parked vehicle/iPhone validation, explicitly owner-authorized | Partial 2026-11-18 probe: P2 registration + `SendData` method ACK only; no P1/broker/AP/projection. Full C7 not complete |
+| C8 | Test plan, validation matrix, P1/broker deployment preparation | Validation/test-plan docs added; live Apple-USB gate built/fixture-tested; deployment and live P1/broker remain pending |
+| C9 | Target broker integration and private candidate | D-Bus XML validation enabled in host and target builds; AP configuration agreement fixture-tested; owner-rootfs bundle assembled and checksum-verified. Manual install only; projection and on-car runtime still unverified |
 
 At each checkpoint record: exact commit/tree, commands and results, incomplete
 coverage, and the next action. Never equate a mocked exchange with vehicle
@@ -42,7 +61,7 @@ validation. Update this document before ending a work session.
 - Country GB; preserve owner credentials/keys and station-network priority.
 - Preserve stock USB, modem routing, shared micom helper, Battery, charge door,
   cluster, Tweaks and approved Reboot behavior.
-- Standalone V20 must not reinstall WiFi or require migration. Retain existing
+- New standalone V24 must not reinstall WiFi or require migration. Retain existing
   released bundles; do not publish an experimental build as a verified fix.
 - First-action bounded cleanup remains first. Stop owned radios in installers.
 - Firmware-specific binary modifications require exact hash and byte gates.
@@ -133,7 +152,11 @@ is not automatically mandatory. Never synthesize successful authentication.
 7. Reconnect, long session, ignition restart, USB insertion/removal, calls/Siri,
    credential redaction and bounded disk/log growth.
 
-## C1 worktree verification
+## Historical C1 worktree verification
+
+The tree hashes and review chronology below describe the original checkpoint,
+not the complete current branch. Use the milestone table and linked V23 ledger
+for subsequent reviewed changes and remaining gates.
 
 New source modules: `packages/wifi1b/src/carplay/cp_wire.*`, `cp_bootstrap.*`,
 and `cp_link.*`. They are not activated by the installer or existing daemon.
@@ -199,7 +222,12 @@ with parameter tables. An outer wrapper must retire the receiver-wait deadline
 on a trusted active observation while retaining consent/USB checks. Timeout
 alone does not establish that the OEM receiver failed or stopped.
 
-## Later worktree components (outside the C1 reviewed index)
+## Historical later components (outside the original C1 reviewed index)
+
+The pending-review statements in this historical section record that earlier
+index only. SPP cleanup, auth, receiver-pin, session, link, network and installer
+follow-ups have since landed; their exact commits and limitations are recorded
+in CONFIRMED-FIXES.md. They do not establish working wireless CarPlay.
 
 `cp_spp_socket.*` adds an unactivated, root-only Unix datagram receiver for the
 build-only Bluetooth RX hook. It checks kernel sender credentials, complete

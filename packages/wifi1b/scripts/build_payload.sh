@@ -18,6 +18,9 @@ python3 scripts/make_icons1b.py
 # canonical Battery/WiFi/Tweaks installers, never from divergent sibling trees.
 
 echo "== daemon =="
+# The embedded build identity hashes scripts/ and src/, so a script-only
+# change must relink the daemon; an incremental make would keep the old ID.
+make -C src clean
 make -C src
 
 echo "== assemble $OUT =="
@@ -54,7 +57,7 @@ cp scripts/run_stuff_restore1b.sh "$OUT/run_stuff_restore.sh"
 chmod 755 "$OUT/run_stuff.sh" "$OUT/run_stuff_restore.sh"
 
 cat > "$OUT/README.txt" <<'EOT'
-Wifi1b — static wpa_supplicant + own DHCP + SSH
+Wifi1b V23 — static wpa_supplicant + own DHCP + SSH
 ===============================================
 
 This is the standalone Wifi1b payload. It needs the canonical Battery/Tweaks
@@ -85,8 +88,8 @@ CarPlay AP defaults:
 V22+ BlueLink-safe client routing:
   While rmnet_usb0/rmnet_usb1 has an IPv4 address, client mode installs no
   WiFi default route. WiFi is SSH-only; the modem default and per-server host
-  routes stay authoritative. The V21 `route replace default via wlan0` route
-  is removed on client start. If no modem data IPv4 exists, a bounded
+  routes stay authoritative. Unverified legacy wlan0 defaults and ownership
+  records are preserved; route changes fail closed. If no modem data IPv4 exists, a bounded
   high-metric proto-66 fallback is installed. A 30 s audit reconciles the two.
   Advanced: client_route_policy=fallback in /rw_data/wifi1b/config.conf.
 

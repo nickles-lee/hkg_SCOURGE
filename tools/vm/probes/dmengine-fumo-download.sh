@@ -1,6 +1,7 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
 # SPDX-License-Identifier: AGPL-3.0-only
+# TARGET: Gen5W_L EU NE_E.EUR.S5W_L.001.001.260128; isolated Mode C VM only.
 
 # Mode C lab FUMO download.
 #

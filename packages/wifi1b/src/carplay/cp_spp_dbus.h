@@ -11,6 +11,7 @@
  * The caller owns the event loop: cp_spp_dbus_tick() performs only
  * zero-timeout libdbus I/O/dispatch.  There are no blocking method calls in
  * this module.  All pending operations are fixed-bound and carry deadlines.
+ * Single-threaded use: callbacks must not re-enter or close this engine.
  *
  * State:
  *   OPEN -> VALIDATING -> LISTENING -> CONNECTED
@@ -88,7 +89,8 @@ typedef struct {
     /* Optional; defaults CAFF/CAFE.  Must be distinct. */
     const char *uuid_accessory;
     const char *uuid_phone;
-    /* REQUIRED: OEM SDP listener name passed to ListenSPP. */
+    /* REQUIRED: OEM SDP listener name.  Vendor ListenSPP signature is
+     * (UUID, name), so this is the second argument, not the first. */
     const char *service_name;
     /* Production defaults to uid 0 (root).  Tests may set an explicit uid. */
     int expected_owner_uid_set;
@@ -137,10 +139,14 @@ int cp_spp_dbus_start(cp_spp_dbus *engine, uint64_t now_ms);
 int cp_spp_dbus_tick(cp_spp_dbus *engine, uint64_t now_ms);
 
 /* Send ListenSPP only after on_validated.  Error 3 is fatal and never
- * assumes ownership of a foreign listener. */
+ * assumes ownership of a foreign listener.  An already-registered SerialPort
+ * object is enumerated during validation; the first connection is completed
+ * after our own ListenSPP succeeds, even when no status signal arrives. */
 int cp_spp_dbus_listen(cp_spp_dbus *engine, uint64_t now_ms);
 
-/* Send StopListenSPP only if this driver successfully created the listener. */
+/* Send StopListenSPP only if this driver successfully created the listener.
+ * Idempotent: stopping an unowned/already-stopped listener returns OK without
+ * sending anything.  Never stops a listener this process did not start. */
 int cp_spp_dbus_stop(cp_spp_dbus *engine, uint64_t now_ms);
 
 /* Queue <=1000 bytes for one-in-flight SendData.  CP_SPP_DBUS_ERR_BACKPRESSURE
@@ -162,8 +168,19 @@ int cp_spp_dbus_next_deadline(const cp_spp_dbus *engine,
 cp_spp_dbus_state cp_spp_dbus_state_get(const cp_spp_dbus *engine);
 int cp_spp_dbus_adapter_validated(const cp_spp_dbus *engine);
 int cp_spp_dbus_listener_owned(const cp_spp_dbus *engine);
+/* Monotonic per-driver connection counter.  It advances only when a fresh
+ * connected object is confirmed (status signal or enumerated at attach), so a
+ * reconnect by the same peer is distinguishable from stale per-connection
+ * state.  0 means no connection has been confirmed yet. */
+uint32_t cp_spp_dbus_connect_generation(const cp_spp_dbus *engine);
+/* True when the current connection was completed from an already-registered
+ * SerialPort object at attach (no status signal). */
+int cp_spp_dbus_attached(const cp_spp_dbus *engine);
 size_t cp_spp_dbus_tx_queued(const cp_spp_dbus *engine);
 const char *cp_spp_dbus_error(const cp_spp_dbus *engine);
+/* Copy the peer bound by the validated CommonAPI service/object identity.
+ * No hook datagram is allowed to choose this identity. Requires cap >= 18. */
+int cp_spp_dbus_peer(const cp_spp_dbus *engine, char *peer, size_t cap);
 
 /* Best-effort StopListenSPP only if owned, then close the private connection.
  * This never blocks and never tears down a listener it did not create. */

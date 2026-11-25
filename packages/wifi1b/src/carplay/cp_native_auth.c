@@ -3,13 +3,17 @@
  *
  * Tiny root helper for the hardware-backed MFi provider.
  *
- * This program is the only component that loads libCoreUtils.so.  It refuses
- * to start without --serve --experimental, verifies the pinned file SHA-256,
- * resolves the three MFiPlatform exports, creates a root-only SOCK_SEQPACKET
- * socket (directory 0700, socket 0600), checks SO_PEERCRED and serves bounded
- * certificate/signature requests.  It never logs certificate or signature
- * bytes and never touches /dev/i2c-1 itself; the OEM library does that on the
- * target only.
+ * Within this CarPlay integration, this helper is the only component that
+ * loads libCoreUtils.so.  That is not a global claim about other processes or
+ * integrations on the head unit.  It refuses to start without
+ * --serve --experimental, verifies the pinned file SHA-256, resolves the three
+ * MFiPlatform exports, creates a root-only SOCK_SEQPACKET socket (directory
+ * 0700, socket 0600), checks SO_PEERCRED and serves bounded certificate and
+ * signature requests.  It never logs certificate or signature bytes and never
+ * touches /dev/i2c-1 itself; the OEM library does that on the target only.
+ * The client RPC deadline bounds only the caller: it does not bound OEM/chip
+ * work, and the helper may remain in provider code after the caller times out.
+ * There is no hardware watchdog here.
  *
  * No OEM binary is executed on the build host.  Tests build this file with a
  * first-party mock .so and CP_OEM_AUTH_TEST.
@@ -50,6 +54,8 @@ static struct {
     mfi_certificate_fn certificate;
     mfi_signature_fn signature;
     bool initialized;
+    bool init_failed;
+    cp_oem_auth_error init_error;
 } g_mfi;
 
 static int g_listen_fd = -1;
@@ -382,6 +388,66 @@ static bool load_symbol(void *handle, const char *name, void *destination,
     return true;
 }
 
+static bool allowed_loader_dir(const char *component, size_t length)
+{
+    static const char *const allowed[] = {
+        "/app/lib", "/lib", "/usr/lib", "/lib64", "/usr/lib64"
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
+        if (length == strlen(allowed[i]) &&
+            memcmp(component, allowed[i], length) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Reject inherited loader redirection instead of silently trusting it.  A
+ * service that needs LD_LIBRARY_PATH may only name explicit target dirs;
+ * anything else is a fail-closed activation error. */
+static bool sanitize_loader_env(void)
+{
+    static const char *const forbidden[] = {
+        "LD_PRELOAD", "LD_AUDIT", "LD_DEBUG", "LD_PROFILE",
+        "LD_USE_LOAD_BIAS", "LD_ORIGIN_PATH", "LD_ASSUME_KERNEL",
+        "LD_TRACE_LOADED_OBJECTS", "LD_WARN", "LD_VERBOSE", "LD_BIND_NOT",
+        "LD_PREFER_MAP_32BIT_EXEC", "LD_HWCAP_MASK", "LD_SHOW_AUXV",
+        "LD_DYNAMIC_WEAK"
+    };
+    const char *path;
+    size_t i;
+
+    for (i = 0; i < sizeof(forbidden) / sizeof(forbidden[0]); i++) {
+        const char *value = getenv(forbidden[i]);
+
+        if (value != NULL && value[0] != '\0') {
+            return false;
+        }
+    }
+    path = getenv("LD_LIBRARY_PATH");
+    if (path == NULL || path[0] == '\0') {
+        return true;
+    }
+    for (;;) {
+        const char *colon = strchr(path, ':');
+        size_t length = colon != NULL ? (size_t)(colon - path) : strlen(path);
+
+        if (length == 0u || path[0] != '/' ||
+            !allowed_loader_dir(path, length)) {
+            return false;
+        }
+        if (colon == NULL) {
+            return true;
+        }
+        path = colon + 1;
+        if (path[0] == '\0') {
+            return false; /* trailing colon means an unsafe cwd search */
+        }
+    }
+}
+
 static cp_oem_auth_error load_library(const char *path,
                                       const char *expected_sha)
 {
@@ -389,7 +455,6 @@ static cp_oem_auth_error load_library(const char *path,
     uint8_t actual[32];
     char proc_path[64];
     struct stat stat_fd;
-    struct stat stat_path;
     int fd;
     void *handle;
 
@@ -418,17 +483,9 @@ static cp_oem_auth_error load_library(const char *path,
         (void)close(fd);
         return CP_OEM_AUTH_ERR_LIBRARY;
     }
+    /* Load exactly the hashed inode.  Never fall back to an unverified path:
+     * /proc/self/fd is the only activation source; failure is fail-closed. */
     handle = dlopen(proc_path, RTLD_NOW | RTLD_LOCAL);
-    if (handle == NULL) {
-        /* Fall back only when the same inode is still at the pinned path. */
-        if (auth_lstat(path, &stat_path) != 0 ||
-            stat_path.st_dev != stat_fd.st_dev ||
-            stat_path.st_ino != stat_fd.st_ino) {
-            (void)close(fd);
-            return CP_OEM_AUTH_ERR_LIBRARY;
-        }
-        handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-    }
     (void)close(fd);
     if (handle == NULL) {
         return CP_OEM_AUTH_ERR_LIBRARY;
@@ -622,9 +679,19 @@ static cp_oem_auth_error ensure_initialized(void)
     if (g_mfi.initialized) {
         return CP_OEM_AUTH_OK;
     }
+    if (g_mfi.init_failed) {
+        return g_mfi.init_error;
+    }
     error = cp_oem_auth_native_initialize(&g_native_ops);
+    if (error != CP_OEM_AUTH_OK) {
+        /* Latch the permanent backend initialization failure.  Never call
+         * certificate or signature after a failed OEM initialize. */
+        g_mfi.init_failed = true;
+        g_mfi.init_error = error;
+        return error;
+    }
     g_mfi.initialized = true;
-    return error;
+    return CP_OEM_AUTH_OK;
 }
 
 static bool write_all(int fd, const uint8_t *data, size_t len)
@@ -893,16 +960,24 @@ int main(int argc, char **argv)
         return CP_OEM_AUTH_ERR_POLICY;
     }
 #endif
+    /* Sanitize the process environment, working directory and umask before
+     * dlopen runs any OEM constructor.  Path validation happens first too, so
+     * a bad activation path cannot reach OEM code. */
+    if (!sanitize_loader_env() || chdir("/") != 0) {
+        return CP_OEM_AUTH_ERR_POLICY;
+    }
+    (void)umask(0077);
+    error = prepare_socket_path(opts.socket, uid);
+    if (error != CP_OEM_AUTH_OK) {
+        cleanup();
+        return (int)error;
+    }
     error = load_library(opts.library, opts.expected_sha);
     if (error != CP_OEM_AUTH_OK) {
         cleanup();
         return (int)error;
     }
-    (void)umask(0077);
-    error = prepare_socket_path(opts.socket, uid);
-    if (error == CP_OEM_AUTH_OK) {
-        error = open_socket(uid);
-    }
+    error = open_socket(uid);
     if (error != CP_OEM_AUTH_OK) {
         cleanup();
         return (int)error;

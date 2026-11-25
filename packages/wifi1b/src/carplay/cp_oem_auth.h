@@ -13,9 +13,21 @@
  * loading the library or creating a socket.  The in-process factory likewise
  * refuses to activate unless the caller sets experimental=true.
  *
+ * BUILD-ONLY / UNACTIVATED / NOT CAR-VALIDATED: compiling this adapter and
+ * helper proves only that the pinned artifact wires up on the build host.  It
+ * does not prove target loader dependency resolution, rootfs aliases, OEM
+ * helper execution, chip access or vehicle behavior.  Successful certificate
+ * or signature bytes are NOT authentication success; only the phone's AA05
+ * may set that in cp_bootstrap.
+ *
+ * Provider context lifetime: cp_boot_auth_provider.context points at the
+ * caller-owned cp_oem_auth.  Detach it from every cp_bootstrap/cp_session
+ * (for example cp_bootstrap_set_auth_provider(session, NULL)) before calling
+ * cp_oem_auth_destroy.  No callback may run after destroy.
+ *
  * No certificate, signature, private key or OEM log content is ever logged.
  * The adapter returns bytes to cp_boot; it never marks phone authentication
- * successful.  Only the phone's AA05 does that in cp_bootstrap.
+ * successful.
  *
  * The test-only mock entry point is compiled only with CP_OEM_AUTH_TEST.  A
  * production build has no fake provider.
@@ -131,6 +143,10 @@ typedef struct {
 
 typedef struct {
     const char *socket_path; /* NULL selects the default */
+    /* Total absolute deadline budget for one RPC attempt: connect + request
+     * send + response receive.  It is one monotonic deadline, not a per-phase
+     * reset.  The helper may remain stuck in OEM/chip code after the client
+     * times out; this bounds the caller, not a hardware watchdog. */
     uint32_t timeout_ms;     /* 0 selects the default */
     bool experimental;       /* required explicit activation */
 #ifdef CP_OEM_AUTH_TEST
@@ -145,6 +161,7 @@ typedef struct {
     bool rpc;
     bool experimental;
     bool backend_initialized;
+    cp_oem_auth_error backend_error;
     cp_oem_auth_native_ops ops;
     char socket_path[CP_OEM_AUTH_SOCKET_PATH_MAX];
     uint32_t timeout_ms;
@@ -156,6 +173,7 @@ typedef struct {
               CP_OEM_AUTH_RPC_MAX_REQUEST_PAYLOAD];
 #ifdef CP_OEM_AUTH_TEST
     uint32_t expected_peer_uid;
+    bool force_destroy_lock_failure;
 #endif
 } cp_oem_auth;
 

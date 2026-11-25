@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Owner-supplied configuration for the experimental CarPlay broker.
+# Install as /rw_data/wifi1b/carplay-broker.conf, root:root, mode 0600.
+#
+# This template intentionally leaves identity and AP values empty.  The
+# helper rejects an incomplete configuration and does not open the RX socket
+# or session bus.  Never commit a filled copy; it contains vehicle identity
+# and AP credentials.
+
+# OEM SDP listener name passed to the adapter's ListenSPP method.
+service_name=SCOURGE-iAP
+
+# Identity advertised in identification/session-start.  Use the same values
+# as the Wifi1b CarPlay config, not invented ones.
+name=
+model=
+manufacturer=
+serial=
+firmware=
+hardware=
+eap_name=
+language=en
+languages=en
+transport_name=
+
+# Bluetooth identity.  Use the head unit's own Bluetooth address.  The stock
+# receiver derives its advertised deviceid from this address by incrementing
+# the last byte; the broker checks that relationship below.  These are
+# persistent vehicle identifiers; keep them out of Git.
+bt_mac=
+
+# Receiver discovery.  Before opening the session bus or RX socket, the
+# broker resolves each distinct stock receiver _airplay._tcp SRV/TXT on this
+# interface.  It evaluates every resolved candidate, requires exactly one
+# passing identity, a deviceid consistent with bt_mac (last byte +1) unless
+# device_id pins an exact value, and a local LISTEN socket on the advertised
+# port whose owning process is allowlisted.  The observed values are what go
+# into the wireless start message.
+receiver_interface=wlan0
+receiver_timeout_ms=15000
+
+# Quiet window after the first valid candidate and the last DNS-SD event.
+# Bounded by receiver_timeout_ms; the deadline is never extended.
+receiver_settle_ms=500
+
+# Stock process allowed to own the receiver LISTEN socket (comma separated
+# for more than one).  Blank is refused, not treated as "any owner".  A
+# wildcard or receiver-interface address is required; a loopback-only
+# listener is refused as listener-scope.
+receiver_listener_owner=AppProjection
+
+# Optional pairing-identifier pin: 64 hex characters, SHA-256 of the raw TXT
+# pi value.  Only the hash is compared and only the hash is reported; blank
+# means "require pi to be present but accept its value".  A malformed value
+# refuses the whole configuration.
+receiver_pi_sha256=
+
+# Optional consistency pins.  Blank/0 means "derive or accept the observed
+# value" as described below; a set value must match exactly.
+# device_id is the receiver's advertised deviceid (normally the Bluetooth MAC
+# with the last byte incremented), not the Bluetooth MAC.  When blank, the
+# broker derives it from bt_mac (+1) and requires an exact match.
+# airplay_port=0 means "use the observed SRV port"; 7000 is not guaranteed.
+# source_version blank means "require srcvers to be present, accept its value".
+device_id=
+airplay_port=0
+source_version=
+
+# AP bootstrap values.  They must identify the AP the daemon actually runs.
+# Fill in the actual SSID, channel, security mode and link-local address
+# (without the interface zone, e.g. omit %wlan0). Zero/blank values are not
+# auto-filled. The broker checks these against fresh daemon status and
+# requires ap_psk to match the daemon's configured PSK before offering Wi-Fi.
+ap_ssid=
+ap_psk=
+ap_channel=0
+ap_security=WPA2
+link_local=
+
+# Optional; omit to read DBUS_SESSION_BUS_ADDRESS from
+# /tmp/session_appmgr.env.
+# bus_address=unix:path=/tmp/session_appmgr
+
+# Fail closed: no offer until the owner explicitly grants consent.
+consent=0
+
+# Safety default: 1 is a manual block.  The broker also scans usb_sysfs for an
+# Apple USB vendor (05ac) and blocks if one is present; a missing/unreadable
+# sysfs root also blocks.  Set 0 only when the live scan is available and the
+# owner accepts that a charging iPhone will block the wireless offer.
+usb_active=1
+# usb_sysfs=/sys/bus/usb/devices

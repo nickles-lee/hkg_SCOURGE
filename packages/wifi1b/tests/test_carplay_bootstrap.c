@@ -217,7 +217,8 @@ static const char *k_start_readback =
 static const char *k_aa01 = "4040000daa01000700000102ff";
 static const char *k_aa03 = "4040000eaa0300080000deadbeef";
 static const char *k_aa00 = "40400006aa00";
-static const char *k_aa02 = "4040000eaa020008000001020304";
+static const char *k_aa02 = "4040001eaa0200180000"
+    "0102030405060708090a0b0c0d0e0f1011121314";
 static const char *k_aa04 = "40400006aa04";
 static const char *k_aa05 = "40400006aa05";
 static const char *k_1d00 = "404000061d00";
@@ -229,12 +230,18 @@ static const char *k_4e0d_unavailable = "4040000b4e0d0005000000";
 static const char *k_4e0e =
     "404000264e0e0016000041413a42423a43433a44443a45453a464600000a000175"
     "73622d3100";
+static const char *k_4e0e_usb2 =
+    "404000264e0e0016000041413a42423a43433a44443a45453a464600000a000175"
+    "73622d3200";
 static const char *k_4300_both =
     "404000384300001300000005000001000a00017573622d3100001f000100050000"
     "010016000141413a42423a43433a44443a45453a464600";
 static const char *k_4300_wireless =
     "404000254300001f000100050000010016000141413a42423a43433a44443a4545"
     "3a464600";
+static const char *k_4300_both_usb2 =
+    "404000384300001300000005000001000a00017573622d3200001f000100050000"
+    "010016000141413a42423a43433a44443a45453a464600";
 static const char *k_4300_false = "4040000f4300000900010005000000";
 static const char *k_5702 = "404000065702";
 
@@ -318,6 +325,7 @@ static cp_wire_start_session base_start(void)
 typedef struct {
     int consent;
     bool usb_active;
+    const char *usb_true_id;
     int consent_calls;
     int usb_calls;
 } policy_fixture;
@@ -335,8 +343,9 @@ static bool policy_usb(void *context, const char *bluetooth_id,
 {
     policy_fixture *p = (policy_fixture *)context;
     (void)bluetooth_id;
-    (void)usb_id;
     p->usb_calls++;
+    if (p->usb_true_id != NULL)
+        return usb_id != NULL && strcmp(usb_id, p->usb_true_id) == 0;
     return p->usb_active;
 }
 
@@ -403,6 +412,7 @@ static void install_policy(cp_bootstrap *session, policy_fixture *policy,
 {
     policy->consent = consent;
     policy->usb_active = usb_active;
+    policy->usb_true_id = NULL;
     policy->consent_calls = 0;
     policy->usb_calls = 0;
     CHECK_EQ(cp_bootstrap_set_policy(session, policy_consent, policy_usb,
@@ -421,19 +431,31 @@ static void install_auth(cp_bootstrap *session, auth_fixture *auth)
     CHECK_EQ(cp_bootstrap_set_auth_provider(session, &provider), CP_BOOT_OK);
 }
 
-static void set_ap_ready(cp_bootstrap *session, uint64_t now_ms, uint8_t *out,
-                         size_t out_cap)
+static cp_boot_result set_ap_readback_fields(cp_bootstrap *session,
+                                             uint64_t now_ms, uint8_t *out,
+                                             size_t out_cap, const char *ssid,
+                                             uint8_t channel,
+                                             cp_wire_wifi_security security,
+                                             const char *link_local)
 {
     cp_boot_ap_readback readback;
 
     memset(&readback, 0, sizeof(readback));
     readback.on_air = true;
-    readback.ssid = "SCOURGE-AP";
-    readback.channel = 36u;
-    readback.security = CP_WIRE_WIFI_WPA2;
-    readback.link_local = NULL;
-    CHECK_EQ(cp_bootstrap_set_ap_readback(session, &readback, now_ms, out,
-                                          out_cap)
+    readback.ssid = ssid;
+    readback.channel = channel;
+    readback.security = security;
+    readback.link_local = link_local;
+    return cp_bootstrap_set_ap_readback(session, &readback, now_ms, out,
+                                        out_cap);
+}
+
+static void set_ap_ready(cp_bootstrap *session, uint64_t now_ms, uint8_t *out,
+                         size_t out_cap)
+{
+    CHECK_EQ(set_ap_readback_fields(session, now_ms, out, out_cap,
+                                    "SCOURGE-AP", 36u, CP_WIRE_WIFI_WPA2,
+                                    NULL)
                  .event,
              CP_BOOT_EV_AP_READY);
 }
@@ -1159,17 +1181,25 @@ static void test_inbound_decoding(void)
     CHECK_EQ(cp_wire_decode_challenge_request(&view, &challenge,
                                               &challenge_len),
              CP_WIRE_OK);
-    CHECK_EQ(challenge_len, 4u);
+    CHECK_EQ(challenge_len, 20u);
     CHECK_EQ(challenge[0], 1u);
-    CHECK_EQ(challenge[3], 4u);
+    CHECK_EQ(challenge[19], 0x14u);
     {
         static const uint8_t empty_challenge[6] = {
             0x40u, 0x40u, 0x00u, 0x06u, 0xAAu, 0x02u};
+        static const uint8_t short_challenge[10] = {
+            0x40u, 0x40u, 0x00u, 0x0Au, 0xAAu, 0x02u,
+            0x00u, 0x04u, 0x00u, 0x00u};
         CHECK_EQ(cp_wire_open(empty_challenge, sizeof(empty_challenge), &view),
                  CP_WIRE_OK);
         CHECK_EQ(cp_wire_decode_challenge_request(&view, &challenge,
                                                   &challenge_len),
                  CP_WIRE_ERR_MISSING);
+        CHECK_EQ(cp_wire_open(short_challenge, sizeof(short_challenge), &view),
+                 CP_WIRE_OK);
+        CHECK_EQ(cp_wire_decode_challenge_request(&view, &challenge,
+                                                  &challenge_len),
+                 CP_WIRE_ERR_RANGE);
     }
     frame_len = unhex(k_aa00, frame, sizeof(frame));
     CHECK_EQ(cp_wire_open(frame, frame_len, &view), CP_WIRE_OK);
@@ -1272,9 +1302,12 @@ static void test_inbound_decoding(void)
                  CP_WIRE_ERR_TRUNCATED);
     }
     {
-        static const uint8_t challenge_unknown[19] = {
-            0x40u, 0x40u, 0x00u, 0x13u, 0xAAu, 0x02u,
-            0x00u, 0x08u, 0x00u, 0x00u, 0x01u, 0x02u, 0x03u, 0x04u,
+        static const uint8_t challenge_unknown[35] = {
+            0x40u, 0x40u, 0x00u, 0x23u, 0xAAu, 0x02u,
+            0x00u, 0x18u, 0x00u, 0x00u,
+            0x01u, 0x02u, 0x03u, 0x04u, 0x05u, 0x06u, 0x07u, 0x08u,
+            0x09u, 0x0Au, 0x0Bu, 0x0Cu, 0x0Du, 0x0Eu, 0x0Fu, 0x10u,
+            0x11u, 0x12u, 0x13u, 0x14u,
             0x00u, 0x05u, 0x00u, 0x03u, 0xFFu};
         static const uint8_t challenge_unknown_only[11] = {
             0x40u, 0x40u, 0x00u, 0x0Bu, 0xAAu, 0x02u,
@@ -1285,9 +1318,9 @@ static void test_inbound_decoding(void)
         CHECK_EQ(cp_wire_decode_challenge_request(&view, &challenge,
                                                   &challenge_len),
                  CP_WIRE_OK);
-        CHECK_EQ(challenge_len, 4u);
+        CHECK_EQ(challenge_len, 20u);
         CHECK_EQ(challenge[0], 1u);
-        CHECK_EQ(challenge[3], 4u);
+        CHECK_EQ(challenge[19], 0x14u);
         CHECK_EQ(cp_wire_open(challenge_unknown_only,
                               sizeof(challenge_unknown_only), &view),
                  CP_WIRE_OK);
@@ -1770,20 +1803,53 @@ static void test_authentication(void)
     install_policy(&session, &policy, CP_BOOT_CONSENT_GRANTED, false);
     install_auth(&session, &auth);
     result = feed(&session, k_aa00, now, out, sizeof(out));
-    CHECK_EQ(result.event, CP_BOOT_EV_START_REFUSED);
-    CHECK_EQ(result.error, CP_BOOT_ERR_ORDER);
+    CHECK_EQ(result.event, CP_BOOT_EV_AUTH_PENDING);
+    CHECK_EQ(result.error, CP_BOOT_OK);
+    CHECK_EQ(result.out_len, 0u);
     CHECK_EQ(auth.cert_calls, 0);
     result = feed(&session, k_1d00, now, out, sizeof(out));
     CHECK_EQ(result.event, CP_BOOT_EV_IDENTIFICATION_SENT);
     result = feed(&session, k_1d02, now, out, sizeof(out));
     CHECK_EQ(result.event, CP_BOOT_EV_IDENTIFIED);
-
+    CHECK_EQ(auth.cert_calls, 0);
+    result = cp_bootstrap_tick(&session, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_AUTH_CERT_SENT);
+    CHECK(frame_equals(out, result.out_len, k_aa01));
+    CHECK_EQ(auth.cert_calls, 1);
     result = feed(&session, k_aa02, now, out, sizeof(out));
-    CHECK_EQ(result.event, CP_BOOT_EV_AUTH_FAILED);
-    CHECK_EQ(result.error, CP_BOOT_ERR_ORDER);
-    CHECK_EQ(result.out_len, 0u);
-    CHECK_EQ(cp_bootstrap_auth_state(&session), CP_BOOT_AUTH_FAILED);
-    CHECK_EQ(cp_bootstrap_state(&session), CP_BOOT_STATE_FAILED);
+    CHECK_EQ(result.event, CP_BOOT_EV_AUTH_RESPONSE_SENT);
+    CHECK(frame_equals(out, result.out_len, k_aa03));
+    result = feed(&session, k_aa05, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_AUTHENTICATED);
+    CHECK_EQ(cp_bootstrap_auth_state(&session), CP_BOOT_AUTH_SUCCEEDED);
+
+    /* Interleaved auth-first order: both AA00 and AA02 arrive before 1D02.
+     * Both are buffered, answered in protocol order after identification, and
+     * credentials still wait for the phone's AA05. */
+    memset(&auth, 0, sizeof(auth));
+    cfg = base_config();
+    CHECK_EQ(cp_bootstrap_init(&session, &cfg), CP_BOOT_OK);
+    install_policy(&session, &policy, CP_BOOT_CONSENT_GRANTED, false);
+    install_auth(&session, &auth);
+    CHECK_EQ(feed(&session, k_aa02, now, out, sizeof(out)).event,
+             CP_BOOT_EV_AUTH_PENDING);
+    CHECK_EQ(feed(&session, k_aa00, now, out, sizeof(out)).event,
+             CP_BOOT_EV_AUTH_PENDING);
+    CHECK_EQ(auth.cert_calls, 0);
+    CHECK_EQ(feed(&session, k_1d00, now, out, sizeof(out)).event,
+             CP_BOOT_EV_IDENTIFICATION_SENT);
+    CHECK_EQ(feed(&session, k_1d02, now, out, sizeof(out)).event,
+             CP_BOOT_EV_IDENTIFIED);
+    CHECK_EQ(auth.cert_calls, 0);
+    result = cp_bootstrap_tick(&session, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_AUTH_CERT_SENT);
+    CHECK_EQ(auth.cert_calls, 1);
+    result = cp_bootstrap_tick(&session, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_AUTH_RESPONSE_SENT);
+    CHECK_EQ(auth.signature_calls, 1);
+    CHECK_EQ(cp_bootstrap_auth_state(&session), CP_BOOT_AUTH_RESPONSE_SENT);
+    CHECK_EQ(feed(&session, k_aa05, now, out, sizeof(out)).event,
+             CP_BOOT_EV_AUTHENTICATED);
 
     cfg = base_config();
     CHECK_EQ(cp_bootstrap_init(&session, &cfg), CP_BOOT_OK);
@@ -2399,6 +2465,419 @@ static void test_offer_deadline_and_policy(void)
     CHECK(frame_equals(out, result.out_len, k_start_wpa2));
 }
 
+static void test_offer_hold(void)
+{
+    cp_bootstrap session;
+    cp_boot_config cfg = base_config();
+    policy_fixture policy;
+    auth_fixture auth;
+    cp_boot_ap_readback readback;
+    uint8_t out[512];
+    cp_boot_result result;
+    uint64_t now = 700u;
+    uint64_t generation;
+
+    memset(&auth, 0, sizeof(auth));
+
+    /* No offer: a hold cannot be created from nothing. */
+    CHECK_EQ(cp_bootstrap_init(&session, &cfg), CP_BOOT_OK);
+    generation = cp_bootstrap_generation(&session);
+    result = cp_bootstrap_hold_offer(&session, generation, now);
+    CHECK_EQ(result.event, CP_BOOT_EV_START_REFUSED);
+    CHECK_EQ(result.error, CP_BOOT_ERR_ORDER);
+    CHECK(!cp_bootstrap_offer_held(&session));
+
+    /* Identified but not authenticated: refused.  Authenticated but no offer:
+     * still refused. */
+    install_policy(&session, &policy, CP_BOOT_CONSENT_GRANTED, false);
+    install_auth(&session, &auth);
+    result = feed(&session, k_1d00, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_IDENTIFICATION_SENT);
+    result = feed(&session, k_1d02, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_IDENTIFIED);
+    result = cp_bootstrap_hold_offer(&session, generation, now);
+    CHECK_EQ(result.event, CP_BOOT_EV_START_REFUSED);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    result = feed(&session, k_aa00, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_AUTH_CERT_SENT);
+    result = feed(&session, k_aa02, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_AUTH_RESPONSE_SENT);
+    result = feed(&session, k_aa05, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_AUTHENTICATED);
+    now += 10u;
+    result = cp_bootstrap_hold_offer(&session, cp_bootstrap_generation(&session),
+                                     now);
+    CHECK_EQ(result.event, CP_BOOT_EV_START_REFUSED);
+    CHECK(!cp_bootstrap_offer_held(&session));
+
+    /* Create the bounded offer. */
+    set_ap_ready(&session, now, out, sizeof(out));
+    result = feed(&session, k_4300_wireless, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_START_SENT);
+    CHECK_EQ(result.state, CP_BOOT_STATE_AWAITING_RECEIVER);
+    generation = cp_bootstrap_generation(&session);
+
+    /* A duplicate wire message never creates the hold. */
+    result = feed(&session, k_4300_wireless, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_START_DUPLICATE);
+    CHECK(!cp_bootstrap_offer_held(&session));
+
+    /* Wrong generation is refused without disturbing the offer. */
+    result = cp_bootstrap_hold_offer(&session, generation + 1u, now);
+    CHECK_EQ(result.event, CP_BOOT_EV_START_REFUSED);
+    CHECK_EQ(result.error, CP_BOOT_ERR_ORDER);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(session.offer_active);
+
+    /* A matching hold retires only the deadline; the offer and its bounded
+     * policy checks remain in place. */
+    result = cp_bootstrap_hold_offer(&session, generation, now);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    CHECK_EQ(result.error, CP_BOOT_OK);
+    CHECK(cp_bootstrap_offer_held(&session));
+    now += 100000u;
+    result = cp_bootstrap_tick(&session, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    CHECK_EQ(result.out_len, 0u);
+    CHECK(cp_bootstrap_offer_held(&session));
+    CHECK(session.offer_active);
+    CHECK_EQ(cp_bootstrap_state(&session), CP_BOOT_STATE_AWAITING_RECEIVER);
+    CHECK(!cp_bootstrap_projection_active(&session));
+
+    /* A new wired id while held must reach the USB callback; policy that is
+     * active only for the new id tears the offer down immediately. */
+    policy.usb_true_id = "usb-2";
+    result = feed(&session, k_4300_both_usb2, now + 1u, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_USB_ACTIVE);
+    CHECK_EQ(result.error, CP_BOOT_ERR_POLICY);
+    CHECK_EQ(result.out_len, 0u);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(!session.offer_active);
+    CHECK(session.have_phone_usb_id);
+    CHECK(strcmp(session.phone_usb_id, "usb-2") == 0);
+    CHECK(!cp_bootstrap_projection_active(&session));
+    policy.usb_true_id = NULL;
+    now += 10u;
+
+    /* USB becoming active while held is noticed on the bounded tick. */
+    result = feed(&session, k_4300_wireless, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_START_SENT);
+    generation = cp_bootstrap_generation(&session);
+    result = cp_bootstrap_hold_offer(&session, generation, now);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    CHECK(cp_bootstrap_offer_held(&session));
+    policy.usb_active = true;
+    result = cp_bootstrap_tick(&session, now + 1u, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_USB_ACTIVE);
+    CHECK_EQ(result.error, CP_BOOT_ERR_POLICY);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(!session.offer_active);
+    policy.usb_active = false;
+    now += 10u;
+
+    /* Consent denial while held invalidates immediately on a tick. */
+    result = feed(&session, k_4300_wireless, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_START_SENT);
+    generation = cp_bootstrap_generation(&session);
+    result = cp_bootstrap_hold_offer(&session, generation, now);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    policy.consent = CP_BOOT_CONSENT_DENIED;
+    result = cp_bootstrap_tick(&session, now + 1u, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_CONSENT_DENIED);
+    CHECK_EQ(result.error, CP_BOOT_ERR_POLICY);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(!session.offer_active);
+    policy.consent = CP_BOOT_CONSENT_GRANTED;
+    now += 10u;
+
+    /* Wireless withdrawal clears both the offer and the hold. */
+    result = feed(&session, k_4300_wireless, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_START_SENT);
+    generation = cp_bootstrap_generation(&session);
+    result = cp_bootstrap_hold_offer(&session, generation, now);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    result = feed(&session, k_4300_false, now + 1u, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_AVAILABILITY_FALSE);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(!session.offer_active);
+    now += 10u;
+
+    /* Cancel clears the hold and the offer. */
+    result = feed(&session, k_4300_wireless, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_START_SENT);
+    generation = cp_bootstrap_generation(&session);
+    result = cp_bootstrap_hold_offer(&session, generation, now);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    result = cp_bootstrap_cancel(&session, now + 1u);
+    CHECK_EQ(result.event, CP_BOOT_EV_CANCELLED);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(!session.offer_active);
+    now += 10u;
+
+    /* AP-scope invalidation drops the hold but leaves the offer to its normal
+     * bounded deadline, which still expires it. */
+    result = feed(&session, k_4300_wireless, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_START_SENT);
+    generation = cp_bootstrap_generation(&session);
+    result = cp_bootstrap_hold_offer(&session, generation, now);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    memset(&readback, 0, sizeof(readback));
+    readback.on_air = false;
+    generation = cp_bootstrap_generation(&session);
+    result = cp_bootstrap_set_ap_readback(&session, &readback, now + 1u, out,
+                                          sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_AP_NOT_READY);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(session.offer_active);
+    CHECK_EQ(cp_bootstrap_generation(&session), generation);
+    set_ap_ready(&session, now + 2u, out, sizeof(out));
+    result = cp_bootstrap_tick(&session, session.offer_deadline_ms, out,
+                               sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_START_TIMEOUT);
+    CHECK(!session.offer_active);
+    now = session.last_now_ms;
+
+    /* Transport reset clears the hold even while it is valid. */
+    result = feed(&session, k_4300_wireless, now + 10u, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_START_SENT);
+    generation = cp_bootstrap_generation(&session);
+    result = cp_bootstrap_hold_offer(&session, generation, now + 10u);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    result = cp_bootstrap_transport_reset(&session, now + 11u);
+    CHECK_EQ(result.event, CP_BOOT_EV_TRANSPORT_RESET);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(!session.offer_active);
+    CHECK_EQ(cp_bootstrap_state(&session), CP_BOOT_STATE_DISCONNECTED);
+    CHECK(!cp_bootstrap_projection_active(&session));
+    puts("PASS: offer hold trust, expiry and invalidation lifecycles");
+}
+
+static void test_hold_ap_scope_and_release(void)
+{
+    cp_bootstrap session;
+    cp_boot_config cfg = base_config();
+    policy_fixture policy;
+    auth_fixture auth;
+    uint8_t out[512];
+    cp_boot_result result;
+    uint64_t now = 800u;
+    uint64_t generation;
+    uint64_t deadline;
+
+    memset(&auth, 0, sizeof(auth));
+    CHECK_EQ(cp_bootstrap_init(&session, &cfg), CP_BOOT_OK);
+    identify_and_authenticate(&session, &policy, &auth, &now, out, sizeof(out));
+    set_ap_ready(&session, now, out, sizeof(out));
+    result = feed(&session, k_4300_wireless, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_START_SENT);
+    generation = cp_bootstrap_generation(&session);
+    deadline = session.offer_deadline_ms;
+    result = cp_bootstrap_hold_offer(&session, generation, now);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+
+    /* Direct release succeeds and is idempotent; the offer, deadline and
+     * generation are untouched. */
+    result = cp_bootstrap_release_offer_hold(&session, now + 1u);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    CHECK_EQ(result.error, CP_BOOT_OK);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(session.offer_active);
+    CHECK_EQ(session.offer_deadline_ms, deadline);
+    CHECK_EQ(cp_bootstrap_generation(&session), generation);
+    result = cp_bootstrap_release_offer_hold(&session, now + 2u);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    CHECK_EQ(result.error, CP_BOOT_OK);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(session.offer_active);
+    CHECK_EQ(session.offer_deadline_ms, deadline);
+    CHECK_EQ(cp_bootstrap_generation(&session), generation);
+
+    /* Only a fresh caller attestation re-holds the same bounded offer. */
+    result = cp_bootstrap_hold_offer(&session, generation, now + 3u);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    CHECK(cp_bootstrap_offer_held(&session));
+
+    /* A byte-identical on-air readback is not an AP scope change. */
+    set_ap_ready(&session, now + 4u, out, sizeof(out));
+    CHECK(cp_bootstrap_offer_held(&session));
+    CHECK(session.offer_active);
+    CHECK_EQ(session.offer_deadline_ms, deadline);
+    CHECK_EQ(cp_bootstrap_generation(&session), generation);
+
+    /* SSID change. */
+    result = set_ap_readback_fields(&session, now + 5u, out, sizeof(out),
+                                    "SCOURGE-AP-2", 36u, CP_WIRE_WIFI_WPA2,
+                                    NULL);
+    CHECK_EQ(result.event, CP_BOOT_EV_AP_READY);
+    CHECK_EQ(result.out_len, 0u);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(session.offer_active);
+    CHECK_EQ(session.offer_deadline_ms, deadline);
+    CHECK_EQ(cp_bootstrap_generation(&session), generation);
+
+    /* Channel change. */
+    result = cp_bootstrap_hold_offer(&session, generation, now + 6u);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    result = set_ap_readback_fields(&session, now + 7u, out, sizeof(out),
+                                    "SCOURGE-AP-2", 40u, CP_WIRE_WIFI_WPA2,
+                                    NULL);
+    CHECK_EQ(result.event, CP_BOOT_EV_AP_READY);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(session.offer_active);
+    CHECK_EQ(session.offer_deadline_ms, deadline);
+    CHECK_EQ(cp_bootstrap_generation(&session), generation);
+
+    /* Security change. */
+    result = cp_bootstrap_hold_offer(&session, generation, now + 8u);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    result = set_ap_readback_fields(&session, now + 9u, out, sizeof(out),
+                                    "SCOURGE-AP-2", 40u, CP_WIRE_WIFI_WPA3,
+                                    NULL);
+    CHECK_EQ(result.event, CP_BOOT_EV_AP_READY);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(session.offer_active);
+    CHECK_EQ(session.offer_deadline_ms, deadline);
+    CHECK_EQ(cp_bootstrap_generation(&session), generation);
+
+    /* Link-local change. */
+    result = cp_bootstrap_hold_offer(&session, generation, now + 10u);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    result = set_ap_readback_fields(&session, now + 11u, out, sizeof(out),
+                                    "SCOURGE-AP-2", 40u, CP_WIRE_WIFI_WPA3,
+                                    "fe80::2");
+    CHECK_EQ(result.event, CP_BOOT_EV_AP_READY);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(session.offer_active);
+    CHECK_EQ(session.offer_deadline_ms, deadline);
+    CHECK_EQ(cp_bootstrap_generation(&session), generation);
+
+    /* Re-publishing the new scope does not silently re-hold it. */
+    result = set_ap_readback_fields(&session, now + 12u, out, sizeof(out),
+                                    "SCOURGE-AP-2", 40u, CP_WIRE_WIFI_WPA3,
+                                    "fe80::2");
+    CHECK_EQ(result.event, CP_BOOT_EV_AP_READY);
+    CHECK(!cp_bootstrap_offer_held(&session));
+
+    /* The offer is still bounded by its original deadline and never starts. */
+    result = cp_bootstrap_tick(&session, deadline, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_START_TIMEOUT);
+    CHECK_EQ(result.error, CP_BOOT_ERR_TIMEOUT);
+    CHECK_EQ(result.out_len, 0u);
+    CHECK(!session.offer_active);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK_EQ(cp_bootstrap_generation(&session), generation + 1u);
+
+    /* A stale generation cannot re-create a hold. */
+    result = cp_bootstrap_hold_offer(&session, generation, deadline);
+    CHECK_EQ(result.event, CP_BOOT_EV_START_REFUSED);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    puts("PASS: hold release and changed AP scope stay bounded");
+}
+
+static void test_hold_failure_invalidation(void)
+{
+    cp_bootstrap session;
+    cp_boot_config cfg = base_config();
+    policy_fixture policy;
+    auth_fixture auth;
+    uint8_t out[512];
+    cp_boot_result result;
+    uint64_t now = 900u;
+    uint64_t generation;
+
+    memset(&auth, 0, sizeof(auth));
+
+    /* Authentication failure after a hold clears both offer and hold. */
+    CHECK_EQ(cp_bootstrap_init(&session, &cfg), CP_BOOT_OK);
+    identify_and_authenticate(&session, &policy, &auth, &now, out, sizeof(out));
+    set_ap_ready(&session, now, out, sizeof(out));
+    result = feed(&session, k_4300_wireless, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_START_SENT);
+    generation = cp_bootstrap_generation(&session);
+    result = cp_bootstrap_hold_offer(&session, generation, now);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    result = feed(&session, k_aa04, now + 1u, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_AUTH_FAILED);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(!session.offer_active);
+    CHECK_EQ(cp_bootstrap_state(&session), CP_BOOT_STATE_FAILED);
+
+    /* Wireless withdrawal (4E0D) clears both. */
+    now = 1000u;
+    CHECK_EQ(cp_bootstrap_init(&session, &cfg), CP_BOOT_OK);
+    identify_and_authenticate(&session, &policy, &auth, &now, out, sizeof(out));
+    set_ap_ready(&session, now, out, sizeof(out));
+    result = feed(&session, k_4300_wireless, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_START_SENT);
+    generation = cp_bootstrap_generation(&session);
+    result = cp_bootstrap_hold_offer(&session, generation, now);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    result = feed(&session, k_4e0d_unavailable, now + 1u, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_WIRELESS_STATUS);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(!session.offer_active);
+
+    /* A changed transport identity (4E0E) is a new identity scope. */
+    now = 1100u;
+    CHECK_EQ(cp_bootstrap_init(&session, &cfg), CP_BOOT_OK);
+    identify_and_authenticate(&session, &policy, &auth, &now, out, sizeof(out));
+    set_ap_ready(&session, now, out, sizeof(out));
+    result = feed(&session, k_4300_wireless, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_START_SENT);
+    generation = cp_bootstrap_generation(&session);
+    result = cp_bootstrap_hold_offer(&session, generation, now);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    result = feed(&session, k_4e0e_usb2, now + 1u, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_PHONE_IDENTITY);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(!session.offer_active);
+    CHECK(session.have_phone_usb_id);
+    CHECK(strcmp(session.phone_usb_id, "usb-2") == 0);
+
+    /* A late identification rejection cannot occur while a hold is valid:
+     * the hold requires an identified, authenticated AWAITING_RECEIVER
+     * session.  Such a frame is ignored and must preserve the hold rather
+     * than fabricate a failure.  fail_identification() itself still clears
+     * any offer/hold through clear_offer(). */
+    now = 1200u;
+    CHECK_EQ(cp_bootstrap_init(&session, &cfg), CP_BOOT_OK);
+    identify_and_authenticate(&session, &policy, &auth, &now, out, sizeof(out));
+    set_ap_ready(&session, now, out, sizeof(out));
+    result = feed(&session, k_4300_wireless, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_START_SENT);
+    generation = cp_bootstrap_generation(&session);
+    result = cp_bootstrap_hold_offer(&session, generation, now);
+    CHECK_EQ(result.event, CP_BOOT_EV_NONE);
+    result = feed(&session, k_1d03_bt, now + 1u, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_IGNORED);
+    CHECK(cp_bootstrap_offer_held(&session));
+    CHECK(session.offer_active);
+    CHECK_EQ(cp_bootstrap_generation(&session), generation);
+    CHECK_EQ(cp_bootstrap_cancel(&session, now + 2u).event,
+             CP_BOOT_EV_CANCELLED);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    CHECK(!session.offer_active);
+
+    /* Identification failure is terminal before any offer/hold can exist.  It
+     * still exercises the same clear_offer() invalidation, and a later hold
+     * attempt must be refused. */
+    now = 1250u;
+    CHECK_EQ(cp_bootstrap_init(&session, &cfg), CP_BOOT_OK);
+    install_policy(&session, &policy, CP_BOOT_CONSENT_GRANTED, false);
+    result = feed(&session, k_1d00, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_IDENTIFICATION_SENT);
+    result = feed(&session, k_1d03_team, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_IDENTIFICATION_RETRY);
+    result = feed(&session, k_1d03_team, now, out, sizeof(out));
+    CHECK_EQ(result.event, CP_BOOT_EV_IDENTIFICATION_REJECTED);
+    CHECK_EQ(cp_bootstrap_state(&session), CP_BOOT_STATE_FAILED);
+    generation = cp_bootstrap_generation(&session);
+    result = cp_bootstrap_hold_offer(&session, generation, now);
+    CHECK_EQ(result.event, CP_BOOT_EV_START_REFUSED);
+    CHECK(!cp_bootstrap_offer_held(&session));
+    puts("PASS: hold clears through failure and withdrawal lifecycles");
+}
+
 static void test_identity_and_policy(void)
 {
     cp_bootstrap session;
@@ -2906,6 +3385,9 @@ int main(int argc, char **argv)
     test_wifi_config_flow();
     test_start_gating_and_ap();
     test_offer_deadline_and_policy();
+    test_offer_hold();
+    test_hold_ap_scope_and_release();
+    test_hold_failure_invalidation();
     test_identity_and_policy();
     test_cancel_reset_and_stale();
     test_malformed_tlv_corpus();

@@ -133,11 +133,11 @@ fi
 )
 BUNDLE_LAYOUT=combo
 [ "$STANDALONE" = 0 ] || BUNDLE_LAYOUT=standalone
-# Only a bundle that installs or removes a radio owner may stop WiFi.  A
-# battery,tweaks-only bundle must leave a working WiFi app alone.
+# Only a bundle that installs or removes the WiFi radio owner may stop WiFi.
+# A wifi1b-only standalone bundle must leave a working WiFi app alone.
 STOPS_WIFI=0
 case " $SELECTED " in
-    *" wifi "*|*" wifi1b "*|*" migrate "*) STOPS_WIFI=1 ;;
+    *" wifi "*|*" migrate "*) STOPS_WIFI=1 ;;
 esac
 
 stage_pkg() {
@@ -250,6 +250,69 @@ SHA256SUM_BIN=sha256sum
 command -v "\$SHA256SUM_BIN" >/dev/null 2>&1 || SHA256SUM_BIN=sha256sum.coreutils
 RUNTIME_CLEANUP_SHA256="\$SHA256SUM_BIN"
 
+# Minimal inline path guard: the report path itself must never be a symlink,
+# even for the helper-missing failure below (the full helper is not loaded yet).
+_m_safe_path() {
+    _mp=\$1
+    case "\$_mp" in /*) : ;; *) return 1 ;; esac
+    case "\$_mp" in *'/../'*|*/..|*'/./'*|*/.|*'//'*) return 1 ;; esac
+    while [ -n "\$_mp" ] && [ "\$_mp" != "/" ]; do
+        [ ! -L "\$_mp" ] || return 1
+        _mp=\$(dirname "\$_mp")
+    done
+    _mp=\$(dirname "\$1")
+    while [ -n "\$_mp" ] && [ "\$_mp" != "/" ]; do
+        [ ! -e "\$_mp" ] || [ -d "\$_mp" ] || return 1
+        _mp=\$(dirname "\$_mp")
+    done
+    return 0
+}
+_m_dir_path() {
+    _m_safe_path "\$1" || return 1
+    [ ! -e "\$1" ] || [ -d "\$1" ] || return 1
+    return 0
+}
+_m_file_path() {
+    _m_safe_path "\$1" || return 1
+    if [ -e "\$1" ]; then
+        [ -f "\$1" ] || return 1
+        _mf_links=\$(stat -c %h "\$1" 2>/dev/null || true)
+        case "\$_mf_links" in
+            ''|*[!0-9]*) return 1 ;;
+            1) : ;;
+            *) return 1 ;;
+        esac
+    fi
+    return 0
+}
+_m_usb_ok=1
+{ _m_file_path "\$USB_DIR/run_stuff_result.txt"; } || _m_usb_ok=0
+for _mp in "\$USB_DIR" "\$RW_DIR" "\$RW_DIR/bin" "\$RUN_DIR" \
+           "\$RUN_DIR/wifi1b" "\$RUN_DIR/wifi" \
+           "\${COMBO_LEDGER_DIR:-/rw_data/combo/installed}"; do
+    _m_dir_path "\$_mp" || {
+        if [ "\$_m_usb_ok" = 1 ]; then
+            printf 'SCOURGE_COMBO\nstatus=FAIL\nerror=unsafe_symlink_destination\n' \
+                > "\$USB_DIR/run_stuff_result.txt" 2>/dev/null || true
+        else
+            printf 'SCOURGE_COMBO\nstatus=FAIL\nerror=unsafe_symlink_destination\n' >&2
+        fi
+        exit 1; }
+done
+for _mp in "\$USB_DIR/run_stuff_result.txt" "\$RW_DIR/combo.log" \
+           "\$RW_DIR/result.txt" "\$RW_DIR/stages.log" \
+           "\$RW_DIR/bin/dbus-send" \
+           "\$RUN_DIR/wifi1b/active" "\$RUN_DIR/wifi/active"; do
+    _m_file_path "\$_mp" || {
+        if [ "\$_m_usb_ok" = 1 ]; then
+            printf 'SCOURGE_COMBO\nstatus=FAIL\nerror=unsafe_symlink_destination\n' \
+                > "\$USB_DIR/run_stuff_result.txt" 2>/dev/null || true
+        else
+            printf 'SCOURGE_COMBO\nstatus=FAIL\nerror=unsafe_symlink_destination\n' >&2
+        fi
+        exit 1; }
+done
+
 # FIRST: verify and load the cleanup helper without writing anything, then
 # reclaim bounded runtime log space before any other runtime write.  A full
 # /rw_data makes every later write fail.  Stale temps are handled later, only
@@ -267,8 +330,67 @@ if [ -z "\$_cleanup_md5" ] || [ "\$_cleanup_md5" != "\$RUNTIME_CLEANUP_MD5" ]; t
     exit 1
 fi
 . "\$CLEANUP_LIB"
+
+# Refuse symlink ancestors for the master's own RW/output paths before the
+# first runtime write or report.
+_usb_report_ok=1
+{ runtime_cleanup_safe_path "\$USB_DIR" &&
+  runtime_cleanup_safe_path "\$USB_DIR/run_stuff_result.txt"; } || _usb_report_ok=0
+for _dst in "\$USB_DIR" "\$RW_DIR" "\$RW_DIR/bin" "\$RUN_DIR" \
+            "\$RUN_DIR/wifi1b" "\$RUN_DIR/wifi" \
+            "\${COMBO_LEDGER_DIR:-/rw_data/combo/installed}"; do
+    runtime_cleanup_safe_dir_path "\$_dst" || {
+        if [ "\$_usb_report_ok" = 1 ]; then
+            printf 'SCOURGE_COMBO\nstatus=FAIL\nerror=unsafe_symlink_destination\n' \
+                > "\$USB_DIR/run_stuff_result.txt" 2>/dev/null || true
+        else
+            printf 'SCOURGE_COMBO\nstatus=FAIL\nerror=unsafe_symlink_destination\n' >&2
+        fi
+        exit 1; }
+done
+for _dst in "\$USB_DIR/run_stuff_result.txt" "\$RW_DIR/combo.log" \
+            "\$RW_DIR/result.txt" "\$RW_DIR/stages.log" \
+            "\$RW_DIR/bin/dbus-send" \
+            "\$RUN_DIR/wifi1b/active" "\$RUN_DIR/wifi/active"; do
+    runtime_cleanup_safe_file_path "\$_dst" || {
+        if [ "\$_usb_report_ok" = 1 ]; then
+            printf 'SCOURGE_COMBO\nstatus=FAIL\nerror=unsafe_symlink_destination\n' \
+                > "\$USB_DIR/run_stuff_result.txt" 2>/dev/null || true
+        else
+            printf 'SCOURGE_COMBO\nstatus=FAIL\nerror=unsafe_symlink_destination\n' >&2
+        fi
+        exit 1; }
+done
+for _stage in \$STAGE_ORDER; do
+    for _name in "\${_stage}_result.txt" "restore_\${_stage}_result.txt" \
+                 "\${_stage}_install.log" "\${_stage}_restore.log" \
+                 "\${_stage}_status.json" \
+                 "runtime_snapshot_\${_stage}_status.json"; do
+        runtime_cleanup_safe_file_path "\$USB_DIR/\$_name" || {
+            if [ "\$_usb_report_ok" = 1 ]; then
+                printf 'SCOURGE_COMBO\nstatus=FAIL\nerror=unsafe_symlink_destination\n' \
+                    > "\$USB_DIR/run_stuff_result.txt" 2>/dev/null || true
+            fi
+            exit 1; }
+    done
+    runtime_cleanup_safe_file_path \
+        "\${COMBO_LEDGER_DIR:-/rw_data/combo/installed}/\${_stage}.digest" || {
+        if [ "\$_usb_report_ok" = 1 ]; then
+            printf 'SCOURGE_COMBO\nstatus=FAIL\nerror=unsafe_symlink_destination\n' \
+                > "\$USB_DIR/run_stuff_result.txt" 2>/dev/null || true
+        fi
+        exit 1; }
+done
+runtime_cleanup_safe_file_path \
+    "\${COMBO_LEDGER_DIR:-/rw_data/combo/installed}/final-qml.digest" || {
+    if [ "\$_usb_report_ok" = 1 ]; then
+        printf 'SCOURGE_COMBO\nstatus=FAIL\nerror=unsafe_symlink_destination\n' \
+            > "\$USB_DIR/run_stuff_result.txt" 2>/dev/null || true
+    fi
+    exit 1; }
+
 RUNTIME_CLEANUP_LOG=""
-cleanup_bounded_logs "\$RUNTIME_ROOT" || true
+[ "\$MODE" = restore ] || cleanup_bounded_logs "\$RUNTIME_ROOT" || true
 
 mkdir -p "\$RW_DIR" 2>/dev/null || RW_DIR="\$USB_DIR"
 LOG="\$RW_DIR/combo.log"
@@ -544,33 +666,61 @@ fi
 echo 'preflight=status=OK' >> "\$STAGES_LOG"
 
 # Stop owned radios ourselves; never ask the owner to turn WiFi off manually.
-# Only units carrying our SPDX header and exact owned executable paths are
-# touched, so a foreign or owner-modified service is left alone.
+# Ownership requires byte-identical staged units.  SPDX text alone is not
+# proof: an owner/foreign edit that keeps the header must not be stopped.
 unit_owned(){
-    [ -f "\$1" ] && [ ! -L "\$1" ] && [ -r "\$1" ] &&
-        grep -q 'SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors' "\$1" 2>/dev/null
+    _uo_file=\$1
+    _uo_stage=\$2
+    _uo_name=\${_uo_file##*/}
+    _uo_expected="\$COMBO/\$_uo_stage/payload/systemd/\$_uo_name"
+    [ -f "\$_uo_file" ] && [ ! -L "\$_uo_file" ] && [ -r "\$_uo_file" ] || return 1
+    [ -f "\$_uo_expected" ] && [ ! -L "\$_uo_expected" ] && [ -r "\$_uo_expected" ] || return 1
+    cmp -s "\$_uo_file" "\$_uo_expected"
 }
 if [ "\$MODE" != restore ]; then
     _stop_wifi=\$STOPS_WIFI
-    if command -v systemctl >/dev/null 2>&1; then
-        unit_owned "\$WIFI1B_SERVICE" && \
-            systemctl stop wifi1b-daemon.service >> "\$LOG" 2>&1 || true
-        [ "\$_stop_wifi" = 0 ] || {
-            unit_owned "\$WIFI_SERVICE" && \
-                systemctl stop wifi-daemon.service >> "\$LOG" 2>&1 || true
-        }
+    _w1b_unit=0
+    unit_owned "\$WIFI1B_SERVICE" wifi1b && _w1b_unit=1
+    _wifi_unit=0
+    if [ "\$_stop_wifi" = 1 ]; then
+        unit_owned "\$WIFI_SERVICE" wifi && _wifi_unit=1
     fi
-    runtime_cleanup_kill_owned "\$RUNTIME_ROOT" wifi1b wifi1b_daemon || true
-    [ "\$_stop_wifi" = 0 ] || \
-        runtime_cleanup_kill_owned "\$RUNTIME_ROOT" wifi wifi_daemon || true
+    if command -v systemctl >/dev/null 2>&1; then
+        [ "\$_w1b_unit" = 0 ] || \
+            systemctl stop wifi1b-daemon.service >> "\$LOG" 2>&1 || true
+        [ "\$_wifi_unit" = 0 ] || \
+            systemctl stop wifi-daemon.service >> "\$LOG" 2>&1 || true
+    fi
+    if [ "\$_w1b_unit" = 1 ] ||
+       { [ ! -e "\$WIFI1B_SERVICE" ] && [ ! -L "\$WIFI1B_SERVICE" ]; }; then
+        runtime_cleanup_kill_owned "\$RUNTIME_ROOT" wifi1b wifi1b_daemon || true
+    else
+        log "preflight: Wifi1b unit is not byte-identical to the staged unit; not stopping it"
+    fi
+    if [ "\$_stop_wifi" = 1 ]; then
+        if [ "\$_wifi_unit" = 1 ] ||
+           { [ ! -e "\$WIFI_SERVICE" ] && [ ! -L "\$WIFI_SERVICE" ]; }; then
+            runtime_cleanup_kill_owned "\$RUNTIME_ROOT" wifi wifi_daemon || true
+        else
+            log "preflight: WiFi unit is not byte-identical to the staged unit; not stopping it"
+        fi
+    fi
     rm -f "\$RUN_DIR/wifi1b/active" 2>/dev/null || true
     [ "\$_stop_wifi" = 0 ] || rm -f "\$RUN_DIR/wifi/active" 2>/dev/null || true
-    if ! runtime_cleanup_process_alive "\$RUNTIME_ROOT" wifi1b wifi1b_daemon &&
-       { [ "\$_stop_wifi" = 0 ] || ! runtime_cleanup_process_alive "\$RUNTIME_ROOT" wifi wifi_daemon; }; then
+    runtime_cleanup_process_alive "\$RUNTIME_ROOT" wifi1b wifi1b_daemon
+    _radio_w1b=\$?
+    if [ "\$_stop_wifi" = 1 ]; then
+        runtime_cleanup_process_alive "\$RUNTIME_ROOT" wifi wifi_daemon
+        _radio_wifi=\$?
+    else
+        _radio_wifi=1
+    fi
+    if [ "\$_radio_w1b" = 1 ] && [ "\$_radio_wifi" = 1 ]; then
         RUNTIME_CLEANUP_RADIOS_STOPPED=1
+        RUNTIME_CLEANUP_SCAN_WIFI=\$_stop_wifi
         echo 'preflight=status=OK radio_stopped=1' >> "\$STAGES_LOG"
     else
-        log "preflight: an owned radio is still running; stale temp cleanup deferred"
+        log "preflight: an owned radio is not verifiably stopped; stale temp cleanup deferred"
     fi
     cleanup_stale_temps "\$RUNTIME_ROOT" || true
     if [ "\$MODE" = all ]; then
@@ -610,13 +760,57 @@ if [ -n "$FAILED" ]; then
     exit 1
 fi
 if [ "$MODE" = restore ]; then
-    # File state is back to pre-install: the install ledger must not survive.
-    rm -rf "$LEDGER" 2>/dev/null || true
+    # Remove only known product ledger digests after validating the whole
+    # ledger.  Any unknown file/subdirectory/symlink/special entry preserves
+    # every unknown entry and FAILs; never recursively delete the directory.
+    _ledger_bad=""
+    if [ -L "$LEDGER" ] || { [ -e "$LEDGER" ] && [ ! -d "$LEDGER" ]; }; then
+        _ledger_bad=1
+    elif [ -d "$LEDGER" ]; then
+        [ -r "$LEDGER" ] && [ -w "$LEDGER" ] && [ -x "$LEDGER" ] || _ledger_bad=1
+        for _le in "$LEDGER"/* "$LEDGER"/.[!.]* "$LEDGER"/..?*; do
+            [ -e "$_le" ] || [ -L "$_le" ] || continue
+            _lname=$(basename "$_le")
+            case "$_lname" in
+                final-qml.digest) : ;;
+                *.digest)
+                    _lstage=${_lname%.digest}
+                    case " $STAGE_ORDER " in
+                        *" $_lstage "*) : ;;
+                        *) _ledger_bad=1; continue ;;
+                    esac ;;
+                *) _ledger_bad=1; continue ;;
+            esac
+            [ -f "$_le" ] && [ ! -L "$_le" ] && [ -r "$_le" ] && [ -w "$_le" ] || {
+                _ledger_bad=1; continue; }
+            _lval=$(cat "$_le" 2>/dev/null) || { _ledger_bad=1; continue; }
+            case "$_lval" in
+                ''|*[!0-9a-f]*) _ledger_bad=1 ;;
+                *) [ "${#_lval}" -eq 32 ] || _ledger_bad=1 ;;
+            esac
+        done
+    fi
+    if [ -n "$_ledger_bad" ]; then
+        FAILED="ledger_unknown_state"
+    else
+        for _stage in $STAGE_ORDER; do
+            rm -f "$LEDGER/$_stage.digest" 2>/dev/null || FAILED="ledger_cleanup_failed"
+        done
+        rm -f "$LEDGER/final-qml.digest" 2>/dev/null || FAILED="ledger_cleanup_failed"
+        if [ -d "$LEDGER" ]; then
+            rmdir "$LEDGER" 2>/dev/null || FAILED="ledger_cleanup_failed"
+        fi
+    fi
 elif [ "$MODE" = all ]; then
     # Only a full-stack run defines the shared QML the skip check compares.
     mkdir -p "$LEDGER" 2>/dev/null || true
     qml_now=$(qml_digest 2>/dev/null) || qml_now=""
     [ -z "$qml_now" ] || printf '%s\n' "$qml_now" > "$LEDGER/final-qml.digest" 2>/dev/null || true
+fi
+if [ -n "$FAILED" ]; then
+    result "FAIL"
+    beep_n 3
+    exit 1
 fi
 result "OK"
 # Five beeps: all requested stages completed successfully.  A short pause
@@ -661,11 +855,12 @@ bind-all. This is a deliberate product default account and is NOT
 car-validated. Owner keys already present in /rw_data/wifi1b are preserved
 unless replaced here.
 
-BlueLink/Pi networking:
+V24 BlueLink/Pi networking:
 - While rmnet_usb0/rmnet_usb1 has an IPv4 address, Wifi1b installs no WiFi
   default route. WiFi remains an SSH-only link; the modem default and the
   vendor per-server host routes stay authoritative.
-- A stale V21 `route replace default via wlan0` is removed on client start.
+- Unverified legacy wlan0 defaults/records are preserved and route changes
+  refused rather than treating a familiar format as ownership proof.
   A 30 s audit restores/removes the bounded proto-66 fallback as modem data
   appears/disappears. Routes on other interfaces are never touched.
 - The Orange Pi ECM link is usb0 at 10.55.0.2/24 with no default route. SSH

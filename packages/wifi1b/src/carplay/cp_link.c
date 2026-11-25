@@ -125,6 +125,9 @@ static void clear_deadlines(cp_link_t *link)
     link->delayed_ack_deadline_ms = 0;
     link->delayed_ack_armed = false;
     link->ack_due = false;
+    link->eak_due = false;
+    link->eak_more = false;
+    link->eak_last_count = 0u;
 }
 
 static void emit_event(cp_link_t *link, const cp_link_event_t *event)
@@ -329,6 +332,29 @@ static bool output_tail(cp_link_t *link, cp_link_out_slot_t **slot)
 }
 
 /*
+ * Remove one completely unconsumed queued frame. Frames behind an unconsumed
+ * frame cannot have been emitted (the queue is FIFO), so compacting them is
+ * safe. Only protocol control frames that are safe to retract use this.
+ */
+static void output_remove_at(cp_link_t *link, unsigned offset)
+{
+    unsigned i;
+
+    if (offset >= link->out_count)
+        return;
+    for (i = offset; i + 1u < link->out_count; i++) {
+        unsigned dst = ((unsigned)link->out_head + i) %
+                       (unsigned)CP_LINK_OUTPUT_FRAMES;
+        unsigned src = ((unsigned)link->out_head + i + 1u) %
+                       (unsigned)CP_LINK_OUTPUT_FRAMES;
+
+        link->out_slots[dst] = link->out_slots[src];
+    }
+    link->out_count--;
+    link->tx_blocked = false;
+}
+
+/*
  * Fold the current cumulative acknowledgement into the newest queued frame
  * when it is an ACK-only frame with no emitted prefix. A partially consumed
  * frame is immutable; callers append a new ACK instead. Returns true when the
@@ -384,19 +410,248 @@ static void send_ack(cp_link_t *link)
         link->stats.ack_sent++;
 }
 
-static void send_eak(cp_link_t *link, const uint8_t *missing, size_t count)
+static bool rx_has_psn(const cp_link_t *link, uint8_t psn)
 {
-    if (count == 0)
-        return;
-    if (count > CP_LINK_MAX_EAK)
-        count = CP_LINK_MAX_EAK;
-    if (!enqueue_control(link, CP_LINK_CONTROL_EAK, missing, count, true)) {
-        terminate_link(link, CP_LINK_RESET_TX_BACKPRESSURE, false);
+    uint8_t i;
+
+    for (i = 0; i < CP_LINK_MAX_REORDER; i++) {
+        if (link->rx_slots[i].used && link->rx_slots[i].psn == psn)
+            return true;
+    }
+    return false;
+}
+
+/*
+ * Recompute the currently known holes from the reorder buffer. The frontier is
+ * the furthest buffered sequence; every unbuffered sequence between the last
+ * contiguous packet and that frontier is missing. Already buffered packets and
+ * holes closed by last_received_psn advancing are never included.
+ */
+static size_t current_missing(const cp_link_t *link, uint8_t *missing,
+                              size_t cap)
+{
+    uint8_t frontier = 0u;
+    bool have_frontier = false;
+    uint8_t i;
+    uint16_t offset;
+    size_t count = 0u;
+
+    if (missing == NULL || cap == 0u)
+        return 0u;
+
+    for (i = 0; i < CP_LINK_MAX_REORDER; i++) {
+        const cp_link_rx_slot_t *slot = &link->rx_slots[i];
+        uint8_t distance;
+
+        if (!slot->used)
+            continue;
+        distance = cp_link_sequence_distance(slot->psn,
+                                             link->last_received_psn);
+        if (distance < 2u || distance >= 128u)
+            continue;
+        if (!have_frontier || distance > frontier) {
+            frontier = distance;
+            have_frontier = true;
+        }
+    }
+    if (!have_frontier)
+        return 0u;
+
+    for (offset = 1u; offset < (uint16_t)frontier && count < cap; offset++) {
+        uint8_t psn = (uint8_t)((unsigned)link->last_received_psn + offset);
+
+        if (!rx_has_psn(link, psn))
+            missing[count++] = psn;
+    }
+    return count;
+}
+
+/*
+ * Largest EAK payload the peer can receive. The wire frame is a 9-byte header
+ * plus the missing list plus one payload checksum byte, so a peer max_len of
+ * 9 or 10 cannot carry any EAK payload. The result is also bounded by this
+ * module's local frame/EAK limits.
+ */
+static size_t eak_payload_capacity(const cp_link_t *link)
+{
+    size_t capacity;
+
+    if (!link->peer_sync_valid ||
+        link->peer_sync.max_len <= CP_LINK_HEADER_LEN + 1u)
+        return 0u;
+    capacity = (size_t)link->peer_sync.max_len - CP_LINK_HEADER_LEN - 1u;
+    if (capacity > (size_t)CP_LINK_MAX_EAK)
+        capacity = (size_t)CP_LINK_MAX_EAK;
+    if (capacity > (size_t)CP_LINK_MAX_PAYLOAD)
+        capacity = (size_t)CP_LINK_MAX_PAYLOAD;
+    return capacity;
+}
+
+/*
+ * Remember the truncated prefix that was just queued/rewritten. The stored
+ * list lets a consumed truncated EAK request only the remaining holes after a
+ * packet changes that prefix, without emitting the same list again merely for
+ * consuming output or ticking.
+ */
+static void eak_set_more(cp_link_t *link, const uint8_t *missing, size_t count,
+                         size_t available)
+{
+    if (count < available) {
+        link->eak_more = true;
+        link->eak_last_count = (uint8_t)count;
+        if (count != 0u)
+            memcpy(link->eak_last_missing, missing, count);
+    } else {
+        link->eak_more = false;
+        link->eak_last_count = 0u;
+    }
+}
+
+static bool eak_matches_last(const cp_link_t *link, const uint8_t *missing,
+                             size_t count)
+{
+    if (!link->eak_more || count != (size_t)link->eak_last_count)
+        return false;
+    return count == 0u ||
+           memcmp(link->eak_last_missing, missing, count) == 0;
+}
+
+/* Return the queue offset of a completely unconsumed EAK, or -1. */
+static int find_unconsumed_eak(const cp_link_t *link)
+{
+    unsigned i;
+
+    for (i = 0; i < link->out_count; i++) {
+        unsigned index = ((unsigned)link->out_head + i) %
+                         (unsigned)CP_LINK_OUTPUT_FRAMES;
+        const cp_link_out_slot_t *slot = &link->out_slots[index];
+
+        if (slot->consumed == 0u && slot->len > CP_LINK_HEADER_LEN &&
+            slot->bytes[4] == CP_LINK_CONTROL_EAK)
+            return (int)i;
+    }
+    return -1;
+}
+
+static bool eak_rewrite(cp_link_t *link, cp_link_out_slot_t *slot,
+                        const uint8_t *missing, size_t count)
+{
+    uint8_t frame[CP_LINK_MAX_FRAME];
+    uint8_t seq = slot->bytes[5];
+    size_t frame_len;
+
+    frame_len = build_frame(frame, sizeof(frame), CP_LINK_CONTROL_EAK,
+                            link->sent_psn, link->last_received_psn, 0u, true,
+                            missing, count);
+    if (frame_len == 0)
+        return false;
+    /* Keep the queued frame's sequence position even if application data was
+     * queued behind it; only the ACK field, payload and checksum change. */
+    frame[5] = seq;
+    frame[8] = checksum8(frame, CP_LINK_HEADER_LEN - 1u);
+    memmove(slot->bytes, frame, frame_len);
+    slot->len = (uint16_t)frame_len;
+    slot->consumed = 0;
+    return true;
+}
+
+/*
+ * Bring the outstanding EAK in line with the current reorder state. No EAK is
+ * created unless one was requested (a gap threshold was crossed) or one is
+ * already queued and unconsumed. A queued EAK is rewritten in place, and an
+ * EAK whose holes all closed is retracted. If output is full the request stays
+ * pending for output_consume()/tick(); it never resets a healthy link.
+ * A partially consumed EAK is immutable and is deliberately not rewritten;
+ * a later threshold crossing may append a fresh unconsumed EAK after it.
+ */
+static void eak_refresh(cp_link_t *link)
+{
+    uint8_t missing[CP_LINK_MAX_EAK];
+    size_t available;
+    size_t capacity;
+    size_t count;
+    int offset;
+
+    if (link->state == CP_LINK_STATE_DEAD) {
+        link->eak_due = false;
         return;
     }
+
+    offset = find_unconsumed_eak(link);
+    if (!link->eak_due && offset < 0 && !link->eak_more)
+        return;
+
+    available = current_missing(link, missing, sizeof(missing));
+    if (available == 0u) {
+        if (offset >= 0) {
+            output_remove_at(link, (unsigned)offset);
+            if (link->ack_due)
+                send_ack(link);
+            update_writable(link);
+        }
+        link->eak_due = false;
+        link->eak_more = false;
+        link->eak_last_count = 0u;
+        return;
+    }
+
+    capacity = eak_payload_capacity(link);
+    if (capacity == 0u) {
+        /* The peer cannot carry even a one-byte EAK payload. Acknowledge the
+         * received sequence with an ordinary 9-byte cumulative ACK instead of
+         * emitting an oversized EAK or resetting the link. */
+        if (offset >= 0)
+            output_remove_at(link, (unsigned)offset);
+        link->eak_due = false;
+        link->eak_more = false;
+        link->eak_last_count = 0u;
+        send_ack(link);
+        update_writable(link);
+        return;
+    }
+
+    count = available;
+    if (count > capacity)
+        count = capacity;
+
+    /* A consumed truncated EAK is followed up only when the current clamped
+     * prefix differs from the one already requested. Consume/tick do not call
+     * this function without eak_due, so no same-list EAK results merely from
+     * draining output. A repeated threshold that would only re-request the
+     * same prefix is also absorbed. */
+    if (offset < 0 && eak_matches_last(link, missing, count)) {
+        link->eak_due = false;
+        return;
+    }
+
+    if (offset >= 0) {
+        unsigned index = ((unsigned)link->out_head + (unsigned)offset) %
+                         (unsigned)CP_LINK_OUTPUT_FRAMES;
+        cp_link_out_slot_t *slot = &link->out_slots[index];
+
+        if (!eak_rewrite(link, slot, missing, count)) {
+            link->eak_due = true;
+            return;
+        }
+        eak_set_more(link, missing, count, available);
+        link->eak_due = false;
+        return;
+    }
+
+    if (!enqueue_control(link, CP_LINK_CONTROL_EAK, missing, count, true)) {
+        link->eak_due = true;
+        return;
+    }
+
+    /* A newly queued EAK uses the current ACK and, as before, closes the
+     * delayed-ACK window. ack_due is left untouched so a deferred standalone
+     * ACK is still delivered; rewriting an existing EAK also leaves all
+     * delayed-ACK bookkeeping alone. */
+    link->eak_due = false;
     link->delayed_ack_armed = false;
     link->delayed_ack_deadline_ms = 0;
     link->cumulative_received = 0;
+    eak_set_more(link, missing, count, available);
     link->stats.eak_sent++;
 }
 
@@ -705,19 +960,9 @@ static void handle_data(cp_link_t *link, const cp_link_header_t *header,
         link->rx_count++;
         link->stats.out_of_order++;
 
-        if ((uint16_t)distance >= (uint16_t)link->peer_sync.max_outgoing) {
-            uint8_t missing[CP_LINK_MAX_EAK];
-            size_t missing_count = 0;
-            uint8_t x = link->last_received_psn;
-
-            while (cp_link_sequence_distance(header->seq, x) > 1u &&
-                   missing_count < CP_LINK_MAX_EAK) {
-                x = (uint8_t)(x + 1u);
-                missing[missing_count++] = x;
-            }
-            if (missing_count != 0)
-                send_eak(link, missing, missing_count);
-        }
+        if ((uint16_t)distance >= (uint16_t)link->peer_sync.max_outgoing)
+            link->eak_due = true;
+        eak_refresh(link);
         return;
     }
 
@@ -743,6 +988,7 @@ static void handle_data(cp_link_t *link, const cp_link_header_t *header,
         deliver_session_data(link, next->session_id, next->data, next->len);
     }
 
+    eak_refresh(link);
     after_data_ack(link, now_ms);
 }
 
@@ -1284,10 +1530,20 @@ static bool retransmit_due(cp_link_t *link, uint64_t now_ms)
             terminate_link(link, CP_LINK_RESET_ACK_TIMEOUT, false);
             return true;
         }
-        if (!output_enqueue(link, slot->frame, slot->len)) {
-            link->tx_blocked = true;
-            update_writable(link);
-            return did;
+        {
+            /* Keep sequence, session and payload; refresh only the cumulative
+             * ACK and header checksum in an enqueued copy. The stored original
+             * frame stays untouched. */
+            uint8_t frame[CP_LINK_MAX_FRAME];
+
+            memcpy(frame, slot->frame, slot->len);
+            frame[6] = link->last_received_psn;
+            frame[8] = checksum8(frame, CP_LINK_HEADER_LEN - 1u);
+            if (!output_enqueue(link, frame, slot->len)) {
+                link->tx_blocked = true;
+                update_writable(link);
+                return did;
+            }
         }
         slot->deadline_ms =
             add_ms(now_ms, link->peer_sync.retransmission_timeout_ms);
@@ -1363,6 +1619,12 @@ int cp_link_tick(cp_link_t *link, uint64_t now_ms)
             did = true;
             if (link->state == CP_LINK_STATE_DEAD)
                 return CP_LINK_OK;
+        }
+
+        if (link->eak_due) {
+            eak_refresh(link);
+            if (!link->eak_due)
+                did = true;
         }
 
         if (link->ack_due) {
@@ -1442,6 +1704,8 @@ int cp_link_output_consume(cp_link_t *link, size_t len)
                       (unsigned)CP_LINK_OUTPUT_FRAMES);
         link->out_count--;
         link->tx_blocked = false;
+        if (link->eak_due)
+            eak_refresh(link);
         if (link->ack_due)
             send_ack(link);
         update_writable(link);

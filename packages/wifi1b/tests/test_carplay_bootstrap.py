@@ -357,9 +357,9 @@ def verify_downlink_fixtures() -> None:
     values = parse_tlvs(parse_frame(rejected)[1])
     assert unique(values, 0) == b"" and unique(values, 17) == b""
 
-    challenge = frame(0xAA02, tlv(0, bytes([1, 2, 3, 4])))
+    challenge = frame(0xAA02, tlv(0, bytes(range(1, 21))))
     values = parse_tlvs(parse_frame(challenge)[1])
-    assert unique(values, 0) == bytes([1, 2, 3, 4])
+    assert unique(values, 0) == bytes(range(1, 21))
 
 
 def run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -428,6 +428,35 @@ def check_sources() -> None:
     assert assignment > succeeded
     assert "cp_bootstrap_projection_active" in bootstrap
     assert "return false;" in bootstrap
+    # The offer hold is a trusted, generation-bound API, never a wire state.
+    # Its only assignment site is cp_bootstrap_hold_offer() itself.
+    assert bootstrap.count("session->offer_held = true;") == 1
+    hold_def = bootstrap.index("cp_boot_result cp_bootstrap_hold_offer(")
+    hold_assign = bootstrap.index("session->offer_held = true;")
+    inner_hold = bootstrap.index("cp_boot_result cp_bootstrap_release_offer_hold(")
+    assert hold_def < hold_assign < inner_hold
+    assert "generation != session->generation" in bootstrap
+    assert "offer_hold_generation" in bootstrap
+    header = (SRC / "cp_bootstrap.h").read_text(encoding="utf-8")
+    assert "cp_bootstrap_hold_offer" in header
+    assert "cp_bootstrap_release_offer_hold" in header
+    assert "cp_bootstrap_offer_held" in header
+    assert "never inferred from the wire" in header
+    # A valid but changed on-air readback is an AP-scope change exactly like an
+    # off-air readback: both clear the hold (and only the hold).
+    assert "ap_scope_changed" in bootstrap
+    scope = bootstrap[bootstrap.index("bool ap_scope_changed"):
+                      bootstrap.index("memcpy(session->readback_ssid")]
+    assert "session->offer_held = false;" in scope
+    assert "session->offer_hold_generation = 0u;" in scope
+    assert "session->offer_deadline_ms" not in scope
+    # Failure paths keep using the central clear_offer() invalidation.
+    ident_fail = bootstrap[bootstrap.index("static void fail_identification"):
+                           bootstrap.index("static void fail_authentication")]
+    auth_fail = bootstrap[bootstrap.index("static void fail_authentication"):
+                          bootstrap.index("static bool id_equal_ci")]
+    assert "clear_offer(session);" in ident_fail
+    assert "clear_offer(session);" in auth_fail
 
 
 def main() -> int:

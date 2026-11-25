@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Build the C3 experimental vbtd-63 SPP RX hook patch.
+"""Build the C3 experimental vbtd-63/vbtd-51 SPP RX hook patch.
 
 TARGET: Hyundai Ioniq 5 Gen5W_L, EU firmware NE_E.EUR.S5W_L.001.001.260128,
-        stock /app/bin/vbtd-63.
+        stock /app/bin/vbtd-63 or vbtd-51.
 
 This is a BUILD-ONLY artifact generator.  It never loads, executes, or
 activates the OEM binary, and it never writes to the input file.  The Wifi1b
 installer does not consume its output.
 
 What it does:
-  1. Requires a user-supplied stock vbtd-63 and a user-chosen ignored output
+  1. Requires a user-supplied stock vbtd target and a user-chosen ignored output
      directory.
-  2. Gates the whole input by VBTD63_STOCK_SHA256 and VBTD63_SIZE from
+  2. Gates the whole input by the target VBTD*_STOCK_SHA256/SIZE from
      config/firmware_locks.env.
   3. Maps the pinned ELF vaddr to a file offset through an executable PT_LOAD
-     and requires that mapping to equal VBTD63_SPP_RX_OFFSET.
+     and requires that mapping to equal VBTD*_SPP_RX_OFFSET.
   4. Gates the exact VBTSppReceivedDataCfm preimage by
-     VBTD63_SPP_RX_STOCK_SHA256 and VBTD63_SPP_RX_LEN.
+     VBTD*_SPP_RX_STOCK_SHA256 and VBTD*_SPP_RX_LEN.
   5. Compiles the freestanding first-party hook, links it PIC at the pinned
      fixed address, and extracts one contiguous .text+.rodata blob.
   6. Rejects relocations, undefined symbols, unexpected allocated sections,
@@ -31,7 +31,7 @@ What it does:
 
 Usage:
   python3 packages/wifi1b/scripts/build_carplay_spp_patch.py \
-      --input /path/to/vbtd-63 --out /tmp/opencode/carplay-spp-patch
+      --input /path/to/vbtd-XX --out /tmp/opencode/carplay-spp-patch --target XX
 """
 from __future__ import annotations
 
@@ -56,10 +56,23 @@ HOOK_HEADER = PKG_ROOT / "src" / "carplay" / "cp_spp_rx.h"
 DEFAULT_LOCKS = REPO_ROOT / "config" / "firmware_locks.env"
 BUILD_ROOT = Path("/tmp/opencode")
 
-# The true extent of vbtd-63 VBTSppReceivedDataCfm, not the Ghidra function
-# boundary and not a cold-cave approximation.
-FUNCTION_LEN = 0x355
-FUNCTION_VADDR = 0x491C90
+# Pinned targets.  FUNCTION_VADDR/FUNCTION_LEN are set per build so the
+# existing hook/link/test helpers remain single-target code.
+# Lock keys are selected per target:
+#   VBTD63_STOCK_SHA256, VBTD63_SIZE, VBTD63_SPP_RX_VADDR,
+#   VBTD63_SPP_RX_OFFSET, VBTD63_SPP_RX_LEN,
+#   VBTD63_SPP_RX_STOCK_SHA256
+#   VBTD51_STOCK_SHA256, VBTD51_SIZE, VBTD51_SPP_RX_VADDR,
+#   VBTD51_SPP_RX_OFFSET, VBTD51_SPP_RX_LEN,
+#   VBTD51_SPP_RX_STOCK_SHA256
+TARGETS = {
+    "63": {"name": "vbtd-63", "vaddr": 0x491C90, "len": 0x355,
+           "prefix": "VBTD63"},
+    "51": {"name": "vbtd-51", "vaddr": 0x490EC0, "len": 0x355,
+           "prefix": "VBTD51"},
+}
+FUNCTION_LEN = TARGETS["63"]["len"]
+FUNCTION_VADDR = TARGETS["63"]["vaddr"]
 
 PT_LOAD = 1
 PF_X = 1
@@ -324,7 +337,7 @@ def _is_ignored_outdir(path: Path) -> bool:
 
 
 def _linker_script() -> str:
-    return """OUTPUT_FORMAT("elf64-x86-64")
+    script = """OUTPUT_FORMAT("elf64-x86-64")
 ENTRY(cp_spp_rx_hook)
 SECTIONS
 {
@@ -354,7 +367,7 @@ SECTIONS
   /DISCARD/ : { *(.note.gnu.property) *(.note.GNU-property) }
 }
 """
-
+    return script.replace("0x491c90", f"{FUNCTION_VADDR:#x}")
 
 def _decode_symbols(data: bytes, sections: list[dict[str, object]]) -> list[dict[str, object]]:
     symtab = None
@@ -714,12 +727,15 @@ def _verify_outside_delta(original: bytes, patched: bytes, offset: int,
         raise BuildError("patched output is identical to input")
 
 
-def _cleanup_owned_files(records: list[tuple[Path, int, int]], label: str) -> list[str]:
+def _cleanup_owned_files(records: list[tuple[Path, int | None, int | None]],
+                         label: str) -> list[str]:
     errors = []
     for path, device, inode in reversed(records):
         try:
             current = path.lstat()
-            if (current.st_dev, current.st_ino) != (device, inode):
+            if device is None or inode is None:
+                errors.append(f"unverified {label} preserved: {path}")
+            elif (current.st_dev, current.st_ino) != (device, inode):
                 errors.append(f"changed {label} preserved: {path}")
             else:
                 path.unlink()
@@ -730,9 +746,51 @@ def _cleanup_owned_files(records: list[tuple[Path, int, int]], label: str) -> li
     return errors
 
 
+def _create_private_temp(prefix: str, directory: Path,
+                         records: list[tuple[Path, int | None, int | None]],
+                         anchors: list[int]) -> tuple[int, Path]:
+    fd, name = tempfile.mkstemp(prefix=prefix, dir=str(directory))
+    # Own the raw descriptor until the outer finally. No fdopen transfer can
+    # fail between descriptor creation and registration.
+    anchors.append(fd)
+    path = Path(name)
+    index = len(records)
+    records.append((path, None, None))
+    try:
+        identity = os.fstat(fd)
+    except OSError:
+        # Abort on the failed gate, but recover identity for cleanup through
+        # the still-open descriptor when /proc is available. Otherwise retain
+        # and explicitly report the unverified path instead of deleting it.
+        try:
+            identity = os.stat(f"/proc/self/fd/{fd}")
+        except OSError:
+            pass
+        else:
+            records[index] = (path, identity.st_dev, identity.st_ino)
+        raise
+    records[index] = (path, identity.st_dev, identity.st_ino)
+    return fd, path
+
+
+def _write_private_temp(fd: int, content: bytes, mode: int) -> None:
+    remaining = memoryview(content)
+    while remaining:
+        try:
+            written = os.write(fd, remaining)
+        except InterruptedError:
+            continue
+        if written <= 0:
+            raise OSError("private output write made no progress")
+        remaining = remaining[written:]
+    os.fchmod(fd, mode)
+    os.fsync(fd)
+
+
 def build_patch(input_path: Path, out_dir: Path,
                 locks_path: Path = DEFAULT_LOCKS,
-                *, allow_test_geometry: bool = False) -> dict[str, object]:
+                *, target: str = "63",
+                allow_test_geometry: bool = False) -> dict[str, object]:
     """Gate, patch, verify, and write the experimental output copy.
 
     ``allow_test_geometry`` is for offline synthetic-ELF tests only.  The CLI
@@ -740,6 +798,15 @@ def build_patch(input_path: Path, out_dir: Path,
     production pinned address; the hook blob is still linked at the production
     address and the output is never executed.
     """
+    if target not in TARGETS:
+        raise BuildError(f"unsupported target {target!r}")
+    meta = TARGETS[target]
+    global FUNCTION_VADDR, FUNCTION_LEN
+    FUNCTION_VADDR = meta["vaddr"]
+    FUNCTION_LEN = meta["len"]
+    prefix = meta["prefix"]
+    target_name = meta["name"]
+
     input_path = Path(input_path)
     out_dir = Path(out_dir)
     locks_path = Path(locks_path)
@@ -752,21 +819,21 @@ def build_patch(input_path: Path, out_dir: Path,
         raise BuildError(f"input is not a regular non-symlink file: {input_path}")
 
     locks = load_locks(locks_path)
-    stock_size = _required_int(locks, "VBTD63_SIZE")
-    stock_sha = _required_sha256(locks, "VBTD63_STOCK_SHA256")
-    function_vaddr = _required_int(locks, "VBTD63_SPP_RX_VADDR")
-    function_offset = _required_int(locks, "VBTD63_SPP_RX_OFFSET")
-    function_len = _required_int(locks, "VBTD63_SPP_RX_LEN")
-    function_sha = _required_sha256(locks, "VBTD63_SPP_RX_STOCK_SHA256")
+    stock_size = _required_int(locks, f"{prefix}_SIZE")
+    stock_sha = _required_sha256(locks, f"{prefix}_STOCK_SHA256")
+    function_vaddr = _required_int(locks, f"{prefix}_SPP_RX_VADDR")
+    function_offset = _required_int(locks, f"{prefix}_SPP_RX_OFFSET")
+    function_len = _required_int(locks, f"{prefix}_SPP_RX_LEN")
+    function_sha = _required_sha256(locks, f"{prefix}_SPP_RX_STOCK_SHA256")
 
     if not allow_test_geometry and function_vaddr != FUNCTION_VADDR:
         raise BuildError(
-            f"VBTD63_SPP_RX_VADDR is {function_vaddr:#x}, "
+            f"{prefix}_SPP_RX_VADDR is {function_vaddr:#x}, "
             f"expected {FUNCTION_VADDR:#x}"
         )
     if function_len != FUNCTION_LEN:
         raise BuildError(
-            f"VBTD63_SPP_RX_LEN is {function_len:#x}, expected {FUNCTION_LEN:#x}"
+            f"{prefix}_SPP_RX_LEN is {function_len:#x}, expected {FUNCTION_LEN:#x}"
         )
 
     try:
@@ -830,8 +897,8 @@ def build_patch(input_path: Path, out_dir: Path,
             "/tmp/opencode"
         )
 
-    output_file = out_dir / "vbtd-63.spp-rx.patched"
-    manifest_file = out_dir / "vbtd-63.spp-rx.manifest.json"
+    output_file = out_dir / f"{target_name}.spp-rx.patched"
+    manifest_file = out_dir / f"{target_name}.spp-rx.manifest.json"
     for candidate in (output_file, manifest_file):
         if candidate.is_symlink():
             raise BuildError(f"refusing symlink output path: {candidate}")
@@ -860,7 +927,7 @@ def build_patch(input_path: Path, out_dir: Path,
         "car_validated": False,
         "installer_activated": False,
         "oem_binary_executed": False,
-        "target": "synthetic-test-elf" if allow_test_geometry else "vbtd-63",
+        "target": "synthetic-test-elf" if allow_test_geometry else target_name,
         "test_fixture": bool(allow_test_geometry),
         "firmware_id": locks.get("SCOURGE_FIRMWARE_ID", "UNKNOWN"),
         "input_name": input_path.name,
@@ -904,37 +971,19 @@ def build_patch(input_path: Path, out_dir: Path,
     tmp_output = None
     tmp_manifest = None
     published: list[tuple[Path, int, int]] = []
-    private_temps: list[tuple[Path, int, int]] = []
+    private_temps: list[tuple[Path, int | None, int | None]] = []
     anchors: list[int] = []
     try:
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=".vbtd-63.spp-rx.patched.", dir=str(out_dir)
-        )
-        tmp_output = Path(tmp_name)
-        with os.fdopen(fd, "wb") as handle:
-            identity = os.fstat(handle.fileno())
-            private_temps.append((tmp_output, identity.st_dev, identity.st_ino))
-            anchors.append(os.dup(handle.fileno()))
-            handle.write(patched_bytes)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp_output, output_mode)
+        fd, tmp_output = _create_private_temp(
+            f".{target_name}.spp-rx.patched.", out_dir, private_temps, anchors)
+        _write_private_temp(fd, patched_bytes, output_mode)
 
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=".vbtd-63.spp-rx.manifest.", dir=str(out_dir)
-        )
-        tmp_manifest = Path(tmp_name)
+        fd, tmp_manifest = _create_private_temp(
+            f".{target_name}.spp-rx.manifest.", out_dir, private_temps, anchors)
         manifest_bytes = (
             json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
-        with os.fdopen(fd, "wb") as handle:
-            identity = os.fstat(handle.fileno())
-            private_temps.append((tmp_manifest, identity.st_dev, identity.st_ino))
-            anchors.append(os.dup(handle.fileno()))
-            handle.write(manifest_bytes)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp_manifest, 0o644)
+        _write_private_temp(fd, manifest_bytes, 0o644)
 
         # Retain the private temporary links until both files and their
         # readback succeed; they anchor the identities used for rollback.
@@ -980,18 +1029,21 @@ def build_patch(input_path: Path, out_dir: Path,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Build-only experimental vbtd-63 SPP RX hook patch. "
+            "Build-only experimental vbtd SPP RX hook patch (target 63/51). "
             "Never executes or activates the OEM binary."
         )
     )
     parser.add_argument("--input", required=True,
-                        help="stock /app/bin/vbtd-63 to read")
+                        help="stock /app/bin/vbtd-63 or vbtd-51 to read")
     parser.add_argument("--out", required=True,
                         help="ignored output directory (new files only)")
+    parser.add_argument("--target", choices=sorted(TARGETS), default="63",
+                        help="pinned vbtd target (default: 63)")
     args = parser.parse_args(argv)
 
     try:
-        result = build_patch(Path(args.input), Path(args.out))
+        result = build_patch(Path(args.input), Path(args.out),
+                             target=args.target)
     except (BuildError, OSError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2

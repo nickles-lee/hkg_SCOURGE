@@ -27,6 +27,8 @@ QML_DIR="$QML_ROOT/qml_eco3.0"
 ASSET_DIR="$QML_ROOT/wifi1b"
 RW_DIR="${WIFI1B_RW_DIR:-/rw_data/wifi1b}"
 RUNTIME_ROOT="${WIFI1B_RUNTIME_ROOT:-$(dirname "$RW_DIR")}"
+RUN_DIR="${WIFI1B_RUN_DIR:-/run}"
+HOME_PROC_ROOT="${WIFI1B_HOME_PROC_ROOT:-/proc}"
 LOG="$RW_DIR/install.log"
 OUT="$USB_DIR/run_stuff_result.txt"
 SERVICE="${WIFI1B_SERVICE:-/etc/systemd/system/wifi1b-daemon.service}"
@@ -46,15 +48,62 @@ ALL="HomeScreen/Screen_HomeScreen_AllMenus.qml"
 SETUP="HomeScreen/Screen_HomeScreen_Submenu_Setup.qml"
 CUSTOM="component/QCustomizedMenuListAllowEmpty.qml"
 
-if [ -L "$RW_DIR" ]; then
-    printf 'WIFI1B_PAYLOAD\nstatus=FAIL\nerror=runtime directory is a symlink\n' > "$OUT" 2>/dev/null || true
+# Earliest report-path guard.  No helper is verified/loaded yet, so this is a
+# minimal inline check: the USB root must be a real directory with real-dir
+# ancestors, and the result leaf must be a single-link regular file or absent.
+# If the report path is unsafe, fail to stderr only: never redirect, cp, log,
+# beep or open a FIFO through it.
+_report_dir_safe() {
+    _rds=$1
+    [ -d "$_rds" ] && [ ! -L "$_rds" ] || return 1
+    _rdp=$(dirname "$_rds") || return 1
+    while [ -n "$_rdp" ] && [ "$_rdp" != "/" ]; do
+        [ ! -L "$_rdp" ] || return 1
+        [ -d "$_rdp" ] || return 1
+        _rdn=$(dirname "$_rdp") || return 1
+        [ "$_rdn" != "$_rdp" ] || break
+        _rdp=$_rdn
+    done
+    return 0
+}
+_report_file_safe() {
+    _rfs=$1
+    _rfp=$(dirname "$_rfs") || return 1
+    while [ -n "$_rfp" ] && [ "$_rfp" != "/" ]; do
+        [ ! -L "$_rfp" ] || return 1
+        [ -d "$_rfp" ] || return 1
+        _rfn=$(dirname "$_rfp") || return 1
+        [ "$_rfn" != "$_rfp" ] || break
+        _rfp=$_rfn
+    done
+    if [ -e "$_rfs" ] || [ -L "$_rfs" ]; then
+        [ -f "$_rfs" ] || return 1
+        [ ! -L "$_rfs" ] || return 1
+        _rfl=$(stat -c %h "$_rfs" 2>/dev/null) || return 1
+        case "$_rfl" in
+            1) : ;;
+            *) return 1 ;;
+        esac
+    fi
+    return 0
+}
+if ! _report_dir_safe "$USB_DIR" || ! _report_file_safe "$OUT"; then
+    printf 'WIFI1B_%s\nstatus=FAIL\nerror=unsafe_report_path\n' "PAYLOAD" >&2
     exit 1
 fi
-mkdir -p "$RW_DIR" 2>/dev/null
-mkdir -p "$RW_DIR/backup" 2>/dev/null
-mkdir -p "$RW_DIR/bin" 2>/dev/null
-mkdir -p "$RW_DIR/ssh" 2>/dev/null
-: > "$LOG" 2>/dev/null
+
+early_fail() {
+    if _report_file_safe "$OUT"; then
+        printf 'WIFI1B_PAYLOAD\nstatus=FAIL\nerror=%s\n' "$*" > "$OUT" 2>/dev/null ||
+            printf 'WIFI1B_PAYLOAD\nstatus=FAIL\nerror=%s\n' "$*" >&2
+    else
+        printf 'WIFI1B_PAYLOAD\nstatus=FAIL\nerror=%s\n' "$*" >&2
+    fi
+    exit 1
+}
+if [ -L "$RW_DIR" ]; then
+    early_fail "runtime directory is a symlink"
+fi
 
 log() { echo "$(date -u 2>/dev/null) $*" >> "$LOG" 2>/dev/null; }
 
@@ -76,12 +125,28 @@ fail() {
     exit 1
 }
 
+transaction_started=0
+install_complete=0
+owned_service_installed=0
+service_touched=0
 cleanup_ro() {
     if [ "${transaction_started:-0}" = 1 ] && [ "${install_complete:-0}" != 1 ]; then
         log "rolling back incomplete Wifi1b install"
-        systemctl stop wifi1b-daemon.service >> "$LOG" 2>&1 || true
+        # Only stop the unit when this invocation installed our exact service
+        # bytes.  A pre-existing/foreign unit is never stopped on an early
+        # failure, and a unit we never started needs no stop.
+        if [ "${owned_service_installed:-0}" = 1 ]; then
+            systemctl stop wifi1b-daemon.service >> "$LOG" 2>&1 || true
+        fi
+        # Signal a manual daemon only after proving the PID still belongs to
+        # our exact owned executable.  Reused/foreign/unreadable PIDs are
+        # preserved and reported.
         if [ -n "${MANUAL_PID:-}" ] && [ -d "/proc/$MANUAL_PID" ]; then
-            kill -TERM "$MANUAL_PID" 2>/dev/null || true
+            if [ "$(readlink "/proc/$MANUAL_PID/exe" 2>/dev/null || true)" = "$RW_DIR/wifi1b_daemon" ]; then
+                kill -TERM "$MANUAL_PID" 2>/dev/null || log "ROLLBACK: cannot signal owned manual daemon PID $MANUAL_PID"
+            else
+                log "ROLLBACK: preserved PID $MANUAL_PID (executable is not the owned daemon)"
+            fi
         fi
         while IFS='|' read -r item existed destination; do
             [ -n "$destination" ] || continue
@@ -103,18 +168,24 @@ cleanup_ro() {
             _svc_active=$(sed -n 's/^active=//p' "$BACKUP_HU/transaction/service.state" 2>/dev/null)
         fi
         if [ "$_svc_existed" = 1 ]; then
+            if [ "${service_touched:-0}" = 1 ]; then
             case "$_svc_enabled" in
                 enabled) systemctl enable wifi1b-daemon.service >> "$LOG" 2>&1 || true ;;
-                disabled|masked) systemctl disable wifi1b-daemon.service >> "$LOG" 2>&1 || true ;;
+                masked) systemctl mask wifi1b-daemon.service >> "$LOG" 2>&1 || true ;;
+                masked-runtime) systemctl mask --runtime wifi1b-daemon.service >> "$LOG" 2>&1 || true ;;
+                disabled) systemctl disable wifi1b-daemon.service >> "$LOG" 2>&1 || true ;;
             esac
             if [ "$_svc_active" = 1 ]; then
                 systemctl start wifi1b-daemon.service >> "$LOG" 2>&1 || true
-            else
+            elif [ "${owned_service_installed:-0}" = 1 ]; then
                 systemctl stop wifi1b-daemon.service >> "$LOG" 2>&1 || true
             fi
+            fi
         else
-            systemctl disable wifi1b-daemon.service >> "$LOG" 2>&1 || true
-            systemctl stop wifi1b-daemon.service >> "$LOG" 2>&1 || true
+            if [ "${owned_service_installed:-0}" = 1 ]; then
+                systemctl disable wifi1b-daemon.service >> "$LOG" 2>&1 || true
+                systemctl stop wifi1b-daemon.service >> "$LOG" 2>&1 || true
+            fi
         fi
     fi
     [ -z "${PATCH_WORK:-}" ] || rm -rf "$PATCH_WORK"
@@ -139,25 +210,187 @@ remember() {
 }
 
 mount -o remount,rw "$USB_DIR" 2>/dev/null || true
-log "=== wifi1b payload start usb=$USB_DIR ==="
 
 MD5SUM_BIN=md5sum
 command -v md5sum >/dev/null 2>&1 || MD5SUM_BIN=md5sum.coreutils
+SHA256SUM_BIN=sha256sum
+command -v sha256sum >/dev/null 2>&1 || SHA256SUM_BIN=sha256sum.coreutils
 md5() { "$MD5SUM_BIN" "$1" 2>/dev/null | cut -d' ' -f1; }
 
-[ -d "$PAYLOAD" ] || fail "payload directory missing: $PAYLOAD"
-[ -d "$BACKUP" ] || fail "backup directory missing: $BACKUP"
-[ -f "$USB_DIR/manifest.md5" ] || fail "manifest.md5 missing"
-[ -d "$QML_DIR" ] || fail "expected QML directory missing: $QML_DIR"
+[ -d "$PAYLOAD" ] || early_fail "payload directory missing: $PAYLOAD"
+[ -d "$BACKUP" ] || early_fail "backup directory missing: $BACKUP"
+[ -f "$USB_DIR/manifest.md5" ] || early_fail "manifest.md5 missing"
+[ -d "$QML_DIR" ] || early_fail "expected QML directory missing: $QML_DIR"
 
-if ! ( cd "$USB_DIR" && "$MD5SUM_BIN" -c manifest.md5 ) > "$RW_DIR/manifest-check.log" 2>&1; then
-    fail "manifest check failed (see $RW_DIR/manifest-check.log)"
+# Verify the payload before sourcing any helper or making the first runtime
+# write.  The manifest log is written later, after bounded cleanup.
+if ! ( cd "$USB_DIR" && "$MD5SUM_BIN" -c manifest.md5 ) >/dev/null 2>&1; then
+    early_fail "manifest check failed"
 fi
-log "manifest OK"
 . "$PAYLOAD/lib/install_io.sh"
-[ -f "$PAYLOAD/lib/runtime_cleanup.sh" ] || fail "runtime_cleanup.sh missing from payload"
+[ -f "$PAYLOAD/lib/runtime_cleanup.sh" ] || early_fail "runtime_cleanup.sh missing from payload"
 . "$PAYLOAD/lib/runtime_cleanup.sh"
+
+# Refuse unknown symlink ancestors and wrong leaf types for every
+# product/rootfs destination before the first runtime write.  Directories and
+# file leaves have separate predicates: a directory where a file is expected
+# is never silently turned into a nested write.
+for _dir in "$QML_DIR" "$QML_DIR/HomeScreen" "$QML_DIR/component" \
+             "$ASSET_DIR" "$(dirname "$SERVICE")" \
+             "$(dirname "$MDNS_DROPIN")" "$(dirname "$CONNMAN_DROPIN")" \
+             "$(dirname /etc/passwd)" "$(dirname /tmp/shells)" \
+             "$RW_DIR" "$RW_DIR/backup" "$RW_DIR/bin" "$RW_DIR/ssh" \
+             "$RW_DIR/home" "$RW_DIR/home/.ssh" "$RW_DIR/backup/accounts" \
+             "$USB_DIR/backup_current" "$USB_DIR/qml_before" \
+              "$USB_DIR/qml_after" "$RUN_DIR/wifi1b" "$RUN_DIR/wifi" \
+              "$RUN_DIR/udev" "$RUN_DIR/udev/rules.d" \
+             "$USB_DIR/backup_current/AppHomeScreen" \
+             "$USB_DIR/backup_current/AppHomeScreen/qml_eco3.0" \
+             "$USB_DIR/backup_current/AppHomeScreen/qml_eco3.0/HomeScreen" \
+             "$USB_DIR/backup_current/AppHomeScreen/qml_eco3.0/component" \
+             "$USB_DIR/qml_before/HomeScreen" "$USB_DIR/qml_before/component" \
+             "$USB_DIR/qml_after/HomeScreen" "$USB_DIR/qml_after/component"; do
+    runtime_cleanup_safe_dir_path "$_dir" ||
+        early_fail "unsafe directory destination: $_dir"
+done
+for _file in "$QML_DIR/$ADV" "$QML_DIR/$WIDE" "$QML_DIR/$ALL" \
+             "$QML_DIR/$SETUP" "$QML_DIR/$CUSTOM" \
+             "$QML_DIR/HomeScreen/Wifi1bPage.qml" \
+             "$QML_DIR/component/Wifi1bTile.qml" \
+             "$QML_DIR/component/Wifi1bSwitch.qml" \
+             "$QML_DIR/component/Wifi1bButton.qml" \
+             "$MDNS_DROPIN" "$CONNMAN_DROPIN" \
+             "$OUT" "$LOG" "$RW_DIR/result.txt"; do
+    runtime_cleanup_safe_file_path "$_file" ||
+        early_fail "unsafe file destination: $_file"
+done
+# Service is either absent, an exact owned regular file, or the verified
+# product /dev/null mask; any other type/link is preserved and refused.
+if [ -L "$SERVICE" ]; then
+    [ "$(readlink "$SERVICE" 2>/dev/null || true)" = "/dev/null" ] ||
+        early_fail "unknown service symlink destination: $SERVICE"
+elif [ -e "$SERVICE" ]; then
+    runtime_cleanup_safe_file_path "$SERVICE" ||
+        early_fail "unsafe service destination: $SERVICE"
+fi
+for _asset in "$PAYLOAD/assets/wifi1b/"*; do
+    [ -f "$_asset" ] || continue
+    runtime_cleanup_safe_file_path "$ASSET_DIR/$(basename "$_asset")" ||
+        early_fail "unsafe asset destination: $ASSET_DIR/$(basename "$_asset")"
+done
+for _leaf in "$RW_DIR/config.conf" "$RW_DIR/wifi.txt" "$RW_DIR/status.json" \
+             "$RW_DIR/daemon.log" "$RW_DIR/wpa_supplicant.conf" \
+             "$RW_DIR/wpa_supplicant.log" "$RW_DIR/wpa_supplicant.pid" \
+             "$RW_DIR/dhcp.leases" "$RW_DIR/dhcpd.pid" "$RW_DIR/dhcpd.log" \
+             "$RW_DIR/client.route" "$RW_DIR/client.owner" \
+              "$RW_DIR/client.lineage" "$RW_DIR/scan.json" \
+              "$RW_DIR/usb0.owner" \
+             "$RW_DIR/bt.state" "$RW_DIR/ssh.bound" "$RW_DIR/home.json" \
+             "$RW_DIR/apply.result" "$RW_DIR/ap.station-ip" \
+             "$RW_DIR/sigterm-ready" "$RW_DIR/ssh.log" "$RW_DIR/daemon.lock" \
+             "$RW_DIR/wifi1b_daemon" "$RW_DIR/bin/wifi1b_qmlpatch" \
+              "$RW_DIR/bin/dropbearmulti" \
+              "$RW_DIR/bin/opi-usb0-up.sh" \
+              "$RUN_DIR/udev/rules.d/99-opi-usb0.rules" \
+             "$RW_DIR/ssh/authorized_keys" \
+             "$RW_DIR/ssh/dropbear.pid" \
+             "$RW_DIR/ssh/dropbear_ed25519_host_key" \
+             "$RW_DIR/ssh/dropbear_rsa_host_key" \
+             "$RW_DIR/home/.ssh/authorized_keys" \
+             "$RUN_DIR/wifi1b/active" "$RUN_DIR/wifi/active" \
+             /tmp/shells; do
+    runtime_cleanup_safe_file_path "$_leaf" ||
+        early_fail "unsafe file destination: $_leaf"
+done
+# Atomic-write temporaries use the product's fixed "<path>.tmp.<pid>"
+# convention.  Refuse any wrong-type pre-existing entry at those names before
+# the daemon can open/truncate through it.
+# dropbear/dropbearkey are product-owned symlinks to dropbearmulti.  Allow
+# only that exact relative target; any other link/type is preserved and FAILs.
+for _db in "$RW_DIR/bin/dropbear" "$RW_DIR/bin/dropbearkey"; do
+    if [ -L "$_db" ]; then
+        [ "$(readlink "$_db" 2>/dev/null || true)" = "dropbearmulti" ] ||
+            early_fail "unexpected dropbear helper symlink: $_db"
+    else
+        runtime_cleanup_safe_file_path "$_db" ||
+            early_fail "unsafe dropbear helper destination: $_db"
+    fi
+done
+for _atomic in "$RW_DIR/config.conf" "$RW_DIR/wifi.txt" \
+               "$RW_DIR/status.json" "$RW_DIR/wpa_supplicant.conf" \
+               "$RW_DIR/wpa_supplicant.pid" "$RW_DIR/dhcp.leases" \
+               "$RW_DIR/dhcpd.pid" "$RW_DIR/client.route" \
+                "$RW_DIR/client.owner" "$RW_DIR/client.lineage" \
+                "$RW_DIR/usb0.owner" \
+               "$RW_DIR/scan.json" "$RW_DIR/bt.state" \
+               "$RW_DIR/ssh.bound" "$RW_DIR/home.json" \
+               "$RW_DIR/apply.result" "$RW_DIR/ap.station-ip" \
+                "$RW_DIR/sigterm-ready" "$RW_DIR/ssh/authorized_keys" \
+                "$RW_DIR/bin/opi-usb0-up.sh" \
+                "$RUN_DIR/udev/rules.d/99-opi-usb0.rules" \
+               "$RUN_DIR/wifi1b/active"; do
+    for _tmp in "$_atomic".tmp.*; do
+        [ -e "$_tmp" ] || [ -L "$_tmp" ] || continue
+        runtime_cleanup_safe_file_path "$_tmp" ||
+            early_fail "unsafe atomic temp destination: $_tmp"
+    done
+done
+for _acct in passwd passwd.legacy passwd.secure shadow shadow.Global; do
+    runtime_cleanup_safe_file_path "$RW_DIR/backup/accounts/$_acct" ||
+        early_fail "unsafe account-marker destination: $RW_DIR/backup/accounts/$_acct"
+done
+# backup/latest is our own symlink; only an unknown real entry or one that
+# escapes the backup directory is refused.
+if [ -L "$RW_DIR/backup/latest" ]; then
+    _latest_real=$(readlink -f "$RW_DIR/backup/latest" 2>/dev/null || true)
+    case "$_latest_real" in
+        "$RW_DIR"/backup/*) : ;;
+        *) early_fail "backup/latest escapes the backup directory" ;;
+    esac
+elif [ -e "$RW_DIR/backup/latest" ]; then
+    early_fail "backup/latest is not an owned symlink"
+fi
+for _qml in "$ADV" "$WIDE" "$ALL" "$SETUP" "$CUSTOM" \
+            HomeScreen/BatteryTile.qml component/BatteryTile.qml \
+            component/WifiTile.qml component/TweaksTile.qml \
+            component/RebootTile.qml component/Wifi1bTile.qml; do
+    runtime_cleanup_safe_file_path "$USB_DIR/backup_current/AppHomeScreen/qml_eco3.0/$_qml" ||
+        early_fail "unsafe backup_current destination: $_qml"
+    runtime_cleanup_safe_file_path "$USB_DIR/qml_before/$_qml" ||
+        early_fail "unsafe qml_before destination: $_qml"
+    runtime_cleanup_safe_file_path "$USB_DIR/qml_after/$_qml" ||
+        early_fail "unsafe qml_after destination: $_qml"
+done
+for _hashfile in "$USB_DIR/qml_before/hashes.md5" "$USB_DIR/qml_after/hashes.md5"; do
+    runtime_cleanup_safe_file_path "$_hashfile" ||
+        early_fail "unsafe qml snapshot hash destination: $_hashfile"
+done
+for _acct in /etc/passwd /etc/passwd.legacy /etc/passwd.secure \
+             /etc/shadow /etc/shadow.Global; do
+    if [ -L "$_acct" ]; then
+        _acct_target=$(readlink -f "$_acct" 2>/dev/null || true)
+        case "$_acct_target" in
+            "${INSTALL_IO_ROOT:-/}"/tmp/*|/tmp/*|"${INSTALL_IO_ROOT:-/}"/etc/*|/etc/*) : ;;
+            *) early_fail "account path has unapproved symlink target: $_acct" ;;
+        esac
+        runtime_cleanup_safe_file_path "$_acct_target" ||
+            early_fail "account symlink target is not a regular file: $_acct"
+    else
+        runtime_cleanup_safe_file_path "$_acct" ||
+            early_fail "unsafe account file destination: $_acct"
+    fi
+done
+
+# FIRST runtime action: reclaim bounded logs before any mkdir/log/backup.
+RUNTIME_CLEANUP_LOG=""
+cleanup_bounded_logs "$RUNTIME_ROOT" || true
+mkdir -p "$RW_DIR/backup" "$RW_DIR/bin" "$RW_DIR/ssh" 2>/dev/null ||
+    early_fail "cannot create runtime directories"
+: > "$LOG" 2>/dev/null
 RUNTIME_CLEANUP_LOG="$LOG"
+[ -z "$RUNTIME_CLEANUP_NOTES" ] || log "cleanup: $RUNTIME_CLEANUP_NOTES"
+log "manifest OK"
+log "=== wifi1b payload start usb=$USB_DIR ==="
 io_init || fail "cannot determine initial root mount state"
 io_capture_qml "$QML_DIR" "$USB_DIR/qml_before" || true
 
@@ -315,6 +548,19 @@ daemon_enabled_state=$(systemctl is-enabled wifi1b-daemon.service 2>/dev/null ||
 [ -n "$daemon_enabled_state" ] || daemon_enabled_state=unknown
 service_existed=0
 if [ -e "$SERVICE" ] || [ -L "$SERVICE" ]; then service_existed=1; fi
+# Record the exact original service bytes (regular files only) so restore can
+# verify the transaction source before replacing a /dev/null mask.
+if [ "$service_existed" = 1 ] && [ -f "$SERVICE" ] && [ ! -L "$SERVICE" ]; then
+    _svc_item=""
+    while IFS='|' read -r _item _existed _destination; do
+        [ "$_destination" = "$SERVICE" ] && _svc_item=$_item
+    done < "$BACKUP_HU/transaction/files"
+    [ -n "$_svc_item" ] || fail "cannot locate original service transaction entry"
+    _svc_hash=$("$SHA256SUM_BIN" "$BACKUP_HU/transaction/$_svc_item" 2>/dev/null | cut -d' ' -f1)
+    [ -n "$_svc_hash" ] || fail "cannot hash original service transaction entry"
+    printf '%s\n' "$_svc_hash" > "$BACKUP_HU/transaction/service.sha256" || \
+        fail "cannot record original service hash"
+fi
 # Persist the original service transaction: restore must put back a
 # pre-existing file and its enablement/active state, not blindly rm it.
 printf 'existed=%s\nenabled=%s\nactive=%s\n' \
@@ -322,28 +568,35 @@ printf 'existed=%s\nenabled=%s\nactive=%s\n' \
     > "$BACKUP_HU/transaction/service.state" || fail "cannot record service transaction"
 chmod 600 "$BACKUP_HU/transaction/service.state" 2>/dev/null || true
 if [ "$daemon_was_active" = 1 ]; then
+    service_touched=1
     systemctl stop wifi1b-daemon.service >> "$LOG" 2>&1 || fail "cannot stop Wifi1b daemon safely"
 fi
 transaction_started=1
 
-# ---- reclaim log space --------------------------------------------------
-# Bounded logs first (including removed /rw_data/wifi logs); symlinked or
-# foreign paths are refused.  Stale atomic-write temps are removed only when
-# the owned radios are verified stopped and the PID is numeric and dead.
-cleanup_bounded_logs "$RUNTIME_ROOT" || true
-if ! runtime_cleanup_process_alive "$RUNTIME_ROOT" wifi1b wifi1b_daemon &&
-   ! runtime_cleanup_process_alive "$RUNTIME_ROOT" wifi wifi_daemon; then
+# ---- reclaim log space (stale temps only) -------------------------------
+# Bounded logs were already truncated before any mkdir/log/backup.  Stale
+# atomic-write temps are removed only when the in-scope owned radios are
+# verifiably stopped; WiFi temps stay out of scope unless WiFi is dead too.
+runtime_cleanup_process_alive "$RUNTIME_ROOT" wifi1b wifi1b_daemon
+_cleanup_w1b=$?
+runtime_cleanup_process_alive "$RUNTIME_ROOT" wifi wifi_daemon
+_cleanup_wifi=$?
+if [ "$_cleanup_w1b" = 1 ]; then
     RUNTIME_CLEANUP_RADIOS_STOPPED=1
+    if [ "$_cleanup_wifi" = 1 ]; then
+        RUNTIME_CLEANUP_SCAN_WIFI=1
+    else
+        RUNTIME_CLEANUP_SCAN_WIFI=0
+        runtime_cleanup_note "WiFi process not verifiably stopped; WiFi temps excluded"
+    fi
 fi
 cleanup_stale_temps "$RUNTIME_ROOT" || true
 [ -z "$RUNTIME_CLEANUP_NOTES" ] || log "cleanup: $RUNTIME_CLEANUP_NOTES"
 df -h "$RUNTIME_ROOT" >> "$LOG" 2>&1 || true
 du -xk "$RUNTIME_ROOT" 2>/dev/null | sort -n | tail -20 >> "$LOG" 2>&1 || true
 
-# Removed-WiFi leftovers are deleted only with positive evidence (readable
-# marker absence, no page/service, no live owned process, verified private
-# archive or prior receipt).  This payload ships no WiFi archive, so unknown
-# leftovers are preserved and reported rather than deleted.
+# Removed-WiFi leftovers are never deleted by the direct payload: it carries
+# no bundle archive/hash proof.  The helper preserves and reports them.
 cleanup_removed_wifi "$RUNTIME_ROOT" "$QML_DIR" "${SCOURGE_STICK_DIR:-$USB_DIR}" \
     "" "" "${CLEANUP_WIFI_SERVICE:-/etc/systemd/system/wifi-daemon.service}" || true
 [ -z "$RUNTIME_CLEANUP_NOTES" ] || log "cleanup: $RUNTIME_CLEANUP_NOTES"
@@ -422,9 +675,20 @@ if [ -f "$PAYLOAD/bin/dropbearmulti" ]; then
     ln -sf dropbearmulti "$RW_DIR/bin/dropbearkey" 2>/dev/null || true
 fi
 
+if [ -L "$SERVICE" ] && [ "$(readlink "$SERVICE" 2>/dev/null || true)" != "/dev/null" ]; then
+    fail "unknown wifi1b service symlink; refusing overwrite"
+fi
+if [ -L "$SERVICE" ] && [ "$(readlink "$SERVICE" 2>/dev/null || true)" = "/dev/null" ]; then
+    rm -f "$SERVICE" 2>/dev/null || fail "cannot clear pre-existing masked service link"
+fi
 io_copy "$PAYLOAD/systemd/wifi1b-daemon.service" "$SERVICE" || fail "service copy failed"
+if ! cmp -s "$PAYLOAD/systemd/wifi1b-daemon.service" "$SERVICE"; then
+    fail "service copy verification failed"
+fi
 chmod 644 "$SERVICE" 2>/dev/null || true
 chown 0:0 "$SERVICE" 2>/dev/null || true
+owned_service_installed=1
+service_touched=1
 
 # The stock daemon forks; WiFi's old Restart=always override otherwise
 # supervises the exiting parent. A later, owned drop-in runs it foreground.
@@ -482,13 +746,21 @@ EOF
     chmod 600 "$RW_DIR/config.conf" 2>/dev/null || true
 fi
 
-if [ -f "$USB_DIR/authorized_keys" ]; then
-    cp -f "$USB_DIR/authorized_keys" "$RW_DIR/ssh/authorized_keys" 2>/dev/null || true
+if [ -f "$USB_DIR/authorized_keys" ] && [ ! -L "$USB_DIR/authorized_keys" ] &&
+   [ -r "$USB_DIR/authorized_keys" ]; then
+    # Import only through verified copies.  Log success only after BOTH
+    # product destinations match the stick bytes; any failure aborts the
+    # install so rollback restores the previous keys and the stick/backup
+    # stay untouched.
+    io_copy "$USB_DIR/authorized_keys" "$RW_DIR/ssh/authorized_keys" &&
+    cmp -s "$USB_DIR/authorized_keys" "$RW_DIR/ssh/authorized_keys" &&
+    io_copy "$USB_DIR/authorized_keys" "$RW_DIR/home/.ssh/authorized_keys" &&
+    cmp -s "$USB_DIR/authorized_keys" "$RW_DIR/home/.ssh/authorized_keys" ||
+        fail "authorized_keys import failed; previous keys retained"
     chmod 600 "$RW_DIR/ssh/authorized_keys" 2>/dev/null || true
-    cp -f "$USB_DIR/authorized_keys" "$RW_DIR/home/.ssh/authorized_keys" 2>/dev/null || true
     chmod 600 "$RW_DIR/home/.ssh/authorized_keys" 2>/dev/null || true
     sh_chsmack "$RW_DIR/ssh" "$RW_DIR/ssh/authorized_keys" "$RW_DIR/home/.ssh" "$RW_DIR/home/.ssh/authorized_keys"
-    log "imported authorized_keys"
+    log "imported authorized_keys (both destinations verified)"
 fi
 
 # Import is best-effort and must never activate WLAN, a mode, or SSH.
@@ -547,15 +819,14 @@ grep -q 'id: itemWifi1b' "$cur_wide" || fail "Wifi1b Wide tile missing after pat
 grep -q 'signal wifi1bClicked()' "$cur_custom" || fail "Wifi1b custom signal missing after patch"
 fi
 
-rm -rf /root/.cache/qtshadercache 2>/dev/null || true
-rm -rf /root/.cache/AppHomeScreen 2>/dev/null || true
-rm -rf /root/.cache/qmlcache 2>/dev/null || true
-rm -rf /tmp/qmlcache 2>/dev/null || true
-rm -rf /tmp/qt-qml-cache 2>/dev/null || true
+# Never recursively delete generic Qt cache directories: an ordinary
+# pre-existing owner directory cannot be proven to belong to this product.
+# Leaving them is the safe choice; QML file replacement still forces a parse
+# of the new bytes by the UI process.
 sync
 
 # ---- start daemon idle --------------------------------------------------
-rm -f /run/wifi1b/active 2>/dev/null || true
+rm -f "$RUN_DIR/wifi1b/active" 2>/dev/null || true
 systemctl daemon-reload >> "$LOG" 2>&1 || true
 daemon_status="not-started"
 if command -v systemctl >/dev/null 2>&1; then
@@ -648,13 +919,29 @@ else
     restart="dbus-send-missing"
 fi
 if [ "$restart" != "dbus-ok" ]; then
-    for p in /proc/[0-9]*; do
+    home_exe=$(readlink -f /app/bin/AppHomeScreen 2>/dev/null || true)
+    killed_home=0
+    preserved_home=0
+    for p in "$HOME_PROC_ROOT"/[0-9]*; do
         [ -r "$p/comm" ] || continue
-        if [ "$(cat "$p/comm" 2>/dev/null)" = "AppHomeScreen" ]; then
-            kill -TERM "${p#/proc/}" 2>/dev/null || true
+        [ "$(cat "$p/comm" 2>/dev/null)" = "AppHomeScreen" ] || continue
+        exe=$(readlink -f "$p/exe" 2>/dev/null || true)
+        if [ -n "$home_exe" ] && [ "$exe" = "$home_exe" ] &&
+           [ "$(basename "$exe")" = "AppHomeScreen" ]; then
+            kill -TERM "$(basename "$p")" 2>/dev/null && killed_home=1
+        else
+            preserved_home=1
         fi
     done
-    restart="$restart (killed AppHomeScreen; reboot if UI does not return)"
+    if [ "$killed_home" = 1 ] && [ "$preserved_home" = 1 ]; then
+        restart="$restart (killed owned AppHomeScreen; preserved non-owned process; reboot if UI does not return)"
+    elif [ "$killed_home" = 1 ]; then
+        restart="$restart (killed AppHomeScreen; reboot if UI does not return)"
+    elif [ "$preserved_home" = 1 ]; then
+        restart="$restart (preserved non-owned AppHomeScreen; reboot if UI does not return)"
+    else
+        restart="$restart (no AppHomeScreen process; reboot if UI does not return)"
+    fi
 fi
 sleep 3
 new_home_pid=$(pidof AppHomeScreen 2>/dev/null || true)

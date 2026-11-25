@@ -1,0 +1,873 @@
+# Wireless CarPlay: stock gaps, first-party fixes, and the exact patch map
+
+**Status: offline/build-only except the 2026-11-18 P2 registration
+observation. RFCOMM delivery, AP bootstrap and full wireless CarPlay remain
+unvalidated.**
+This is the reproduction companion to
+[`VBT-SPP-HOOK-PORTING.md`](VBT-SPP-HOOK-PORTING.md) and
+[`DEFERRED-CAR-PROBES.md`](DEFERRED-CAR-PROBES.md). It records what stock
+Hyundai/LGE firmware does, what the first-party path replaces or supplies, and
+the exact binary/function/address facts needed to reproduce the work with
+Ghidra and REA. OEM binaries are read only; nothing here executes them.
+
+Firmware: **NE_E.EUR.S5W_L.001.001.260128** (Ioniq 5 Gen5W_L, EU).
+All addresses are **ELF virtual addresses (vaddr)**. Do not mix them with
+Ghidra image addresses, file offsets, or runtime ASLR addresses.
+
+## 0. Status legend
+
+| Label | Meaning |
+|---|---|
+| `VERIFIED-STATIC` | Address, symbol size and/or bytes checked against the owner's binary with `readelf`/`nm`/`objdump` |
+| `BUILT-OFFLINE` | Source builds and offline tests pass; not executed on the car |
+| `DESIGN` | Patch/sequence proposed but not implemented |
+| `DEFERRED` | Needs a car, iPhone, live bus, or chip probe |
+| `CAR-VALIDATED` | End-to-end on-car evidence. **No wireless CarPlay item has this label**; the 2026-11-18 P2 observation is registration-only, not full CarPlay |
+
+## 1. End-to-end path and where stock breaks
+
+```text
+ iPhone
+   |  Bluetooth discovery + CAFF SPP open
+   v
+ vbtd-51  VBTSppReceivedDataCfm  --(stock: payload not forwarded)-->  X
+   |
+   |  P1 hook (implemented offline)
+   v
+ /run/wifi1b/carplay/rx.sock  (root-only AF_UNIX SOCK_DGRAM)
+   |
+   v
+ carplay-broker  -- iAP2 link/session/bootstrap/auth (TX blocked by P2)
+   |                    |
+   |                    +--> /run/scourge-carplay-auth/auth.sock
+   |                              |
+   |                              v
+   |                         MFi helper -> real libCoreUtils.so + chip
+   |
+   +--> OEM session bus: Adapter.ListenSPP / SerialPort.SendData
+                              |
+                              v
+                    vendor SerialPort object
+                    (stock: observed live 2026-11-18, status=connected;
+                     registration path established)
+                              |
+                              v
+                    RFCOMM TX to phone  <-- ACK only; host emission
+                                            unmeasured, delivery unproven
+
+ After Wi-Fi bootstrap:
+ iPhone --Wi-Fi--> Wifi1b AP --AirPlay--> vendor receiver (AppProjection)
+                                           stock: receiver not advertised/triggered
+                                           P3 unresolved
+```
+
+The first-party broker is built to capture inbound SPP payloads and run the
+iAP2 state machine. It cannot complete a real pairing until the vendor TX path
+(or an equivalent first-party RFCOMM TX path) exists, and it cannot project
+until the vendor AirPlay receiver is started and advertised. Both are separate
+gates; do not conflate them with the RX hook.
+
+## 2. Stock gaps we are filling
+
+**Gap/fix summary**
+
+| # | Stock gap | First-party fix | Status |
+|---|---|---|---|
+| G1 | SPP RX callback does not forward CarPlay payload | P1 `vbtd-51` RX hook -> broker socket | `BUILT-OFFLINE` |
+| G2 | Registration chain present; delivery unproven | P2 call `ListenSPP` with CAFF, verify object/TX; no patch needed | Registration `LIVE` 2026-11-18; TX ladder `DEFERRED` |
+| G3 | Wireless capability flags are empty/dead | Broker bypasses the gate; no flag patch | `BUILT-OFFLINE` |
+| G4 | No first-party iAP2 control plane or MFi RPC | Broker + MFi helper | `BUILT-OFFLINE` |
+| G5 | AP configuration must agree before a Wi-Fi offer | Check fresh daemon SSID/channel/security/link-local and configured PSK | `BUILT-OFFLINE`; radio key and receiver port not attested |
+| G6 | Stock AirPlay discovery and handoff unverified | P3 observe discovery, phone selection and setup | `DEFERRED` |
+| G7 | Wired CarPlay coexistence not live-checked | Conservative Apple-USB scan + consent | `BUILT-OFFLINE` |
+| G8 | No default-off deploy/rollback plumbing | Units + owner checklist, not auto-installed | `BUILT-OFFLINE` |
+
+### What stock already does
+
+This is not a "Hyundai shipped nothing" story. The pinned firmware already has:
+
+- Bluetooth discovery and RFCOMM/SPP connection: the iPhone finds the car and
+  opens the CAFF channel.
+- The Wi-Fi AP, CarPlay IE and mDNS service flags in Wifi1b; the vendor
+  AirPlay receiver binary and a listener on port 7000 (`AirTunes/320.17.6`).
+- The vendor SerialPort/CommonAPI classes, the MFi library and the real chip
+  behind `/app/lib/libCoreUtils.so`.
+- A wired CarPlay path that must remain untouched (baseline re-verification is
+  deferred).
+
+The gaps below are missing **wiring, state and control-plane** pieces, not a
+missing Bluetooth stack or a missing receiver binary.
+
+### G1. The SPP receive callback drops the CarPlay payload
+
+- **Evidence:** `vbtd-51` `VBTSppManager::VBTSppReceivedDataCfm(T_VBT_EVENT_BASE*)`
+  at ELF `0x490ec0`, ELF size `0x355` (853 bytes), preimage SHA-256
+  `2f3ba61377b73547026a634511ed238899c37ca06fdb111e0f3e1919e3493f06`.
+- **Observed:** the iPhone discovers the car and opens the CAFF iAP2 SPP
+  channel; stock accepts the connection but no first-party consumer receives
+  the iAP2 bytes. The CarPlay spinner never completes.
+- **Consequence:** no identification, no authentication exchange, no Wi-Fi
+  bootstrap.
+- **Fix:** **P1**, replace the whole `VBTSppReceivedDataCfm` span with the
+  freestanding RX hook. `BUILT-OFFLINE`, not car-validated.
+
+### G2. SerialPort registration works; delivery is the open gate
+
+The stock binary contains the full SerialPort registration and TX chain. The
+empty `SetSpp*` callbacks are state-notification stubs, not registration
+gates; they are not on the D-Bus object path.
+
+- **Registration chain (static, verified):**
+  1. D-Bus adapter `ListenSPP` -> `StackAdapterStub::ListenSPP` ELF `0x5cdc10`
+     -> `VBTSppManager::Listen` ELF `0x493a40` -> `AdapterManager::IsServiceEnabled(0xa)`
+     gate at `0x493aef` -> `VBTSppHandler::VBTSppListenReq` ELF `0x729740` ->
+     `BrcmSpp::BrcmSppListenCmd` ELF `0x784680`.
+  2. Phone connects -> `VBTSppConnectCfm` ELF `0x498240`, size `0x18f9` ->
+     `DeviceManager::SetSerialPortConnectionStatus(..., 3 /*CONNECTED*/)` at
+     `0x498714` -> `generateSerialPortPath` -> `IsAvailableSerialPort` ->
+     `RemoteDevice::AddSerialPortList` ELF `0x48d920` ->
+     `getSerialPortStub` (hash lookup only) and then factory registration;
+     the exact `getSerialPortStub` -> `GeniviCommonAPIFactory::registerSerialPortStub`
+     link is inferred (virtual/indirect, no direct call in the cached export).
+     `registerSerialPortStub` ELF `0x633480` -> `StackSerialPortStub` ctor
+     ELF `0x611fb0` -> `CommonAPI::Runtime::registerStub` at `0x633743`.
+  3. TX: `StackSerialPortStub::SendData` ELF `0x612e50` ->
+     `VBTSppManager::SendData` ELF `0x494c30` (gate
+     `GetSerialPortConnectionStatus(addr,uuid) == 3` at `0x494cca`) ->
+     `VBTSppHandler::VBTSppSendDataReq` ELF `0x7294e0` ->
+     `BrcmSpp::BrcmSppSendCmd` ELF `0x7879f0`.
+- **State stubs:** `SetSppListen` `0x3b4860` (called from `VBTSppEnableCfm`
+  at `0x495d1c`), `SetSppListenStatus` `0x3b4890` (called from
+  `VBTSppListenCfm` at `0x49510e` and `VBTSppListenStopCfm` at `0x49554d`),
+  and `SetSppDisconnectedStatus` `0x3b48c0` (called from
+  `VBTSppDisconnectCfm` at `0x496fbe`) feed a
+  `ConnectionStateManager` listener, not the D-Bus registration.
+- **Observed (live 2026-11-18):** the object
+  `.../serial_00000000_deca_fade_deca_deafdecacaff` appeared **during** the
+  CAFF connection with `status="connected"` and local/remote UUID CAFF. The
+  earlier absence had been seen only after a connection had closed, so it was
+  not a missing-registration result. Registration is established; delivery is
+  the open gate.
+- **Consequence:** orchestration was the only missing piece: an external
+  `ListenSPP` with the CAFF UUID creates the object. **No registration binary
+  patch is needed**: the broker's existing `ListenSPP`/`SendData` client can
+  use it. Whether bytes reach the phone is a separate gate (see the TX ladder
+  under P2).
+- **Important limit:** the `SerialPort.v2_0` interface is **TX-only**. The
+  introspection XML has no data-received signal and `VBTSppReceivedDataCfm`
+  is log-only, so P1 is still required for inbound iAP2 bytes.
+- **Fix:** **P2**, call `ListenSPP` with the CAFF UUID and verify the object
+  during a live connection (see `DEFERRED-CAR-PROBES.md` §1-2). Registration
+  is live-verified; delivery is not. Only if the service gate or device lookup
+  is dead, patch the orchestration; do not fill the `SetSpp*` stubs for
+  registration. Registration: `LIVE` 2026-11-18; TX ladder steps 2-4
+  `DEFERRED`.
+
+### G3. Wireless-capability flags are dead ends
+
+- **Evidence:**
+  - `PersistenceInterface::GetSupportWirelessCP()` ELF `0x6824c0`,
+    size `0x2e` — returns the zero value; no callers in the cached export.
+  - `PersistenceInterface::onSupportWirelessCPChanged()` ELF `0x6823d0`,
+    size `0x2e` — empty.
+  - `PowerStateManager::onSupportWirelessCPChanged(bool const&)` ELF
+    `0x6ba4e0`, size `0x2e` — empty.
+  - `ProjectionDeviceStateManager::onSupportWirelessCPChanged(bool const&)`
+    ELF `0x3b4610`, size `0x2e` — empty. Several identical empty listeners
+    (including `onSupportWirelessAAChanged`, `onLastPositionChanged`,
+    `onUserProfileKeyChanged`) are folded to this same address by
+    identical-code folding; the address is the stub, not a unique body.
+  - `ENABLE_WIRELESS_CARPLAY` is parsed by the VBTConfig loader
+    (`FUN_00439280`, ELF `0x339280`) into the config map, but no consumer was
+    found in the analyzed image. `VBTConfig::getSIGTestMode()` ELF `0x5b8ae0`
+    (ELF size `0x41f`; Ghidra analyzed only 65 bytes) has no SPP-manager
+    caller in the cached caller list.
+- **Consequence:** setting the JSON flag or forcing `GetSupportWirelessCP` is
+  not an activation path. It does not create a listener, a SerialPort object,
+  or an AirPlay receiver.
+- **Fix:** the first-party broker bypasses the capability gate and owns the
+  control plane. Do **not** patch `GetSupportWirelessCP` to `true` as a
+  shortcut; it is not sufficient and can mislead vendor state machines.
+
+### G4. No first-party control plane or MFi helper
+
+- **Evidence:** stock has no process that speaks the first-party iAP2
+  link/session/bootstrap path, and no `/run/scourge-carplay-auth/auth.sock`.
+  The MFi library (`/app/lib/libCoreUtils.so`, SHA-256
+  `9104e2c16ee27e647fac090ee7f3aa4cc686b8caaea1dc24763af2950c0ebfae`) and
+  chip exist, but nothing invokes them for a first-party session.
+- **Consequence:** even with RX and TX, there is no bounded certificate or
+  signature exchange, and no AP/identity/consent policy.
+- **Fix:** new first-party components, not OEM patches:
+  - `carplay-broker` (`packages/wifi1b/src/carplay/cp_broker_main.c` and the
+    broker modules) — supervised helper; iAP2 link/session/bootstrap, AP
+    readback, SPP D-Bus client, auth RPC.
+  - `carplay-native-auth` (`packages/wifi1b/src/carplay/cp_native_auth.c`) —
+    root-only MFi RPC against the real pinned library/chip.
+  - Default-off systemd units and owner config:
+    `packages/wifi1b/artifacts/systemd/` and
+    `packages/wifi1b/artifacts/carplay/README.md`.
+  All are `BUILT-OFFLINE`; none are installed or activated.
+
+### G5. Require a fresh, matching AP snapshot
+
+- The broker reads a bounded root-private regular file, rejects stale or
+  future timestamps, and requires active, ready AP mode with no pending apply.
+  Observed SSID/channel/security/link-local and configured SSID/PSK must
+  match immutable owner config. A mismatch prevents a new offer and clears
+  the pending offer hold; it does not retract an already-sent offer, which
+  still follows its bounded deadline or cancellation path.
+- This is configuration agreement, **not** radio key attestation; the
+  receiver port remains config-supplied. `--check-ap` is a read-only preflight.
+- **Status:** `BUILT-OFFLINE`; actual association and receiver port still
+  need live evidence.
+
+### G6. AirPlay receiver advertisement/projection is not wired
+
+- **Evidence:** port 7000 listens (`AirTunes/320.17.6`), but `GET /info`
+  returned `455 Method Not Valid In This State`; `_airplay._tcp` TXT/port was
+  not captured. `AppProjection` already calls `CarPlayAppFrameworkStart`
+  in its initialization thread, and the receiver attempts DNS-SD from its
+  start path. See [stock projection findings](STOCK-PROJECTION.md).
+- **Consequence:** a completed first-party pairing may still not make the
+  receiver advertise or accept AirPlay; the projection handoff is a separate
+  gate.
+- **Next:** **P3**, observe stock discovery, controller selection and
+  authenticated session setup. No startup patch is justified by the
+  current evidence. `DEFERRED` for car validation.
+
+### G7. Wired coexistence has a conservative live gate (not car-validated)
+
+- **Evidence:** the broker scans `/sys/bus/usb/devices` (configurable
+  `usb_sysfs`) for Apple vendor `05ac` at policy/offer checks and repeats it
+  on the session policy recheck. Any Apple USB device blocks the wireless
+  offer. A missing/unreadable root, an unreadable/oversized `idVendor` entry,
+  or a read error also blocks. The manual `usb_active=1` flag remains an
+  additional block.
+- **Residual gap:** the scan is point-in-time (not a continuous hotplug
+  monitor), fixture-tested, not car-validated. It treats a charging iPhone as
+  a blocker, and it does not detect a non-Apple wired projection session. Do
+  not set `usb_active=0` unless the live scan is confirmed and the owner
+  accepts the charging-phone block.
+- **Status:** `BUILT-OFFLINE`; car validation pending.
+
+### G8. Deployment/rollback is manual and default-off
+
+- **Evidence:** the patched `vbtd`, broker, MFi helper and units are not
+  installed by `build_payload.sh`.
+- **Consequence:** no accidental activation, but also no one-click deploy.
+- **Fix:** default-off artifacts plus the owner checklist in
+  `packages/wifi1b/artifacts/carplay/README.md`; temporary `vbtd` replacement
+  only with a stock backup and verified USB SSH. `BUILT-OFFLINE` plumbing.
+
+## 3. Patch inventory
+
+### New first-party components (not OEM patches)
+
+These implement the control plane that stock does not wire up. They are
+ordinary first-party binaries, not patches to Hyundai/LGE code.
+
+| Component | Responsibility | Status |
+|---|---|---|
+| `cp_wire` | Bounded iAP2 wire codec, identity fields, WiFi config messages | `BUILT-OFFLINE` |
+| `cp_link` | Link layer: sequencing, ACK/retransmit, bounded reorder | `BUILT-OFFLINE` |
+| `cp_bootstrap` | Identification, WiFi bootstrap, consent/USB policy, auth state machine | `BUILT-OFFLINE` |
+| `cp_session` | Session lifecycle and wire/link/bootstrap integration | `BUILT-OFFLINE` |
+| `cp_runtime_broker` | Supervised runtime: policy gates, SPP attach, RX/TX pump, restart | `BUILT-OFFLINE` |
+| `cp_spp_dbus` | Calls OEM `Adapter.ListenSPP`, discovers `org.bluez.SerialPort.SerialPort.v2_0_*`, calls `SendData`; no fake ACK | `BUILT-OFFLINE`; registration `LIVE`, delivery blocked by the G2 TX ladder |
+| `cp_spp_socket` | Root-only `SOCK_DGRAM` receiver for the P1 hook, `SO_PEERCRED` checked | `BUILT-OFFLINE` |
+| `cp_oem_auth_async` / `cp_auth_broker` | Nonblocking MFi RPC client; one operation in flight | `BUILT-OFFLINE` |
+| `cp_native_auth` | Root MFi helper; real pinned library/chip, bounded certificate/signature RPC | `BUILT-OFFLINE` |
+
+The broker never runs `ip`, `route`, SSH, AP or firewall commands. It only
+uses the explicit OEM session bus, the RX datagram socket, the read-only
+daemon status file, and the root MFi socket. A broker failure must not take
+down SSH, BlueLink, the AP, wired CarPlay or the stock receiver.
+
+**Target build proof (offline):** `build_carplay_broker.py` links the helper
+against the target rootfs glibc 2.25. Rebuilt 2026-11-19:
+`carplay-broker`, 240960 bytes,
+SHA-256 `bc89f525acf335e0143bc97ab7559a542699b49d797d36c3792422865cf92913`;
+NEEDED is exactly the allowed seven libraries; GLIBC references are
+`{2.2.5, 2.3, 2.4, 2.7, 2.14, 2.17}`; no RPATH/RUNPATH; no own `GLIBC_PRIVATE`
+references; loadability requires the matching 2.25 `ld.so`, which supplies
+the libraries' `GLIBC_PRIVATE` references. The helper was **not executed**;
+this is static loadability evidence only. `cp_target_compat.c` supplies the target-2.25
+`fstat`/`fstatat` and pre-C23 `strtol`/`strtoul` shims; it is a pure
+pass-through and does not weaken the socket's symlink/inode/uid checks.
+
+**Wire facts that must not drift**
+
+- iAP2 accessory-server UUID ends `CAFF`; phone-client UUID ends `CAFE`.
+- CarPlay service UUID is `EC884348-CD41-40A2-9727-575D50BF1FD3`.
+- Identification, discovery and session-start identity fields must agree.
+  Bluetooth MAC, AP MAC and pairing identifier are distinct roles.
+- WPA2 in the WiFi-config message omits the security enum; do not copy the
+  `0x5703` security value from a different message. WPA3 transition/only uses
+  the negotiated values, not a hardcoded 2.
+- The RX hook's UUID kind is evidence only; do not treat CAFE as an inbound
+  listener.
+
+### P1 — `vbtd-51` SPP RX hook (implemented offline)
+
+**Binary identity**
+
+| Item | Value |
+|---|---|
+| File | `/app/bin/vbtd-51` |
+| Size | `14117064` bytes |
+| SHA-256 | `55e21d077082e97f56fb113a1d3b216c0f2e63aa02fc4cd754a6593bc6cec9e0` |
+| Symbol | `_ZN13VBTSppManager21VBTSppReceivedDataCfmEP16T_VBT_EVENT_BASE` |
+| Demangled | `VBTSppManager::VBTSppReceivedDataCfm(T_VBT_EVENT_BASE*)` |
+| ELF vaddr | `0x490ec0` |
+| File offset | `0x490ec0` (verified through the executable `PT_LOAD`) |
+| ELF size | `0x355` (853) |
+| Preimage SHA-256 | `2f3ba61377b73547026a634511ed238899c37ca06fdb111e0f3e1919e3493f06` |
+
+**What the patch does**
+
+Replace the entire 853-byte function with a freestanding hook that:
+
+1. Rejects a null event.
+2. Reads the peer address (`std::string` data pointer at event `+0x08`, length
+   at `+0x10`) and requires exactly 17 printable ASCII bytes.
+3. Reads the UUID (`std::string` data pointer at `+0x30`, length at `+0x38`)
+   and requires exactly 36 bytes matching one of:
+   - CAFF `00000000-DECA-FADE-DECA-DEAFDECACAFF`
+   - CAFE `00000000-DECA-FADE-DECA-DEAFDECACAFE`
+   - CarPlay `EC884348-CD41-40A2-9727-575D50BF1FD3`
+4. Reads the payload pointer at `+0x50` and length at `+0x58`; requires
+   `1..16384` bytes.
+5. Sends one `AF_UNIX`/`SOCK_DGRAM` datagram to
+   `/run/wifi1b/carplay/rx.sock` with a 32-byte header and the opaque payload.
+   The socket is nonblocking, `MSG_DONTWAIT | MSG_NOSIGNAL`; a missing receiver
+   or full queue is a silent drop. The hook never blocks, allocates, logs,
+   sleeps, takes a lock, or raises `SIGPIPE`.
+6. Returns. The OEM event object is not modified.
+
+The hook does **not** call any OEM function and does **not** perform iAP2,
+authentication, pairing or projection. It is a capture/forward shim only.
+
+**Known risk:** P1 replaces the entire `0x355` span, but the cached Ghidra
+export only analyzed 200 bytes of it. Any stock side effects in the
+unanalyzed remainder are intentionally not preserved. If the vendor state
+machine depends on them, P2 must restore that state separately; do not assume
+the hook is a drop-in behavioural replacement for the stock callback.
+
+**Event ABI used (private, activation-time verification required)**
+
+| Offset | Field |
+|---|---|
+| `+0x08` | `std::string` peer data pointer |
+| `+0x10` | peer length (must be 17) |
+| `+0x30` | `std::string` UUID data pointer |
+| `+0x38` | UUID length (must be 36) |
+| `+0x50` | payload pointer |
+| `+0x58` | payload length (`uint32`) |
+
+This layout was recovered from the `-63` event ABI and is assumed to hold for
+`-51`. The hook validates lengths/pointers before use and drops anything that
+does not match, so a wrong ABI fails closed. Verify it on the car before
+relying on the forwarded payload.
+
+**Datagram format (little-endian, 32-byte header)**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic ASCII `W1BSPP01` |
+| 8 | 4 | payload length, `uint32` |
+| 12 | 17 | peer Bluetooth address, ASCII `AA:BB:CC:DD:EE:FF` |
+| 29 | 1 | UUID kind: `1`=CAFF, `2`=CAFE, `3`=CarPlay service |
+| 30 | 2 | reserved, zero |
+| 32 | N | opaque iAP2 payload |
+
+**Replacement identity (current builder/hook)**
+
+| Item | Value |
+|---|---|
+| Blob size | `660` bytes |
+| Blob SHA-256 | `7a436aa2d2d19cfea03ec6a2521df1e780d3374d27a34bbc8c26a519f81da485` |
+| NOP fill | `193` bytes (`0x90`) |
+| Output size | `14117064` bytes |
+| Output SHA-256 | `8691ad1468122c5f9f8c577dedb0f2185bb126b2f8afe8b94ceb44bcc095a9a9` |
+| Patched region SHA-256 | `b0d27780c8d3f7e831a110d94f5d2a28dab47175d18d9f78ab74a99150f32558` |
+| Hook source SHA-256 | `c06dd1ac7fa5bf2db92b682741251efbe6cfbeee35f4e269cb80f6f409e231bb` |
+| Hook header SHA-256 | `7a228f2f4ee0043ca08095facb407db733f6eda56dd3b2834ef091e00718c618` |
+| Builder SHA-256 | `5f76d49e351512e6abc07468bebfff1d9a2ffd19de01ef712e1c22584e521fe5` |
+| Manifest status | `EXPERIMENTAL_BUILD_ONLY_NOT_CAR_VALIDATED` |
+| `car_validated` | `false` |
+| `installer_activated` | `false` |
+| `oem_binary_executed` | `false` |
+
+The output SHA is toolchain-dependent in principle; the builder records the
+compiler/linker identity in the manifest. The security-relevant gates are the
+input SHA, exact preimage SHA, vaddr/offset mapping, function extent, blob fit,
+and byte equality outside the span.
+
+**Build**
+
+```sh
+python3 packages/wifi1b/scripts/build_carplay_spp_patch.py \
+  --input /path/to/vbtd-51 \
+  --out /tmp/opencode/vbtd51-patch \
+  --target 51
+```
+
+**Offline gates**
+
+```sh
+SCOURGE_ROOTFS=/path/to/rootfs \
+  python3 packages/wifi1b/tests/test_carplay_vbtd51_patch.py
+python3 packages/wifi1b/tests/test_carplay_spp_patch.py   # includes -63 regression
+```
+
+The `-51` test checks the target pins, exact preimage, blob fit,
+outside-span preservation, and a read-only real-firmware readback. The shared
+`test_carplay_spp_patch.py` covers wrong-binary and single-byte-corruption
+refusal, preimage mismatch, mapping and output gates. The OEM binary is never
+executed.
+
+### P2 — call `ListenSPP` and verify stock registration (no binary patch)
+
+The stock chain is present, and an external `ListenSPP` call with the CAFF
+UUID was confirmed live on 2026-11-18; no binary patch is needed for
+registration. The cached Ghidra export is **truncated** for several handlers;
+its `size` field is the analyzed prefix, not the ELF symbol size, so reanalyze
+full extents before concluding a function is empty.
+
+**Primary experiment (no binary patch)**
+
+Call the vendor adapter's `ListenSPP(string uuid, string name)` with the CAFF
+UUID. The broker already speaks this interface; the exact D-Bus service/path
+must be confirmed with `busctl tree` on the car. Expected chain:
+
+```text
+Adapter.ListenSPP
+  -> StackAdapterStub::ListenSPP 0x5cdc10
+  -> VBTSppManager::Listen 0x493a40
+  -> AdapterManager::IsServiceEnabled(0xa) gate at 0x493aef
+  -> VBTSppHandler::VBTSppListenReq 0x729740
+  -> BrcmSpp::BrcmSppListenCmd 0x784680
+```
+
+On a live CAFF connection, `VBTSppConnectCfm` (`0x498240`, size `0x18f9`)
+calls `DeviceManager::SetSerialPortConnectionStatus(..., 3)` at `0x498714`.
+That function generates `/dev_<peer>/serial_<uuid>`, calls
+`RemoteDevice::AddSerialPortList` (`0x48d920`), constructs
+`StackSerialPortStub` (`0x611fb0`), and registers the CommonAPI stub at
+`0x633743`. The object should exist while the connection is live and disappear
+on disconnect.
+
+If the object is absent, check:
+
+- SPP service `0xa` enabled (`AdapterManager::IsServiceEnabled` gate).
+- The phone is a known/paired device; otherwise `SetSerialPortConnectionStatus`
+  logs the not-found path at `0x478a20` (line `0x300`) and returns without
+  creating the object.
+- `VBTSppConnectCfm` actually received `VBT_SPP_CONNECT_CFM`; an RFCOMM connect
+  alone is not enough.
+
+**TX evidence ladder (replaces "one RFCOMM frame = delivery")**
+
+Do not send a CAFF PDU. Call `SendData` with one `0x00` byte, then record the
+four steps separately. A method ACK alone is not delivery, and step 3 is the
+honest ceiling of a one-byte probe.
+
+| Step | Evidence | Ceiling |
+|---|---|---|
+| 1 | D-Bus `SendData` returns `i 0` | Stub reply only: `StackSerialPortStub::SendData` (`0x612e50`) ignores the vendor result at `0x613011` and builds the zero reply at `0x613038` |
+| 2 | `VBTSppSendDataCfm` (`0x490b60`) log or equivalent | Request reached the vendor layer; not proof of phone receipt |
+| 3 | Matching outbound RFCOMM UIH for the peer/DLCI in a stock snoop trace | Host stack emission |
+| 4 | A reply that depends on the bytes | Peer receipt: iPhone needs the real iAP2 exchange (P1 RX); an owned cooperative SPP peer proves the stack path only |
+
+A bare `0x00` need not produce a reply, so step 3 does not imply step 4. The
+broker's existing `cp_spp_dbus` client can then be used for real iAP2 TX.
+
+**Host HCI snoop (offline static facts)**
+
+- `BSA_Boot` ELF `0x84ffe0` calls `DispBtSnoopInit` ELF `0x8a2260`;
+  `DispHciAclData` ELF `0x883ac0` runs inside the `bte_hcisu_send` ELF
+  `0x84f7b0` path, before the queued send. These are inside `vbtd-51`, re-verified by `objdump` against the
+  pinned whole-file SHA-256 `55e21d…cec9e0`; there is no separate per-function
+  pin. No capture was taken and no OEM code was executed.
+- `DispBtSnoopInit` opens its file with `O_CREAT|O_TRUNC` and exits the daemon
+  on failure. The startup path can supply the filename (`-b`/snoop config);
+  the in-binary pattern is `log_data/BT/vbt_snoop_<pid>.cfa`.
+- Capture must start before the phone connects, or RFCOMM SABM/PN is missing
+  from the trace. Prefer an already-enabled trace; otherwise one controlled
+  restart with the Phase 1 stock backup and explicit owner approval. Never
+  toggle snoop config silently on a live unit, and copy an existing trace
+  before a restart truncates it.
+- Read the btsnoop header's version and datalink fields before decoding; do
+  not assume H4 vs USB from the option or filename. Then follow L2CAP
+  signaling, RFCOMM SABM/PN, and UIH.
+- Captures stay outside the repo; record lengths, frame types, DLCIs and
+  hashes only.
+
+**Fallback patch (not preferred, not needed on this build)**
+
+The external `ListenSPP` path worked live, so this fallback is documented only
+for a build where the service gate is dead and no external call can enable it.
+The smallest orchestration edit is in `VBTSppEnableCfm`: NOP the
+`getSIGTestMode` branch at `0x495b6c` (`0f 84 9e 01 00 00` -> six NOPs).
+Caveat: that path listens on the standard SPP UUID `1101` (`BTSPP`), not CAFF;
+it proves the machinery but is unlikely to satisfy the phone's CarPlay SDP
+expectation. Any edit trips the whole-file SHA pin; re-pin through docs/09 and
+keep the patch WIP.
+
+**Do not** fill `SetSppListen` / `SetSppListenStatus` for registration. They
+are state-notification stubs for a `ConnectionStateManager` listener, not the
+D-Bus object path, and their signatures lack the peer address/UUID.
+
+**Address table (ELF vaddr, authoritative ELF size)**
+
+| Function | ELF vaddr | ELF size | Role |
+|---|---:|---:|---|
+| `StackAdapterStub::ListenSPP` | `0x5cdc10` | `0x776` | D-Bus listen entry |
+| `VBTSppManager::Listen` | `0x493a40` | `0x497` | SPP listen orchestration |
+| `VBTSppHandler::VBTSppListenReq` | `0x729740` | `0x340` | Request layer |
+| `BrcmSpp::BrcmSppListenCmd` | `0x784680` | `0xcc2` | Stack listen |
+| `VBTSppManager::VBTSppConnectCfm` | `0x498240` | `0x18f9` | Connection mapping |
+| `DeviceManager::SetSerialPortConnectionStatus` | `0x4784d0` | `0x8eb` | Registration driver |
+| `RemoteDevice::AddSerialPortList` | `0x48d920` | `0x894` | Per-device records |
+| `RemoteDevice::getSerialPortStub` | `0x48ba70` | `0x27d` | Stub lookup |
+| `GeniviCommonAPIFactory::registerSerialPortStub` | `0x633480` | `0x5e6` | CommonAPI registration |
+| `StackSerialPortStub` ctor | `0x611fb0` | — | Stub construction |
+| `StackSerialPortStub::SendData` | `0x612e50` | `0x394` | Actual TX method |
+| `VBTSppManager::SendData` | `0x494c30` | `0x482` | Vendor TX entry |
+| `VBTSppHandler::VBTSppSendDataReq` | `0x7294e0` | `0x259` | Request layer |
+| `BrcmSpp::BrcmSppSendCmd` | `0x7879f0` | `0x60e` | Stack TX |
+| `VBTSppManager::VBTSppSendDataCfm` | `0x490b60` | `0x355` | TX completion |
+| `VBTSppManager::VBTSppListenCfm` | `0x4950c0` | `0x40a` | Listener status |
+| `VBTSppManager::VBTSppEnableCfm` | `0x4958f0` | `0xd5a` | Enable/fallback gate |
+| `ProjectionDeviceStateManager::SetSppListen` | `0x3b4860` | `0x2e` | Empty state stub |
+| `ProjectionDeviceStateManager::SetSppListenStatus` | `0x3b4890` | `0x2e` | Empty state stub |
+| `ProjectionDeviceStateManager::SetSppDisconnectedStatus` | `0x3b48c0` | `0x3ec` | Log-only state stub |
+
+**Live result (2026-11-18):** with the phone connected, `ListenSPP(CAFF,
+SCOURGE-iAP)` returned `i 0`. The object
+`.../serial_00000000_deca_fade_deca_deafdecacaff` appeared **during the
+connection** with `status="connected"` and local/remote UUID CAFF.
+`SendData(ay 1 0x00)` returned `i 0` (ladder step 1); no vendor-acceptance
+log was recorded for the probe and no RFCOMM capture was available, so steps
+2-4 are unproven. AP clients remained 0, so the Wi-Fi bootstrap was not
+reached. The object persisted after `StopListenSPP` with status
+`"connected"`; it is expected to clear on phone disconnect. The adapter
+stayed `discoverable=true`, `pairable=false`; the daemon `/carplay/pair`
+action reported “Bluetooth control unavailable.” `carplay_ready` and
+`carplay_session_observed` stayed false.
+**No registration patch is needed for the live object.** P1/broker RX and the
+AP/bootstrap path remain the next gates.
+
+**Status:** primary experiment **live-verified for registration**; TX ladder
+step 1 only, steps 2-4 and full bootstrap `DEFERRED`. Fallback patch
+`DESIGN`, not implemented.
+
+### P3 — Stock AirPlay/projection handoff (static trace, live unverified)
+
+- `AppProjection` SHA-256
+  `8f0096bcc0734d4c9766c15bac54c42f302ed7057182c2573b5ac543913960e3`,
+  2,321,256 bytes, stripped.
+- `CarPlayAppFrameworkStart` is an **imported** framework symbol: PLT stub at
+  ELF `0x17b00`, `JUMP_SLOT` relocation at `0x435d28`. The cached export's
+  `0x439f48` entry is outside the last `PT_LOAD` (which ends at `0x438720`)
+  and is an analysis artifact, not code. The PLT stub is not the
+  implementation; patching it is not the fallback.
+- ELF `0xebfeb` is a real call from the application initialization thread;
+  ELF `0xf9b66` is a separate call into the wireless control client.
+  The no-phone `CAR_PLAY_CONNECT_REQ` refusal does not establish a missing
+  receiver start or a missing wireless selection step.
+- **Do not** patch `AppProjection`. Separate AP-side receiver discovery,
+  stock phone selection, authenticated setup, and first-frame evidence
+  as described in [the static trace](STOCK-PROJECTION.md).
+
+### Not patched: vendor iAP2 builder fallback is NO-GO
+
+The vendor wireless builder path was evaluated and rejected as a fallback: it
+would require patching `vbtd`, `iAP2Service`, `AppProjection`, and adding a new
+transport/AP provider; `ENABLE_WIRELESS_CARPLAY` is not consumed; and
+`GetSupportWirelessCP` returns false with empty change handlers. It is more
+surface area than the first-party broker and still does not guarantee the
+receiver starts. Recorded as a decision, not a patch plan.
+
+## 4. Full address map (vbtd-51, ELF vaddr)
+
+**Binary/library pins**
+
+| Artifact | Size | SHA-256 |
+|---|---:|---|
+| `vbtd-51` | `14117064` | `55e21d077082e97f56fb113a1d3b216c0f2e63aa02fc4cd754a6593bc6cec9e0` |
+| `vbtd-63` | `14149896` | `c56b68fdd35b16b95688ab54a48ffb9f18034d925c057e86f8b9fe304f8b26b9` |
+| `AppProjection` | `2321256` | `8f0096bcc0734d4c9766c15bac54c42f302ed7057182c2573b5ac543913960e3` |
+| `iAP2Service-2.0` | — | `38419131df82ec7e3c3b29a68ecc1a078c7f0b403051f137fe9f46f82b99f26e` |
+| `libCoreUtils.so` | `1200368` | `9104e2c16ee27e647fac090ee7f3aa4cc686b8caaea1dc24763af2950c0ebfae` |
+| `libiAP2AppFramework-2.0.so` | — | `d4d0558c9c53f02ee14024c081ccd83a02ca29404ef400131e2951f68a388120` |
+| `libAirPlay.so` | — | `ef9e69e3b3388d4a7a1d185827c710af25b8ee99d406c60c664a9609b00aada0` |
+
+Use `readelf -sW`/`nm -D -S` for the authoritative size. The "Ghidra" column
+is the analyzed prefix in the cached export and is often much smaller.
+
+| Function | ELF vaddr | ELF size | Ghidra | Status |
+|---|---:|---:|---:|---|
+| `VBTSppManager::VBTSppReceivedDataCfm` | `0x490ec0` | `0x355` | 200 | **P1 patched offline** |
+| `VBTSppManager::VBTSppSendDataCfm` | `0x490b60` | `0x355` | 200 | Stock; TX completion |
+| `VBTSppManager::SendData` | `0x494c30` | `0x482` | — | Vendor TX entry; inspect |
+| `VBTSppManager::VBTSppListenCfm` | `0x4950c0` | `0x40a` | 170 | Calls `SetSppListenStatus`; full body not cached |
+| `VBTSppManager::VBTSppEnableCfm` | `0x4958f0` | `0xd5a` | 252 | Calls `Listen`/`SetSppListen`; SIG-test branch |
+| `VBTSppManager::VBTSppConnectCfm` | `0x498240` | `0x18f9` | 39 | Calls `SetSerialPortConnectionStatus(...,3)` at `0x498714` |
+| `ProjectionDeviceStateManager::SetSppListen` | `0x3b4860` | `0x2e` | 46 | Empty state stub; called from `EnableCfm` at `0x495d1c` |
+| `ProjectionDeviceStateManager::SetSppListenStatus` | `0x3b4890` | `0x2e` | 46 | Empty state stub; called from `ListenCfm`/`StopCfm` |
+| `ProjectionDeviceStateManager::SetSppDisconnectedStatus` | `0x3b48c0` | `0x3ec` | 192 | Log-only; called from `DisconnectCfm` at `0x496fbe` |
+| `ProjectionDeviceStateManager::onSupportWirelessCPChanged` | `0x3b4610` | `0x2e` | 46 | Empty |
+| `PersistenceInterface::GetSupportWirelessCP` | `0x6824c0` | `0x2e` | 46 | Zero-return stub |
+| `PersistenceInterface::onSupportWirelessCPChanged` | `0x6823d0` | `0x2e` | 46 | Empty |
+| `PowerStateManager::onSupportWirelessCPChanged` | `0x6ba4e0` | `0x2e` | 46 | Empty |
+| `DeviceManager::SetSerialPortConnectionStatus` | `0x4784d0` | `0x8eb` | — | Registration driver |
+| `DeviceManager::AddSerialPortInterface` | `0x4708b0` | `0x481` | 48 | Exists; not the live path; no cached caller |
+| `RemoteDevice::AddSerialPortList` | `0x48d920` | `0x894` | 1271 | Reached from `SetSerialPortConnectionStatus` at `0x478885` |
+| `RemoteDevice::getSerialPortStub` | `0x48ba70` | `0x27d` | 352 | Stub lookup only |
+| `GeniviCommonAPIFactory::registerSerialPortStub` | `0x633480` | `0x5e6` | — | Registration factory (indirect/virtual) |
+| `StackSerialPortStub::SendData` | `0x612e50` | `0x394` | — | Actual stub TX |
+| `SerialPortStubDefault::SendData` (client) | `0xaad7e0` | `0x15f` | — | Default stub |
+| `SerialPortStubDefault::SendData` (short) | `0xaacd80` | `0x2e` | — | Short overload |
+| `initializeSerialPortDBusStubAdapter` | `0xaa4c60` | `0x124` | — | Registration |
+| `createSerialPortDBusStubAdapter` | `0xaa4d90` | `0x32d` | — | Registration |
+| `generateSerialPortPath` | `0x57d410` | `0x185` | — | Path helper |
+| `VBTSppHandler::VBTSppSendDataReq` | `0x7294e0` | `0x259` | — | Request entry |
+| VBTConfig loader (`FUN_00439280`) | `0x339280` | Ghidra-local | 3020 | Parses `ENABLE_WIRELESS_CARPLAY` |
+| `VBTConfig::getSIGTestMode` | `0x5b8ae0` | `0x41f` | 65 | No SPP caller found |
+| `AdapterManager::SetSIGTestMode` | `0x3e0dc0` | `0x2d3` | 244 | Generic SPP/test mode |
+
+The `vbtd-63` equivalent RX target is:
+
+| Item | Value |
+|---|---|
+| Size | `14149896` |
+| SHA-256 | `c56b68fdd35b16b95688ab54a48ffb9f18034d925c057e86f8b9fe304f8b26b9` |
+| `VBTSppReceivedDataCfm` vaddr/offset | `0x491c90` |
+| Extent | `0x355` |
+| Preimage SHA-256 | `ce4499ebe7786606b94c58809283f2306aacd77914c38f620807e396d19ca5c7` |
+
+`build_carplay_spp_patch.py --target 63` remains the default regression path;
+its output was byte-identical to the pre-`-51` builder in the checkpoint
+review.
+
+## 5. Reproduction workflow (Ghidra + REA)
+
+### 5.1 Verify the binary before touching it
+
+```sh
+BIN=/path/to/vbtd-51
+sha256sum "$BIN"
+stat -c '%s' "$BIN"
+```
+
+Expected for this firmware:
+
+```text
+55e21d077082e97f56fb113a1d3b216c0f2e63aa02fc4cd754a6593bc6cec9e0
+14117064
+```
+
+If either differs, stop. Do not port offsets by hand; use
+[`VBT-SPP-HOOK-PORTING.md`](VBT-SPP-HOOK-PORTING.md) to re-pin.
+
+### 5.2 Get exact extents from the ELF, not the decompiler
+
+```sh
+readelf -sW "$BIN" | grep VBTSppReceivedDataCfm
+nm -D -S -C "$BIN" | grep 'VBTSppManager::VBTSppReceivedDataCfm'
+```
+
+`readelf` gives the symbol value and `st_size`. `nm -D -S` gives the same
+demangled, with size. The cached Ghidra `functions.jsonl` `size` is only the
+analyzed prefix; it is **not** authoritative. For example, the export records
+39 bytes for `VBTSppConnectCfm`, while `readelf` records `0x18f9`.
+
+### 5.3 Ghidra image base
+
+In this cached project, Ghidra addresses are ELF vaddr plus `0x100000`
+(`VBTSppReceivedDataCfm`: Ghidra `0x590ec0`, ELF `0x490ec0`). Confirm the base
+from the first `PT_LOAD` before using any address:
+
+```sh
+readelf -lW "$BIN" | grep LOAD
+```
+
+The first executable `PT_LOAD` in this binary has `VirtAddr 0x0`; the Ghidra
+project was imported at `0x100000`. Do not assume another project uses the
+same base. In REA, use the ELF vaddr from `readelf`, then cross-check the
+Ghidra address.
+
+### 5.4 Map vaddr to file offset
+
+```python
+import struct
+from pathlib import Path
+data = Path("vbtd-51").read_bytes()
+phoff, = struct.unpack_from("<Q", data, 0x20)
+phentsize, phnum = struct.unpack_from("<HH", data, 0x36)
+for i in range(phnum):
+    off = phoff + i * phentsize
+    p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align = \
+        struct.unpack_from("<IIQQQQQQ", data, off)
+    if p_type == 1 and (p_flags & 1) and p_vaddr <= 0x490EC0 < p_vaddr + p_filesz:
+        print(hex(p_offset + (0x490EC0 - p_vaddr)))
+```
+
+For this build the result is `0x490ec0`, but always let the `PT_LOAD` mapping
+produce it. Never assume offset == vaddr.
+
+### 5.5 Confirm the exact preimage
+
+```python
+import hashlib
+from pathlib import Path
+data = Path("vbtd-51").read_bytes()
+start, length = 0x490EC0, 0x355
+print(hashlib.sha256(data[start:start+length]).hexdigest())
+```
+
+Expected:
+`2f3ba61377b73547026a634511ed238899c37ca06fdb111e0f3e1919e3493f06`.
+
+If the bytes differ, the binary is not the pinned build. Stop.
+
+### 5.6 Build and verify P1
+
+```sh
+rm -rf /tmp/opencode/vbtd51-patch
+python3 packages/wifi1b/scripts/build_carplay_spp_patch.py \
+  --input /path/to/vbtd-51 \
+  --out /tmp/opencode/vbtd51-patch \
+  --target 51
+```
+
+The builder must refuse on:
+
+- whole-file SHA/size mismatch;
+- vaddr not covered by exactly one executable `PT_LOAD`;
+- vaddr/offset mismatch against `config/firmware_locks.env`;
+- function preimage SHA mismatch;
+- hook blob larger than the function extent;
+- relocations, undefined symbols, oversized sections, non-`ret` terminal text;
+- missing expected hook strings;
+- any byte difference outside the replaced span.
+
+It writes `vbtd-51.spp-rx.patched` and
+`vbtd-51.spp-rx.manifest.json`. Check the manifest says
+`car_validated:false`, `installer_activated:false`,
+`oem_binary_executed:false`.
+
+### 5.7 Inspect the patched span
+
+```python
+from pathlib import Path
+p = Path("/tmp/opencode/vbtd51-patch/vbtd-51.spp-rx.patched").read_bytes()
+off, length, blob = 0x490EC0, 0x355, 660
+print(p[off:off+16].hex(" "))          # hook entry
+print(p[off+blob-16:off+blob].hex(" "))# last blob bytes
+print(p[off+blob:off+length].hex(" ")) # must be 0x90 * 193
+```
+
+Expected entry starts with `48 85 ff 0f 84 ...` (the hook's null check), the
+last blob bytes end with the socket path string, and the remaining 193 bytes
+are `90`.
+
+### 5.8 Run the offline suites
+
+```sh
+SCOURGE_ROOTFS=/path/to/rootfs \
+  python3 packages/wifi1b/tests/test_carplay_vbtd51_patch.py
+python3 packages/wifi1b/tests/test_carplay_spp_patch.py
+python3 packages/wifi1b/tests/test_carplay_broker_main.py
+python3 packages/wifi1b/tests/test_carplay_services.py
+```
+
+These are build/fixture tests, not car evidence.
+
+### 5.9 Deploy/rollback
+
+Use the owner checklist in
+`packages/wifi1b/artifacts/carplay/README.md`. Temporary replacement only:
+stock `vbtd` backup at a verified path, USB SSH reachable, atomic replace,
+labels preserved, restore on failure. Persistent replacement waits for owner
+approval and independent review.
+
+### 5.10 Search anchors for a new build
+
+Use these strings/xrefs in Ghidra or REA before guessing at function names:
+
+| Anchor | Where it leads |
+|---|---|
+| `W1BSPP01`, `/run/wifi1b/carplay/rx.sock` | P1 hook artifact / broker RX path |
+| `ListenSPP`, `StopListenSPP` | OEM adapter interface; broker D-Bus call |
+| `org.bluez.SerialPort.SerialPort.v2_0_` | SerialPort service/object prefix |
+| `SendData`, `onStatusAttributeChanged` | SerialPort stub methods/signals |
+| `ENABLE_WIRELESS_CARPLAY` | VBTConfig loader; not an activation switch |
+| `ENABLE_SERIAL_PORT_PROFILE` | VBTConfig loader; profile gate candidate |
+| `BTSPP`, `00001101-0000-1000-8000-00805F9B34FB` | generic SPP service table; not CAFF |
+| `00000000-DECA-FADE-DECA-DEAFDECACAFF` / `...CAFE` | CAFF/CAFE UUIDs |
+| `EC884348-CD41-40A2-9727-575D50BF1FD3` | CarPlay service UUID |
+| `_airplay._tcp`, `_carplay-ctrl._tcp` | AirPlay/receiver advertisement |
+| `CAR_PLAY_CONNECT_REQ`, `0x2aff` | vendor projection request/refusal |
+
+Cross-check every hit with the ELF symbol table; do not patch on a string hit
+alone.
+
+## 6. Deferred probes and what each would change
+
+SerialPort registration during a live connection was answered on 2026-11-18:
+the object appeared with `status="connected"`, so it is not listed below.
+Delivery is the open gate.
+
+| Probe | Question | If negative | If positive |
+|---|---|---|---|
+| SPP TX host emission | Does `SendData` int32 0 put a matching UIH on RFCOMM for the peer/DLCI? | P2/P3 blocked; do not treat the stub ACK as delivery | Host path proven; peer receipt still needs a reply that depends on the bytes |
+| Receiver listener owner/scope (D1) | Is port 7000 owned by an allowlisted stock process, and not loopback-only? | Unknown owner or loopback-only is a stop; do not patch | Proceed to AP-side identity corroboration |
+| SIG Test Mode listener | Does `VBT.GAP."SIG Test Mode"` create any listener? | No change; generic SPP is not CAFF | Still not CAFF; do not rely on it |
+| `_airplay._tcp` TXT/SRV | Does the receiver advertise on the AP without a vendor USB iAP2 session? | Check listener and DNS-SD scope/delivery | Proceed to controller discovery and setup |
+| MFi helper/chip | Do real certificate/signature bytes return? | Auth gate blocks; never fake AA00-AA05 | First-party auth can proceed |
+| Wired baseline | Does stock wired CarPlay work before/after? | Stop; preserve wired path first | Wireless coexistence can be evaluated |
+
+## 7. Explicit non-goals
+
+- Do not fake MFi authentication, Bluetooth pairing, AirPlay pair-verify, AP
+  credentials, receiver attestation or projection.
+- Do not patch `GetSupportWirelessCP` to `true` and call it activation.
+- Do not patch `SetSppListen` alone; it is an empty state-notification stub,
+  not a registration gate.
+- Do not patch the `CarPlayAppFrameworkStart` PLT stub at `0x17b00`; it is not
+  the implementation. The export's `0x439f48` entry is not mapped code.
+- Do not treat a broker `SendData` int32 `0` as delivery; it is only the OEM
+  stub's ACK.
+- Do not copy `vbtd-63` offsets, spans or event ABI to `-51` without
+  re-measuring and re-pinning.
+- Do not execute an OEM binary on the host. The builder reads and writes
+  bytes only.
+
+## 8. File and evidence map
+
+| Subject | File |
+|---|---|
+| Porting a hook to another build | `docs/wireless-carplay/VBT-SPP-HOOK-PORTING.md` |
+| Car-only probes and blockers | `docs/wireless-carplay/DEFERRED-CAR-PROBES.md` |
+| Current checkpoint/status | `docs/wireless-carplay/PROGRESS.md` |
+| Hook source/wire contract | `packages/wifi1b/src/carplay/cp_spp_rx_hook.c`, `cp_spp_rx.h` |
+| Patch builder/gates | `packages/wifi1b/scripts/build_carplay_spp_patch.py` |
+| Firmware pins | `config/firmware_locks.env` |
+| Broker helper | `packages/wifi1b/src/carplay/cp_broker_main.c` and sibling modules |
+| Broker target build | `packages/wifi1b/scripts/build_carplay_broker.py` |
+| Target-2.25 link shims | `packages/wifi1b/src/carplay/cp_target_compat.c` |
+| Target build regression | `packages/wifi1b/tests/test_carplay_broker_target.py` |
+| Apple-USB gate | `packages/wifi1b/src/carplay/cp_usb.c`, `tests/test_carplay_usb.py` |
+| MFi helper | `packages/wifi1b/src/carplay/cp_native_auth.c` |
+| MFi target build | `packages/wifi1b/scripts/build_carplay_native.py` |
+| Default-off units/checklist | `packages/wifi1b/artifacts/systemd/`, `packages/wifi1b/artifacts/carplay/README.md` |
+| Hook/broker tests | `packages/wifi1b/tests/test_carplay_vbtd51_patch.py`, `test_carplay_spp_patch.py`, `test_carplay_broker_main.py`, `test_carplay_broker_target.py`, `test_carplay_services.py` |
+
+**Bottom line:** one OEM binary patch is implemented and hash-gated (the
+`vbtd-51` RX hook). There is no vendor SerialPort TX/registration patch and
+no projection patch. The [stock projection trace](STOCK-PROJECTION.md)
+identifies the existing startup and wireless control paths, not a patch
+site.

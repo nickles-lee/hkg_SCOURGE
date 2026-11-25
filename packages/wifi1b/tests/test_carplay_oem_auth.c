@@ -6,6 +6,9 @@
  * used for certificate/signature fixtures are invented test patterns.
  */
 
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -323,6 +326,7 @@ static void test_mock_certificate_failures(void)
     cp_oem_auth_native_ops ops;
     uint8_t out[128];
     uint8_t canary[18];
+    uint8_t challenge[20] = {0};
     size_t out_len = 123u;
 
     mock_defaults(&mock);
@@ -334,7 +338,25 @@ static void test_mock_certificate_failures(void)
              -1);
     CHECK_EQ(out_len, 0u);
     CHECK_EQ(cp_oem_auth_last_error(&auth), CP_OEM_AUTH_ERR_INIT);
+    CHECK_EQ(mock.init_calls, 1);
     CHECK_EQ(mock.certificate_calls, 0);
+
+    /* A failed backend initialization is latched: neither certificate nor
+     * signature may reach the provider again. */
+    CHECK_EQ(cp_oem_auth_provider_signature(&auth, challenge,
+                                            sizeof(challenge), out,
+                                            sizeof(out), &out_len),
+             -1);
+    CHECK_EQ(out_len, 0u);
+    CHECK_EQ(cp_oem_auth_last_error(&auth), CP_OEM_AUTH_ERR_INIT);
+    CHECK_EQ(mock.signature_calls, 0);
+    CHECK_EQ(mock.init_calls, 1);
+    CHECK_EQ(cp_oem_auth_provider_certificate(&auth, out, sizeof(out),
+                                              &out_len),
+             -1);
+    CHECK_EQ(cp_oem_auth_last_error(&auth), CP_OEM_AUTH_ERR_INIT);
+    CHECK_EQ(mock.certificate_calls, 0);
+    CHECK_EQ(mock.init_calls, 1);
     cp_oem_auth_destroy(&auth);
 
     /* Init returns 0, but the actual certificate call fails. */
@@ -599,6 +621,26 @@ static void test_teardown_zeroization(void)
     cp_oem_auth_destroy(&auth); /* second destroy is explicitly safe */
 }
 
+static void test_destroy_lock_failure_closes_fd(void)
+{
+    cp_oem_auth auth;
+    mock_state mock;
+    cp_oem_auth_native_ops ops;
+    int fd;
+
+    mock_defaults(&mock);
+    ops = mock_ops(&mock);
+    CHECK_EQ(cp_oem_auth_open_mock(&auth, &ops), CP_OEM_AUTH_OK);
+    fd = dup(STDOUT_FILENO);
+    CHECK(fd >= 0);
+    auth.fd = fd;
+    auth.force_destroy_lock_failure = true;
+    cp_oem_auth_destroy(&auth);
+    errno = 0;
+    CHECK_EQ(fcntl(fd, F_GETFD), -1);
+    CHECK_EQ(errno, EBADF);
+}
+
 static void test_rpc_codec(void)
 {
     cp_oem_auth_rpc_request request;
@@ -692,9 +734,13 @@ static void test_rpc_no_server(void)
     uint8_t out[64];
     uint8_t challenge[20];
     size_t out_len = 0u;
+    char dir[] = "/tmp/opencode/cp-auth-noserver-XXXXXX";
+    char socket_path[CP_OEM_AUTH_SOCKET_PATH_MAX];
 
+    CHECK(mkdtemp(dir) != NULL);
+    CHECK(snprintf(socket_path, sizeof(socket_path), "%s/auth.sock", dir) > 0);
     memset(&config, 0, sizeof(config));
-    config.socket_path = "/tmp/opencode/cp-oem-auth-no-server/auth.sock";
+    config.socket_path = socket_path;
     config.timeout_ms = 100u;
     config.experimental = true;
     config.expected_peer_uid = (uint32_t)geteuid();
@@ -713,6 +759,7 @@ static void test_rpc_no_server(void)
              -1);
     CHECK_EQ(cp_oem_auth_last_error(&auth), CP_OEM_AUTH_ERR_RPC);
     cp_oem_auth_destroy(&auth);
+    CHECK_EQ(rmdir(dir), 0);
 }
 
 /* ---------------------------------------------------------------- */
@@ -838,7 +885,7 @@ static void test_no_auth_bypass(void)
 /* ---------------------------------------------------------------- */
 
 static int rpc_client_run(const char *socket_path, const char *mode,
-                          uint32_t timeout_ms)
+                          uint32_t timeout_ms, size_t out_cap)
 {
     cp_oem_auth_rpc_config config;
     cp_oem_auth auth;
@@ -850,6 +897,8 @@ static int rpc_client_run(const char *socket_path, const char *mode,
     int rc;
     int cert_rc = 0;
     int signature_rc = 0;
+    int cert_error = 0;
+    int signature_error = 0;
 
     memset(&config, 0, sizeof(config));
     config.socket_path = socket_path;
@@ -863,9 +912,12 @@ static int rpc_client_run(const char *socket_path, const char *mode,
     }
     provider = cp_oem_auth_boot_provider(&auth);
     memset(challenge, 0x42, sizeof(challenge));
+    if (out_cap == 0u || out_cap > sizeof(out)) {
+        out_cap = sizeof(out);
+    }
     if (strcmp(mode, "sign") != 0) {
         cert_rc = cp_oem_auth_provider_certificate(
-            provider.context, out, sizeof(out), &out_len);
+            provider.context, out, out_cap, &out_len);
         if (cert_rc == 0) {
             printf("cert_len=%zu\n", out_len);
             printf("cert_hex=");
@@ -874,13 +926,14 @@ static int rpc_client_run(const char *socket_path, const char *mode,
             }
             putchar('\n');
         } else {
-            printf("cert_error=%d\n", (int)cp_oem_auth_last_error(&auth));
+            cert_error = (int)cp_oem_auth_last_error(&auth);
+            printf("cert_error=%d\n", cert_error);
         }
     }
     if (strcmp(mode, "cert") != 0) {
         out_len = 0u;
         signature_rc = cp_oem_auth_provider_signature(
-            provider.context, challenge, sizeof(challenge), out, sizeof(out),
+            provider.context, challenge, sizeof(challenge), out, out_cap,
             &out_len);
         if (signature_rc == 0) {
             printf("sig_len=%zu\n", out_len);
@@ -890,12 +943,16 @@ static int rpc_client_run(const char *socket_path, const char *mode,
             }
             putchar('\n');
         } else {
-            printf("sig_error=%d\n", (int)cp_oem_auth_last_error(&auth));
+            signature_error = (int)cp_oem_auth_last_error(&auth);
+            printf("sig_error=%d\n", signature_error);
         }
     }
-    rc = cert_rc != 0 ? (int)cp_oem_auth_last_error(&auth) : 0;
-    if (rc == 0 && signature_rc != 0) {
-        rc = (int)cp_oem_auth_last_error(&auth);
+    if (cert_rc != 0) {
+        rc = cert_error;
+    } else if (signature_rc != 0) {
+        rc = signature_error;
+    } else {
+        rc = 0;
     }
     cp_oem_auth_destroy(&auth);
     return rc;
@@ -906,14 +963,22 @@ int main(int argc, char **argv)
     if (argc >= 3 && strcmp(argv[1], "--rpc-client") == 0) {
         char *end = NULL;
         unsigned long timeout = 0u;
+        unsigned long cap = 0u;
         if (argc >= 5) {
             timeout = strtoul(argv[4], &end, 10);
             if (end == argv[4] || *end != '\0' || timeout > 60000u) {
                 return 2;
             }
         }
+        if (argc >= 6) {
+            cap = strtoul(argv[5], &end, 10);
+            if (end == argv[5] || *end != '\0' || cap == 0u ||
+                cap > CP_OEM_AUTH_MAX_CERTIFICATE) {
+                return 2;
+            }
+        }
         return rpc_client_run(argv[2], argc >= 4 ? argv[3] : "both",
-                              (uint32_t)timeout);
+                              (uint32_t)timeout, (size_t)cap);
     }
     if (argc != 1) {
         return 2;
@@ -925,6 +990,7 @@ int main(int argc, char **argv)
     test_mock_signature();
     test_serialization();
     test_teardown_zeroization();
+    test_destroy_lock_failure_closes_fd();
     test_rpc_codec();
     test_rpc_no_server();
     test_no_auth_bypass();

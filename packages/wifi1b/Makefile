@@ -10,6 +10,7 @@ test-carplay:
 	done
 test: payload test-carplay
 	sh -n scripts/hotswap_daemon.sh
+	sh tests/test_hotswap.sh
 	python3 tests/test_release1b.py
 	python3 tests/test_qml1b.py
 	python3 tests/test_qmlpatch.py

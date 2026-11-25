@@ -38,11 +38,12 @@ with tempfile.TemporaryDirectory(prefix="wifi1b-usb0-", dir="/tmp/opencode") as 
     rule = tmp / "99-opi-usb0.rules"
     assert helper.is_file(), helper
     text = helper.read_text()
-    assert "10.55.0.2" in text and "255.255.255.0" in text
-    assert "route del default" in text
-    assert "WIFI1B_USB0_SSH" in text
-    assert "route add default" not in text
+    assert "--usb0-apply" in text
+    assert "ifconfig" not in text and "route del" not in text
+    assert "iptables" not in text
     assert rule.is_file()
-    assert 'KERNEL=="usb0"' in rule.read_text()
+    rule_text = rule.read_text()
+    assert 'KERNEL=="usb0"' in rule_text
+    assert "opi-usb0-up.sh usb0 2224" in rule_text
 
 print("PASS: USB SSH is ensured in WiFi client mode, under a foreign radio owner, and when WiFi is off")

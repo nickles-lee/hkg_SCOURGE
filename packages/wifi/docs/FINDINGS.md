@@ -73,7 +73,7 @@ Evidence:
 |---|---|
 | ConnMan CarPlay IE | `connmanctl tether_carplay_ie wifi on <manufacturer> <model> <name> <id> <btaddr>` |
 | ConnMan properties | `SetTetherCarPlayIE`, `GetTetherCarPlayIE`, `AddCarPlayIE`, `DelCarPlayIE`, `CarPlayManufacturer`, `CarPlayModelName`, `CarPlayDeviceName`, `CarPlayDeviceId`, `CarPlayBluetoothAddr` |
-| Bluetooth flag | `vbtd-51`/`vbtd-63` read `ENABLE_WIRELESS_CARPLAY` from `/app/data/vbt/VBTConfig.json` |
+| Bluetooth flag | `vbtd-51`/`vbtd-63` parse `ENABLE_WIRELESS_CARPLAY` from `/app/data/vbt/VBTConfig.json`; 260128 has no consumer query, so this is not an activation switch (see `docs/wireless-carplay/VBT-SPP-HOOK-PORTING.md`) |
 | Wireless projection | `GetSupportWirelessCP`, `ProjectionDeviceStateManager`, `PowerStateManager::onSupportWirelessCPChanged` |
 | Wireless transport | `iAP2Service-2.0`: `createWirelessCarPlayTransportComponentParamList`, `handleRequestAccessoryWiFiConfigInfo`, `WiFiInformation` |
 | mDNS | `app/bin/mdnsd`, `carplay_mdnsd.service` |

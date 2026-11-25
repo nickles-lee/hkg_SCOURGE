@@ -35,17 +35,36 @@ def nsenter(pid: int, command: list[str], **kwargs) -> subprocess.CompletedProce
 
 
 def packet(xid: int, mac: bytes, msgtype: int, requested: str | None = None,
-           client_id: bytes | None = None) -> bytes:
+           client_id: bytes | None = None, ciaddr: str | None = None,
+           server_id: str | None = None, giaddr: str | None = None,
+           flags: int = 0x8000) -> bytes:
+    ci = int.from_bytes(socket.inet_aton(ciaddr), "big") if ciaddr else 0
+    gi = int.from_bytes(socket.inet_aton(giaddr), "big") if giaddr else 0
     fixed = struct.pack("!BBBBIHHIIII16s64s128s", 1, 1, 6, 0, xid, 0,
-                        0x8000, 0, 0, 0, 0, mac + b"\0" * 10,
+                        flags, ci, 0, 0, gi, mac + b"\0" * 10,
                         b"\0" * 64, b"\0" * 128)
     opts = MAGIC + bytes([53, 1, msgtype, 55, 3, 1, 3, 6])
     if requested:
         opts += bytes([50, 4]) + socket.inet_aton(requested)
+    if server_id:
+        opts += bytes([54, 4]) + socket.inet_aton(server_id)
     if client_id:
         opts += bytes([61, len(client_id)]) + client_id
     opts += b"\xff"
     return fixed + opts
+
+
+def fixed_fields(data: bytes) -> dict:
+    op, htype, hlen, hops, xid, secs, flags, ci, yi, si, gi = struct.unpack(
+        "!BBBBIHHIIII", data[:28])
+    return {
+        "op": op, "htype": htype, "hlen": hlen, "hops": hops,
+        "xid": xid, "secs": secs, "flags": flags,
+        "ciaddr": socket.inet_ntoa(struct.pack("!I", ci)),
+        "yiaddr": socket.inet_ntoa(struct.pack("!I", yi)),
+        "siaddr": socket.inet_ntoa(struct.pack("!I", si)),
+        "giaddr": socket.inet_ntoa(struct.pack("!I", gi)),
+    }
 
 
 def parse(data: bytes):
@@ -67,6 +86,23 @@ def parse(data: bytes):
         out[code] = opts[i:i + length]
         i += length
     return op, socket.inet_ntoa(struct.pack("!I", yi)), out
+
+
+def assert_zero_padding(data: bytes) -> None:
+    opts = data[236:]
+    i = 4
+    while i < len(opts):
+        code = opts[i]
+        i += 1
+        if code == 0:
+            continue
+        if code == 255:
+            break
+        length = opts[i]
+        i += 1 + length
+    else:
+        raise AssertionError("missing DHCP end option")
+    assert all(byte == 0 for byte in opts[i:]), "non-zero DHCP padding"
 
 
 def reply(xid: int, mac: bytes, msgtype: int, yiaddr: str) -> bytes:
@@ -97,6 +133,8 @@ def test_client_id(binary: Path, env: dict) -> None:
         discover, client_addr = sock.recvfrom(1500)
         op, _yi, opts1 = parse(discover)
         assert op == 1 and opts1[53] == b"\x01", opts1
+        assert len(discover) >= 300, "DISCOVER below DHCP minimum 300"
+        assert_zero_padding(discover)
         assert 61 in opts1, "DISCOVER omitted client identifier"
         xid = struct.unpack("!I", discover[4:8])[0]
         mac = discover[28:34]
@@ -105,6 +143,8 @@ def test_client_id(binary: Path, env: dict) -> None:
         request, client_addr = sock.recvfrom(1500)
         op, _yi, opts2 = parse(request)
         assert op == 1 and opts2[53] == b"\x03", opts2
+        assert len(request) >= 300, "REQUEST below DHCP minimum 300"
+        assert_zero_padding(request)
         assert 61 in opts2, "REQUEST omitted client identifier"
         assert opts1[61] == opts2[61], (opts1[61], opts2[61])
         assert opts2[61][0] == 1 and opts2[61][1:] == mac
@@ -295,6 +335,8 @@ def test_renew_rebind(ctest: Path, env: dict) -> None:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             request, client_addr = sock.recvfrom(1500)
+            assert len(request) >= 300, "RENEW/REBIND below DHCP minimum 300"
+            assert_zero_padding(request)
             xid = struct.unpack("!I", request[4:8])[0]
             opts = parse(request)[2]
             assert socket.inet_ntoa(request[12:16]) == "10.42.0.10", (
@@ -401,6 +443,91 @@ def raw_dhcp_reply(xid: int, mac: bytes, msgtype: int, yiaddr: str,
                      socket.inet_aton("255.255.255.255"))
     ip = ip[:10] + struct.pack("!H", _checksum(ip)) + ip[12:]
     return ip + udp
+
+
+def test_nak_destination_netns(binary: Path, env: dict) -> None:
+    """Capture a NAK sent to 255.255.255.255 in a private netns.
+
+    The request carries a non-local ciaddr; receiving the NAK on a wildcard
+    socket proves the server did not use TEST_LOOPBACK or unicast the NAK to
+    the wrong address.
+    """
+    subprocess.run(["ip", "-4", "route", "del", "10.42.0.0/24", "dev", "lo"],
+                   check=False, capture_output=True)
+    subprocess.run(["ip", "link", "del", "wlan0"], check=False,
+                   capture_output=True)
+    run(["ip", "link", "add", "wlan0", "type", "dummy"])
+    run(["ip", "link", "set", "wlan0", "up"])
+    run(["ip", "-4", "addr", "add", "10.42.0.1/24", "dev", "wlan0"])
+    server_env = dict(env)
+    server_env.pop("WIFI1B_DHCP_TEST_LOOPBACK", None)
+    server_env["WIFI1B_DHCP_TEST_PORT"] = "6881"
+    server_env["WIFI1B_DHCP_TEST_CLIENT_PORT"] = "6882"
+    server = subprocess.Popen([str(binary), "--dhcpd"], env=server_env,
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", 6882))
+    sock.settimeout(3)
+    try:
+        mac = bytes.fromhex("020000000011")
+        pkt = packet(0x12345678, mac, 3, requested="10.42.0.250",
+                     ciaddr="10.42.0.99", client_id=b"\x01" + mac)
+        data = None
+        for _ in range(10):
+            sock.sendto(pkt, ("10.42.0.1", 6881))
+            try:
+                data, _ = sock.recvfrom(1500)
+                break
+            except socket.timeout:
+                time.sleep(0.1)
+        assert data is not None, "no broadcast NAK received"
+        assert len(data) >= 300, "broadcast NAK below DHCP minimum 300"
+        fixed = fixed_fields(data)
+        assert fixed["ciaddr"] == "0.0.0.0", fixed
+        assert fixed["yiaddr"] == "0.0.0.0", fixed
+        assert fixed["siaddr"] == "0.0.0.0", fixed
+        assert fixed["giaddr"] == "0.0.0.0", fixed
+        assert fixed["flags"] == 0x8000, fixed
+        opts = parse(data)[2]
+        assert opts[53] == b"\x06", opts
+        assert 54 in opts, opts
+        for forbidden in (1, 3, 6, 28, 51, 58, 59):
+            assert forbidden not in opts, (forbidden, opts)
+        assert set(opts).issubset({53, 54}), opts
+        assert_zero_padding(data)
+
+        # INFORM is addressed to ciaddr, retains yiaddr=0 and omits leases.
+        sock.close()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("10.42.0.1", 6882))
+        sock.settimeout(3)
+        inform = packet(0x2222, mac, 8, ciaddr="10.42.0.1",
+                        client_id=b"\x01" + mac)
+        sock.sendto(inform, ("10.42.0.1", 6881))
+        inform_data, _ = sock.recvfrom(1500)
+        assert len(inform_data) >= 300
+        info_fixed = fixed_fields(inform_data)
+        assert info_fixed["ciaddr"] == "10.42.0.1", info_fixed
+        assert info_fixed["yiaddr"] == "0.0.0.0", info_fixed
+        assert info_fixed["siaddr"] == "0.0.0.0", info_fixed
+        info_opts = parse(inform_data)[2]
+        assert info_opts[53] == b"\x05", info_opts
+        for forbidden in (51, 58, 59):
+            assert forbidden not in info_opts, (forbidden, info_opts)
+        assert_zero_padding(inform_data)
+    finally:
+        sock.close()
+        server.terminate()
+        try:
+            server.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            server.kill()
+        subprocess.run(["ip", "link", "del", "wlan0"], check=False,
+                       capture_output=True)
+    print("PASS: non-loopback private-netns NAK uses broadcast and NAK fields")
 
 
 def test_raw_client(ctest: Path, env: dict, tmp_path: Path) -> None:
@@ -570,6 +697,8 @@ def test_server_leases(binary: Path, app: Path, env: dict) -> None:
         "# mac ip expires_unix\n"
         f"02:00:00:00:00:0a 10.42.0.10 {now + 120}\n"
         f"02:00:00:00:00:0b 10.42.0.11 {now - 10}\n"
+        f"02:00:00:00:00:0e 10.42.0.12 {now + 120} extra\n"
+        "not-a-mac 10.42.0.13 " + f"{now + 120}\n"
         "02:00:00:00:00:0c 10.42.0.250 " + f"{now + 120}\n")
     server = start_server(binary, app, env)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -581,12 +710,116 @@ def test_server_leases(binary: Path, app: Path, env: dict) -> None:
         mac_b = bytes.fromhex("02000000000b")
         discover_b = packet(0x1001, mac_b, 1,
                             client_id=b"\x01" + mac_b)
-        op, yi, opts = parse(send_recv(sock, discover_b))
+        offer_data = send_recv(sock, discover_b)
+        op, yi, opts = parse(offer_data)
+        assert len(offer_data) >= 300, "OFFER below DHCP minimum 300"
+        assert_zero_padding(offer_data)
         assert op == 2 and opts[53] == b"\x02" and yi == "10.42.0.11", (op, yi, opts)
         request_b = packet(0x1001, mac_b, 3, requested=yi,
                            client_id=b"\x01" + mac_b)
-        op, yi2, opts2 = parse(send_recv(sock, request_b))
+        ack_data = send_recv(sock, request_b)
+        op, yi2, opts2 = parse(ack_data)
+        assert len(ack_data) >= 300, "ACK below DHCP minimum 300"
+        assert_zero_padding(ack_data)
         assert op == 2 and opts2[53] == b"\x05" and yi2 == "10.42.0.11"
+
+        # A real renewal carries ciaddr and no requested-IP option.
+        renew_b = send_recv(sock, packet(0x0906, mac_b, 3,
+                                         ciaddr="10.42.0.11",
+                                         client_id=b"\x01" + mac_b))
+        op, yi_renew, opts_renew = parse(renew_b)
+        assert op == 2 and opts_renew[53] == b"\x05" and yi_renew == "10.42.0.11"
+        assert_zero_padding(renew_b)
+
+        # Identity/address mismatch and unknown renewal are NAKed, not reused.
+        bad_identity = packet(0x0907, mac_b, 3, requested="10.42.0.10",
+                              client_id=b"\x01" + mac_b)
+        op, yi_bad, opts_bad = parse(send_recv(sock, bad_identity))
+        assert op == 2 and opts_bad[53] == b"\x06" and yi_bad == "0.0.0.0"
+        mac_e = bytes.fromhex("02000000000e")
+        unknown_renew = packet(0x0908, mac_e, 3, ciaddr="10.42.0.150",
+                               client_id=b"\x01" + mac_e)
+        op, yi_unknown, opts_unknown = parse(send_recv(sock, unknown_renew))
+        assert op == 2 and opts_unknown[53] == b"\x06" and yi_unknown == "0.0.0.0"
+
+        # INFORM must have no yiaddr/lease timers.
+        inform_data = send_recv(sock, packet(0x0902, mac_b, 8,
+                                             ciaddr="127.0.0.1",
+                                             client_id=b"\x01" + mac_b))
+        op, yi_info, opts_info = parse(inform_data)
+        assert len(inform_data) >= 300, "INFORM ACK below DHCP minimum 300"
+        assert_zero_padding(inform_data)
+        assert op == 2 and yi_info == "0.0.0.0", (op, yi_info)
+        inform_fixed = fixed_fields(inform_data)
+        assert inform_fixed["ciaddr"] == "127.0.0.1"
+        assert inform_fixed["yiaddr"] == "0.0.0.0"
+        assert inform_fixed["siaddr"] == "0.0.0.0"
+        assert inform_fixed["giaddr"] == "0.0.0.0"
+        assert opts_info[53] == b"\x05" and 54 in opts_info
+        assert 51 not in opts_info and 58 not in opts_info and 59 not in opts_info
+
+        # A REQUEST for another server's identifier is ignored, not ACKed.
+        sock.settimeout(0.8)
+        wrong_sid = packet(0x0903, bytes.fromhex("02000000000d"), 3,
+                           requested="10.42.0.10", server_id="10.42.0.2",
+                           client_id=b"\x01" + bytes.fromhex("02000000000d"))
+        sock.sendto(wrong_sid, ("127.0.0.1", 6871))
+        try:
+            sock.recvfrom(1500)
+            raise AssertionError("REQUEST with wrong server-id got a reply")
+        except socket.timeout:
+            pass
+        sock.settimeout(3)
+
+        # Relayed requests are unsupported and must not get a wrong-destination
+        # ACK/NAK.
+        relay = packet(0x0910, bytes.fromhex("020000000010"), 3,
+                       requested="10.42.0.10", giaddr="10.42.0.254",
+                       client_id=b"\x01" + bytes.fromhex("020000000010"))
+        sock.settimeout(0.8)
+        sock.sendto(relay, ("127.0.0.1", 6871))
+        try:
+            sock.recvfrom(1500)
+            raise AssertionError("relayed REQUEST got a reply")
+        except socket.timeout:
+            pass
+        sock.settimeout(3)
+
+        # Out-of-pool and in-use requested addresses must be NAKed, never
+        # allocated outside the configured pool.
+        mac_c = bytes.fromhex("02000000000c")
+        out_pool = packet(0x0904, mac_c, 3, requested="10.42.0.250",
+                          client_id=b"\x01" + mac_c)
+        pool_data = send_recv(sock, out_pool)
+        op, yi_pool, opts_pool = parse(pool_data)
+        assert len(pool_data) >= 300, "NAK below DHCP minimum 300"
+        assert_zero_padding(pool_data)
+        assert op == 2 and opts_pool[53] == b"\x06" and yi_pool == "0.0.0.0"
+        nak_fixed = fixed_fields(pool_data)
+        assert nak_fixed["ciaddr"] == "0.0.0.0", nak_fixed
+        assert nak_fixed["yiaddr"] == "0.0.0.0", nak_fixed
+        assert nak_fixed["siaddr"] == "0.0.0.0", nak_fixed
+        assert nak_fixed["giaddr"] == "0.0.0.0", nak_fixed
+        assert nak_fixed["flags"] == 0x8000, nak_fixed
+        for forbidden in (1, 3, 6, 28, 51, 58, 59):
+            assert forbidden not in opts_pool, (forbidden, opts_pool)
+        assert set(opts_pool).issubset({53, 54}), opts_pool
+
+        # NAK flags are copied from the request independently of the
+        # broadcast destination; a clear broadcast flag stays clear.
+        mac_clear = bytes.fromhex("02000000000e")
+        out_pool_clear = packet(0x0906, mac_clear, 3,
+                                requested="10.42.0.250",
+                                client_id=b"\x01" + mac_clear, flags=0)
+        clear_data = send_recv(sock, out_pool_clear)
+        assert fixed_fields(clear_data)["flags"] == 0
+        assert parse(clear_data)[2][53] == b"\x06"
+        mac_d = bytes.fromhex("02000000000d")
+        in_use = packet(0x0905, mac_d, 3, requested="10.42.0.11",
+                        client_id=b"\x01" + mac_d)
+        op, yi_used, opts_used = parse(send_recv(sock, in_use))
+        assert op == 2 and opts_used[53] == b"\x06" and yi_used == "0.0.0.0"
+        assert "10.42.0.250" not in leases.read_text()
 
         # Renewal of the loaded .10 lease must refresh its lifetime and persist.
         before = leases.read_text()
@@ -618,6 +851,8 @@ def test_server_leases(binary: Path, app: Path, env: dict) -> None:
             raise AssertionError((before, after))
         assert "02:00:00:00:00:0a 10.42.0.10" in after, after
         assert "02:00:00:00:00:0b 10.42.0.11" in after, after
+        assert "10.42.0.12" not in after, after
+        assert "10.42.0.13" not in after, after
         assert "10.42.0.250" not in after, after
     finally:
         sock.close()
@@ -645,7 +880,9 @@ def inner(isolated: bool) -> int:
             "-Wno-unused-parameter", "-Wno-format-truncation",
             "-Wno-unused-function", "-Wno-unused-variable",
             "-Wno-unused-but-set-variable",
-            "-DWIFI_TEST", f'-DAPP_DIR="{app}"', '-DWIFI_BUILD_ID="test"',
+            "-DWIFI_TEST", f'-DAPP_DIR="{app}"',
+            f'-DRADIO_OWNER_PATH="{app}/radio.owner"',
+            '-DWIFI_BUILD_ID="test"',
             "-static", "-o", str(binary),
             str(ROOT / "src/wifi1b_daemon.c")], check=True, timeout=90)
         subprocess.run([
@@ -653,7 +890,9 @@ def inner(isolated: bool) -> int:
             "-Wno-unused-parameter", "-Wno-format-truncation",
             "-Wno-unused-function", "-Wno-unused-variable",
             "-Wno-unused-but-set-variable",
-            "-DWIFI_TEST", f'-DAPP_DIR="{app}"', '-DWIFI_BUILD_ID="test"',
+            "-DWIFI_TEST", f'-DAPP_DIR="{app}"',
+            f'-DRADIO_OWNER_PATH="{app}/radio.owner"',
+            '-DWIFI_BUILD_ID="test"',
             "-static", "-o", str(ctest),
             str(ROOT / "tests/test_carplay_dhcp.c")], check=True, timeout=90)
         run([str(ctest)])
@@ -675,6 +914,7 @@ def inner(isolated: bool) -> int:
         if isolated:
             test_client_apply(binary, ctest, env)
             test_route_policy(ctest)
+            test_nak_destination_netns(binary, env)
             test_modem_safe(ctest)
             test_route_audit_no_flap(ctest, app)
             test_raw_client(ctest, env, tmp_path)

@@ -1009,6 +1009,32 @@ static void test_file_pins(void)
         CHECK(cp_oem_receiver_verify_files(directory, &pin, 1u, &failed) ==
                   CP_OEM_RECEIVER_OK,
               "matching file pin accepted");
+        {
+            char alias[256];
+            uint8_t digest[CP_OEM_RECEIVER_SHA256_LEN];
+            uint8_t sentinel[CP_OEM_RECEIVER_SHA256_LEN];
+            memset(sentinel, 0xa5, sizeof(sentinel));
+            memcpy(digest, sentinel, sizeof(digest));
+            (void)snprintf(alias, sizeof(alias), "%s/alias.bin", directory);
+            CHECK(symlink("fixture.bin", alias) == 0, "create pin symlink fixture");
+            CHECK(cp_oem_receiver_sha256_file(alias, digest) == CP_OEM_RECEIVER_ERR_IO,
+                  "pin hashing refuses symlink even with matching target bytes");
+            CHECK(memcmp(digest, sentinel, sizeof(digest)) == 0,
+                  "failed symlink hash leaves digest untouched");
+            CHECK(unlink(alias) == 0, "remove pin symlink fixture");
+            CHECK(symlink("missing.bin", alias) == 0, "create dangling pin symlink fixture");
+            CHECK(cp_oem_receiver_sha256_file(alias, digest) == CP_OEM_RECEIVER_ERR_IO,
+                  "pin hashing refuses dangling symlink");
+            CHECK(unlink(alias) == 0, "remove dangling pin symlink fixture");
+            CHECK(mkfifo(alias, 0600) == 0, "create FIFO pin fixture");
+            CHECK(cp_oem_receiver_sha256_file(alias, digest) == CP_OEM_RECEIVER_ERR_BOUNDS,
+                  "pin hashing refuses FIFO without blocking for a writer");
+            CHECK(memcmp(digest, sentinel, sizeof(digest)) == 0,
+                  "failed FIFO hash leaves digest untouched");
+            CHECK(unlink(alias) == 0, "remove FIFO pin fixture");
+            CHECK(cp_oem_receiver_sha256_file(directory, digest) == CP_OEM_RECEIVER_ERR_BOUNDS,
+                  "pin hashing refuses directory");
+        }
         written_fd = open(path, O_CREAT | O_TRUNC | O_WRONLY, 0600);
         if (written_fd >= 0) {
             (void)write_all(written_fd, (const uint8_t *)"abd", 3u);
@@ -1018,6 +1044,24 @@ static void test_file_pins(void)
                   CP_OEM_RECEIVER_ERR_PIN_MISMATCH,
               "mismatched file pin rejected");
         CHECK(failed == 0u, "failed pin index reported");
+        {
+            uint8_t digest[CP_OEM_RECEIVER_SHA256_LEN];
+            uint8_t sentinel[CP_OEM_RECEIVER_SHA256_LEN];
+            const off_t cap = (off_t)64 * 1024 * 1024;
+            memset(sentinel, 0xa5, sizeof(sentinel));
+            memcpy(digest, sentinel, sizeof(digest));
+            written_fd = open(path, O_WRONLY | O_TRUNC);
+            CHECK(written_fd >= 0, "open sparse size-limit fixture");
+            CHECK(ftruncate(written_fd, cap + 1) == 0, "create sparse over-cap fixture");
+            CHECK(cp_oem_receiver_sha256_file(path, digest) == CP_OEM_RECEIVER_ERR_BOUNDS,
+                  "hashing rejects 64 MiB plus one before reading");
+            CHECK(memcmp(digest, sentinel, sizeof(digest)) == 0,
+                  "over-cap hash leaves digest untouched");
+            CHECK(ftruncate(written_fd, cap) == 0, "resize sparse fixture to exact cap");
+            CHECK(cp_oem_receiver_sha256_file(path, digest) == CP_OEM_RECEIVER_OK,
+                  "hashing accepts exact 64 MiB policy boundary");
+            CHECK(close(written_fd) == 0, "close sparse fixture descriptor");
+        }
         (void)unlink(path);
     }
     (void)rmdir(directory);

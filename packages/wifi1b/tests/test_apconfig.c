@@ -32,6 +32,19 @@ int main(void)
     assert(strstr(conf, "ap_scan=2"));
     assert(strstr(conf, "app_info=1"));
     assert(strstr(conf, "carplay_id=aa:bb:cc:dd:ee:ff"));
+    assert(strstr(conf, "ap_vendor_elements=") == NULL);
+    g_cfg.cp_vendor_ie = true;
+    assert(write_ap_conf());
+    assert(read_file(WPA_CONF, conf, sizeof(conf)) > 0);
+    assert(strstr(conf, "ap_vendor_elements=dd0800a0400000020021"));
+    g_cfg.cp_band = 1;
+    g_cfg.cp_channel = 6;
+    assert(write_ap_conf());
+    assert(read_file(WPA_CONF, conf, sizeof(conf)) > 0);
+    assert(strstr(conf, "ap_vendor_elements=dd0800a0400000020022"));
+    g_cfg.cp_vendor_ie = false;
+    g_cfg.cp_band = 2;
+    g_cfg.cp_channel = 36;
     assert(strstr(conf, "app_info=1") < strstr(conf, "network={"));
     assert(strstr(conf, "carplay_id=") < strstr(conf, "network={"));
     assert(strstr(conf, "    app_info=") == NULL);
@@ -46,6 +59,33 @@ int main(void)
     assert(write_ap_conf());
     assert(read_file(WPA_CONF, conf, sizeof(conf)) > 0);
     assert(strstr(conf, "frequency=2437"));
+
+    /* The Bluetooth MAC never replaces an explicit/distinct AP identity. */
+    str_copy(g_cfg.cp_btaddr, sizeof(g_cfg.cp_btaddr), "aa:bb:cc:dd:ee:ff");
+    g_cfg.cp_id[0] = '\0';
+    prepare_carplay_identity();
+    assert(!g_cfg.cp_id[0] || strcmp(g_cfg.cp_id, g_cfg.cp_btaddr) != 0);
+    str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), "SCOURGE-AP-ID");
+    prepare_carplay_identity();
+    assert(strcmp(g_cfg.cp_id, "SCOURGE-AP-ID") == 0);
+    assert(strcmp(g_cfg.cp_id, g_cfg.cp_btaddr) != 0);
+    assert(write_ap_conf());
+    assert(read_file(WPA_CONF, conf, sizeof(conf)) > 0);
+    assert(strstr(conf, "carplay_id=SCOURGE-AP-ID"));
+
+    /* File/config-derived ids are validated; a quote/newline cannot inject a
+     * second supplicant directive.  The field is omitted, not rewritten. */
+    assert(!carplay_id_allowed("bad\"id\nnetwork={\n"));
+    assert(!carplay_id_allowed("bad id"));
+    assert(!carplay_id_allowed(""));
+    assert(carplay_id_allowed("SCOURGE-AP_ID.1:2"));
+    str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), "bad\"id\nnetwork={\n");
+    prepare_carplay_identity();
+    assert(write_ap_conf());
+    assert(read_file(WPA_CONF, conf, sizeof(conf)) > 0);
+    assert(strstr(conf, "carplay_id=") == NULL);
+    assert(strstr(conf, "bad") == NULL);
+    assert(strstr(conf, "\nnetwork={\nnetwork={\n") == NULL);
 
     assert(write_station_conf("iPhone", "fixture-client-key", false));
     assert(read_file(WPA_CONF, conf, sizeof(conf)) > 0);

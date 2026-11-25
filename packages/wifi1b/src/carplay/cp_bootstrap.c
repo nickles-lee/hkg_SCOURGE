@@ -286,6 +286,29 @@ cp_boot_error cp_bootstrap_set_policy(cp_bootstrap *session,
     return CP_BOOT_OK;
 }
 
+cp_boot_error cp_bootstrap_set_async_auth(cp_bootstrap *session, bool enabled)
+{
+    if (session == NULL) return CP_BOOT_ERR_ARGUMENT;
+    if (session->identification_sent || session->identified ||
+        session->auth_state != CP_BOOT_AUTH_NONE)
+        return CP_BOOT_ERR_ORDER;
+    session->async_auth = enabled;
+    memset(&session->auth_request, 0, sizeof(session->auth_request));
+    return CP_BOOT_OK;
+}
+
+bool cp_bootstrap_auth_request(const cp_bootstrap *session,
+                               cp_boot_auth_request *request)
+{
+    if (session == NULL || request == NULL || !session->async_auth ||
+        session->auth_request.op == CP_BOOT_AUTH_OP_NONE ||
+        session->auth_request.generation != session->generation ||
+        !session->identified || session->state == CP_BOOT_STATE_FAILED)
+        return false;
+    *request = session->auth_request;
+    return true;
+}
+
 static void clear_pending(cp_bootstrap *session)
 {
     session->pending_start = false;
@@ -293,10 +316,21 @@ static void clear_pending(cp_bootstrap *session)
     session->pending_generation = 0u;
 }
 
+static void clear_pending_auth(cp_bootstrap *session)
+{
+    session->pending_auth_cert = false;
+    session->have_pending_auth_challenge = false;
+    session->pending_auth_challenge_len = 0u;
+    memset(session->pending_auth_challenge, 0,
+           sizeof(session->pending_auth_challenge));
+}
+
 static void clear_offer(cp_bootstrap *session)
 {
     session->offer_active = false;
     session->offer_deadline_ms = 0u;
+    session->offer_held = false;
+    session->offer_hold_generation = 0u;
 }
 
 static void reflect_invalidated_state(cp_bootstrap *session)
@@ -312,6 +346,8 @@ static void reflect_invalidated_state(cp_bootstrap *session)
 
 static void invalidate_offer(cp_bootstrap *session)
 {
+    memset(&session->auth_request, 0, sizeof(session->auth_request));
+    clear_pending_auth(session);
     clear_pending(session);
     clear_offer(session);
     session->generation++;
@@ -329,6 +365,8 @@ static void fail_identification(cp_bootstrap *session, cp_boot_event event,
     session->identified = false;
     session->auth_state = CP_BOOT_AUTH_NONE;
     session->auth_exchanges = 0u;
+    memset(&session->auth_request, 0, sizeof(session->auth_request));
+    clear_pending_auth(session);
     clear_pending(session);
     clear_offer(session);
     session->generation++;
@@ -340,10 +378,86 @@ static void fail_authentication(cp_bootstrap *session, cp_boot_event event,
 {
     session->auth_state = CP_BOOT_AUTH_FAILED;
     session->state = CP_BOOT_STATE_FAILED;
+    memset(&session->auth_request, 0, sizeof(session->auth_request));
+    clear_pending_auth(session);
     clear_pending(session);
     clear_offer(session);
     session->generation++;
     *result = make_result(session, event, error, 0u);
+}
+
+static cp_boot_result begin_async_auth(cp_bootstrap *session,
+                                      cp_boot_auth_op op,
+                                      const uint8_t *challenge, size_t len)
+{
+    cp_boot_result result;
+    if (session->auth_request.op != CP_BOOT_AUTH_OP_NONE &&
+        session->auth_request.generation == session->generation) {
+        if (session->auth_request.op == op &&
+            session->auth_request.challenge_len == len &&
+            (len == 0u || !memcmp(session->auth_request.challenge, challenge, len)))
+            return make_result(session, CP_BOOT_EV_AUTH_PENDING, CP_BOOT_OK, 0u);
+        fail_authentication(session, CP_BOOT_EV_AUTH_FAILED, CP_BOOT_ERR_ORDER,
+                            &result);
+        return result;
+    }
+    if (len > sizeof(session->auth_request.challenge) ||
+        session->next_auth_token == UINT64_MAX ||
+        session->last_now_ms > UINT64_MAX - CP_BOOT_ASYNC_AUTH_TIMEOUT_MS) {
+        fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
+                            CP_BOOT_ERR_AUTH_PROVIDER, &result);
+        return result;
+    }
+    memset(&session->auth_request, 0, sizeof(session->auth_request));
+    session->auth_request.op = op;
+    session->auth_request.generation = session->generation;
+    session->auth_request.token = ++session->next_auth_token;
+    session->auth_request.deadline_ms = session->last_now_ms +
+                                       CP_BOOT_ASYNC_AUTH_TIMEOUT_MS;
+    session->auth_request.challenge_len = len;
+    if (len) memcpy(session->auth_request.challenge, challenge, len);
+    session->auth_exchanges++;
+    return make_result(session, CP_BOOT_EV_AUTH_PENDING, CP_BOOT_OK, 0u);
+}
+
+cp_boot_result cp_bootstrap_auth_complete(
+    cp_bootstrap *session, uint64_t generation, uint64_t token,
+    cp_boot_auth_op op, bool success, const uint8_t *blob, size_t blob_len,
+    uint64_t now_ms, uint8_t *out, size_t out_cap)
+{
+    cp_boot_auth_request request;
+    cp_boot_result result;
+    size_t out_len = 0u;
+    cp_wire_status status;
+    if (!cp_bootstrap_auth_request(session, &request) ||
+        generation != request.generation || token != request.token ||
+        op != request.op)
+        return make_result(session, CP_BOOT_EV_ERROR, CP_BOOT_ERR_ORDER, 0u);
+    if (!accept_time(session, now_ms))
+        return error_result(session, CP_BOOT_ERR_ARGUMENT);
+    if (now_ms >= request.deadline_ms || !success || blob == NULL ||
+        blob_len == 0u || blob_len > CP_BOOT_MAX_AUTH_BLOB) {
+        fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
+                            now_ms >= request.deadline_ms ? CP_BOOT_ERR_TIMEOUT :
+                            CP_BOOT_ERR_AUTH_PROVIDER, &result);
+        return result;
+    }
+    status = op == CP_BOOT_AUTH_OP_CERTIFICATE ?
+        cp_wire_encode_auth_certificate(blob, blob_len, out, out_cap, &out_len) :
+        cp_wire_encode_auth_response(blob, blob_len, out, out_cap, &out_len);
+    if (status == CP_WIRE_ERR_BUFFER || status == CP_WIRE_ERR_ARGUMENT)
+        return error_result(session, CP_BOOT_ERR_BUFFER);
+    if (status != CP_WIRE_OK) {
+        fail_authentication(session, CP_BOOT_EV_AUTH_FAILED, CP_BOOT_ERR_WIRE,
+                            &result);
+        return result;
+    }
+    memset(&session->auth_request, 0, sizeof(session->auth_request));
+    session->auth_state = op == CP_BOOT_AUTH_OP_CERTIFICATE ?
+        CP_BOOT_AUTH_CERT_SENT : CP_BOOT_AUTH_RESPONSE_SENT;
+    return make_result(session, op == CP_BOOT_AUTH_OP_CERTIFICATE ?
+                       CP_BOOT_EV_AUTH_CERT_SENT : CP_BOOT_EV_AUTH_RESPONSE_SENT,
+                       CP_BOOT_OK, out_len);
 }
 
 static bool id_equal_ci(const char *a, const char *b)
@@ -564,7 +678,8 @@ static cp_boot_result attempt_start(cp_bootstrap *session, uint64_t now_ms,
         return make_result(session, CP_BOOT_EV_START_REFUSED,
                            CP_BOOT_ERR_ORDER, 0u);
     }
-    if (session->auth_state != CP_BOOT_AUTH_SUCCEEDED) {
+    if (session->auth_state != CP_BOOT_AUTH_SUCCEEDED ||
+        !session->identified) {
         clear_pending(session);
         return make_result(session, CP_BOOT_EV_START_REFUSED,
                            CP_BOOT_ERR_ORDER, 0u);
@@ -608,6 +723,8 @@ static cp_boot_result attempt_start(cp_bootstrap *session, uint64_t now_ms,
     }
     clear_pending(session);
     session->offer_active = true;
+    session->offer_held = false;
+    session->offer_hold_generation = 0u;
     session->offer_deadline_ms = deadline_after(now_ms, session->ap_wait_ms);
     session->state = CP_BOOT_STATE_AWAITING_RECEIVER;
     return make_result(session, CP_BOOT_EV_START_SENT, CP_BOOT_OK, out_len);
@@ -710,20 +827,15 @@ static cp_boot_result handle_identification_rejected(cp_bootstrap *session,
     return result;
 }
 
-static cp_boot_result handle_auth_certificate_request(
-    cp_bootstrap *session, const cp_wire_view *view, uint8_t *out,
-    size_t out_cap)
+static cp_boot_result respond_auth_certificate(cp_bootstrap *session,
+                                               uint8_t *out, size_t out_cap)
 {
-    cp_wire_status st;
     size_t blob_len = 0u;
     size_t out_len = 0u;
+    cp_wire_status st;
     int rc;
     cp_boot_result result;
 
-    if (!session->identified) {
-        return make_result(session, CP_BOOT_EV_START_REFUSED,
-                           CP_BOOT_ERR_ORDER, 0u);
-    }
     if (session->auth_state == CP_BOOT_AUTH_SUCCEEDED) {
         return make_result(session, CP_BOOT_EV_IGNORED, CP_BOOT_OK, 0u);
     }
@@ -736,15 +848,13 @@ static cp_boot_result handle_auth_certificate_request(
                             CP_BOOT_ERR_ORDER, &result);
         return result;
     }
-    st = cp_wire_decode_empty(view, CP_WIRE_MSG_AUTH_CERT_REQUEST);
-    if (st != CP_WIRE_OK) {
-        return error_result(session, CP_BOOT_ERR_WIRE);
-    }
     if (session->auth_exchanges >= CP_BOOT_MAX_AUTH_EXCHANGES) {
         fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
                             CP_BOOT_ERR_AUTH_FAILED, &result);
         return result;
     }
+    if (session->async_auth)
+        return begin_async_auth(session, CP_BOOT_AUTH_OP_CERTIFICATE, NULL, 0u);
     if (session->auth_provider.certificate == NULL) {
         fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
                             CP_BOOT_ERR_AUTH_PROVIDER, &result);
@@ -775,23 +885,47 @@ static cp_boot_result handle_auth_certificate_request(
                        out_len);
 }
 
-static cp_boot_result handle_auth_challenge_request(cp_bootstrap *session,
-                                                    const cp_wire_view *view,
-                                                    uint8_t *out,
-                                                    size_t out_cap)
+static cp_boot_result handle_auth_certificate_request(
+    cp_bootstrap *session, const cp_wire_view *view, uint8_t *out,
+    size_t out_cap)
 {
-    const uint8_t *challenge = NULL;
-    size_t challenge_len = 0u;
+    cp_wire_status st;
+
+    if (session->auth_state == CP_BOOT_AUTH_FAILED) {
+        return make_result(session, CP_BOOT_EV_AUTH_FAILED,
+                           CP_BOOT_ERR_AUTH_FAILED, 0u);
+    }
+    if (session->auth_state == CP_BOOT_AUTH_SUCCEEDED) {
+        return make_result(session, CP_BOOT_EV_IGNORED, CP_BOOT_OK, 0u);
+    }
+    st = cp_wire_decode_empty(view, CP_WIRE_MSG_AUTH_CERT_REQUEST);
+    if (st != CP_WIRE_OK) {
+        return error_result(session, CP_BOOT_ERR_WIRE);
+    }
+    if (session->state == CP_BOOT_STATE_FAILED) {
+        return make_result(session, CP_BOOT_EV_START_REFUSED,
+                           CP_BOOT_ERR_ORDER, 0u);
+    }
+    if (!session->identified) {
+        /* Auth-first order: decode and buffer, but never call a credential
+         * provider or emit AA01 before identification succeeds. */
+        session->pending_auth_cert = true;
+        return make_result(session, CP_BOOT_EV_AUTH_PENDING, CP_BOOT_OK, 0u);
+    }
+    return respond_auth_certificate(session, out, out_cap);
+}
+
+static cp_boot_result respond_auth_challenge(cp_bootstrap *session,
+                                             const uint8_t *challenge,
+                                             size_t challenge_len,
+                                             uint8_t *out, size_t out_cap)
+{
     size_t blob_len = 0u;
     size_t out_len = 0u;
     cp_wire_status st;
     int rc;
     cp_boot_result result;
 
-    if (!session->identified) {
-        return make_result(session, CP_BOOT_EV_START_REFUSED,
-                           CP_BOOT_ERR_ORDER, 0u);
-    }
     if (session->auth_state == CP_BOOT_AUTH_SUCCEEDED) {
         return make_result(session, CP_BOOT_EV_IGNORED, CP_BOOT_OK, 0u);
     }
@@ -804,17 +938,14 @@ static cp_boot_result handle_auth_challenge_request(cp_bootstrap *session,
                             CP_BOOT_ERR_ORDER, &result);
         return result;
     }
-    st = cp_wire_decode_challenge_request(view, &challenge, &challenge_len);
-    if (st != CP_WIRE_OK) {
-        fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
-                            CP_BOOT_ERR_WIRE, &result);
-        return result;
-    }
     if (session->auth_exchanges >= CP_BOOT_MAX_AUTH_EXCHANGES) {
         fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
                             CP_BOOT_ERR_AUTH_FAILED, &result);
         return result;
     }
+    if (session->async_auth)
+        return begin_async_auth(session, CP_BOOT_AUTH_OP_SIGNATURE,
+                                challenge, challenge_len);
     if (session->auth_provider.signature == NULL) {
         fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
                             CP_BOOT_ERR_AUTH_PROVIDER, &result);
@@ -845,6 +976,61 @@ static cp_boot_result handle_auth_challenge_request(cp_bootstrap *session,
                        out_len);
 }
 
+static cp_boot_result handle_auth_challenge_request(cp_bootstrap *session,
+                                                    const cp_wire_view *view,
+                                                    uint8_t *out,
+                                                    size_t out_cap)
+{
+    const uint8_t *challenge = NULL;
+    size_t challenge_len = 0u;
+    cp_wire_status st;
+    cp_boot_result result;
+
+    if (session->auth_state == CP_BOOT_AUTH_FAILED) {
+        return make_result(session, CP_BOOT_EV_AUTH_FAILED,
+                           CP_BOOT_ERR_AUTH_FAILED, 0u);
+    }
+    if (session->auth_state == CP_BOOT_AUTH_SUCCEEDED) {
+        return make_result(session, CP_BOOT_EV_IGNORED, CP_BOOT_OK, 0u);
+    }
+    st = cp_wire_decode_challenge_request(view, &challenge, &challenge_len);
+    if (st != CP_WIRE_OK) {
+        fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
+                            CP_BOOT_ERR_WIRE, &result);
+        return result;
+    }
+    if (session->state == CP_BOOT_STATE_FAILED) {
+        return make_result(session, CP_BOOT_EV_START_REFUSED,
+                           CP_BOOT_ERR_ORDER, 0u);
+    }
+    if (!session->identified) {
+        /* Buffer one AA02.  It is answered only after identification and the
+         * certificate response; a different challenge is an order error. */
+        if (session->have_pending_auth_challenge) {
+            if (session->pending_auth_challenge_len != challenge_len ||
+                memcmp(session->pending_auth_challenge, challenge,
+                       challenge_len) != 0) {
+                fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
+                                    CP_BOOT_ERR_ORDER, &result);
+                return result;
+            }
+            return make_result(session, CP_BOOT_EV_AUTH_PENDING, CP_BOOT_OK,
+                               0u);
+        }
+        if (challenge_len > sizeof(session->pending_auth_challenge)) {
+            fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
+                                CP_BOOT_ERR_AUTH_PROVIDER, &result);
+            return result;
+        }
+        memcpy(session->pending_auth_challenge, challenge, challenge_len);
+        session->pending_auth_challenge_len = challenge_len;
+        session->have_pending_auth_challenge = true;
+        return make_result(session, CP_BOOT_EV_AUTH_PENDING, CP_BOOT_OK, 0u);
+    }
+    return respond_auth_challenge(session, challenge, challenge_len, out,
+                                  out_cap);
+}
+
 static cp_boot_result handle_auth_succeeded(cp_bootstrap *session,
                                             const cp_wire_view *view)
 {
@@ -858,7 +1044,8 @@ static cp_boot_result handle_auth_succeeded(cp_bootstrap *session,
         return make_result(session, CP_BOOT_EV_AUTH_FAILED,
                            CP_BOOT_ERR_AUTH_FAILED, 0u);
     }
-    if (session->auth_state != CP_BOOT_AUTH_RESPONSE_SENT) {
+    if (session->auth_state != CP_BOOT_AUTH_RESPONSE_SENT ||
+        !session->identified) {
         fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
                             CP_BOOT_ERR_ORDER, &result);
         return result;
@@ -903,7 +1090,8 @@ static cp_boot_result handle_wifi_config_request(cp_bootstrap *session,
     if (st != CP_WIRE_OK) {
         return error_result(session, CP_BOOT_ERR_WIRE);
     }
-    if (session->auth_state != CP_BOOT_AUTH_SUCCEEDED) {
+    if (session->auth_state != CP_BOOT_AUTH_SUCCEEDED ||
+        !session->identified) {
         return make_result(session, CP_BOOT_EV_START_REFUSED,
                            CP_BOOT_ERR_ORDER, 0u);
     }
@@ -1005,6 +1193,13 @@ static cp_boot_result handle_availability(cp_bootstrap *session,
                            CP_BOOT_ERR_ORDER, 0u);
     }
 
+    if (session->offer_held &&
+        session->offer_hold_generation != session->generation) {
+        /* Defensive: a generation change always clears the hold, but never let
+         * a stale hold retire a newer offer's deadline. */
+        session->offer_held = false;
+    }
+
     /* Conservative availability policy: the wireless side must be present and
      * explicitly available.  A missing optional field is not assumed true. */
     if (!availability.wireless.present ||
@@ -1043,7 +1238,12 @@ static cp_boot_result handle_availability(cp_bootstrap *session,
                          availability.wired.transport_id)) {
                 return error_result(session, CP_BOOT_ERR_WIRE);
             }
-            if (session->pending_start || session->offer_active) {
+            /* While a trusted hold is in place, propagate the new wired id
+             * before evaluating policy: the USB callback must see the id it is
+             * deciding about.  A non-held offer keeps the conservative
+             * credential-change refusal. */
+            if ((session->pending_start || session->offer_active) &&
+                !session->offer_held) {
                 invalidate_offer(session);
                 return make_result(session, CP_BOOT_EV_START_REFUSED,
                                    CP_BOOT_ERR_IDENTITY, 0u);
@@ -1056,6 +1256,47 @@ static cp_boot_result handle_availability(cp_bootstrap *session,
             }
             session->have_phone_usb_id = true;
         }
+    }
+
+    if (session->offer_held && session->offer_active) {
+        consent = query_consent(session, now_ms);
+        /* A trusted observation retires only the deadline.  It does not hide
+         * policy or identity changes: availability has already been decoded
+         * and the ids above updated, so the USB callback decides with the id
+         * the phone just reported.  USB/consent are re-queried here, before a
+         * duplicate is returned, instead of waiting for the next bounded
+         * re-check. */
+        if (session->state == CP_BOOT_STATE_FAILED ||
+            session->auth_state != CP_BOOT_AUTH_SUCCEEDED) {
+            invalidate_offer(session);
+            return make_result(session, CP_BOOT_EV_START_REFUSED,
+                               CP_BOOT_ERR_ORDER, 0u);
+        }
+        if (session->wireless_update_known &&
+            !session->wireless_update_available) {
+            invalidate_offer(session);
+            return make_result(session, CP_BOOT_EV_START_REFUSED,
+                               CP_BOOT_ERR_POLICY, 0u);
+        }
+        if (availability.wired.present && availability.wired.available_known &&
+            availability.wired.available && session->usb_active == NULL) {
+            invalidate_offer(session);
+            return make_result(session, CP_BOOT_EV_USB_ACTIVE,
+                               CP_BOOT_ERR_POLICY, 0u);
+        }
+        if (query_usb_active(session)) {
+            invalidate_offer(session);
+            return make_result(session, CP_BOOT_EV_USB_ACTIVE,
+                               CP_BOOT_ERR_POLICY, 0u);
+        }
+        if (consent != CP_BOOT_CONSENT_GRANTED &&
+            consent != CP_BOOT_CONSENT_PENDING) {
+            invalidate_offer(session);
+            return make_result(session, CP_BOOT_EV_CONSENT_DENIED,
+                               CP_BOOT_ERR_POLICY, 0u);
+        }
+        return make_result(session, CP_BOOT_EV_START_DUPLICATE, CP_BOOT_OK,
+                           0u);
     }
 
     if (session->offer_active && now_ms >= session->offer_deadline_ms) {
@@ -1189,6 +1430,39 @@ cp_boot_result cp_bootstrap_tick(cp_bootstrap *session, uint64_t now_ms,
     if (!accept_time(session, now_ms)) {
         return error_result(session, CP_BOOT_ERR_ARGUMENT);
     }
+    if (session->auth_request.op != CP_BOOT_AUTH_OP_NONE) {
+        if (session->auth_request.generation != session->generation) {
+            memset(&session->auth_request, 0, sizeof(session->auth_request));
+        } else if (now_ms >= session->auth_request.deadline_ms) {
+            fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
+                                CP_BOOT_ERR_TIMEOUT, &result);
+            return result;
+        }
+    }
+    /* Service auth that arrived before identification.  Nothing is released
+     * until identified is true; AA05 remains a separate phone decision. */
+    if (session->identified && session->state != CP_BOOT_STATE_FAILED) {
+        if (session->pending_auth_cert &&
+            session->auth_state == CP_BOOT_AUTH_NONE) {
+            session->pending_auth_cert = false;
+            return respond_auth_certificate(session, out, out_cap);
+        }
+        if (session->have_pending_auth_challenge &&
+            session->auth_state == CP_BOOT_AUTH_CERT_SENT) {
+            uint8_t challenge[CP_BOOT_MAX_AUTH_BLOB];
+            size_t challenge_len = session->pending_auth_challenge_len;
+            if (challenge_len > sizeof(challenge)) {
+                fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
+                                    CP_BOOT_ERR_AUTH_PROVIDER, &result);
+                return result;
+            }
+            memcpy(challenge, session->pending_auth_challenge, challenge_len);
+            session->have_pending_auth_challenge = false;
+            session->pending_auth_challenge_len = 0u;
+            return respond_auth_challenge(session, challenge, challenge_len,
+                                          out, out_cap);
+        }
+    }
     if (session->pending_start) {
         if (session->pending_generation != session->generation) {
             clear_pending(session);
@@ -1211,6 +1485,36 @@ cp_boot_result cp_bootstrap_tick(cp_bootstrap *session, uint64_t now_ms,
     if (session->offer_active) {
         cp_boot_consent consent;
 
+        if (session->offer_held &&
+            session->offer_hold_generation != session->generation)
+            session->offer_held = false;
+        if (session->offer_held) {
+            if (session->state == CP_BOOT_STATE_FAILED ||
+                session->auth_state != CP_BOOT_AUTH_SUCCEEDED) {
+                invalidate_offer(session);
+                return make_result(session, CP_BOOT_EV_START_REFUSED,
+                                   CP_BOOT_ERR_ORDER, 0u);
+            }
+            if (session->wireless_update_known &&
+                !session->wireless_update_available) {
+                invalidate_offer(session);
+                return make_result(session, CP_BOOT_EV_START_REFUSED,
+                                   CP_BOOT_ERR_POLICY, 0u);
+            }
+            consent = query_consent(session, now_ms);
+            if (consent != CP_BOOT_CONSENT_GRANTED &&
+                consent != CP_BOOT_CONSENT_PENDING) {
+                invalidate_offer(session);
+                return make_result(session, CP_BOOT_EV_CONSENT_DENIED,
+                                   CP_BOOT_ERR_POLICY, 0u);
+            }
+            if (query_usb_active(session)) {
+                invalidate_offer(session);
+                return make_result(session, CP_BOOT_EV_USB_ACTIVE,
+                                   CP_BOOT_ERR_POLICY, 0u);
+            }
+            return make_result(session, CP_BOOT_EV_NONE, CP_BOOT_OK, 0u);
+        }
         if (now_ms >= session->offer_deadline_ms) {
             invalidate_offer(session);
             return make_result(session, CP_BOOT_EV_START_TIMEOUT,
@@ -1246,6 +1550,51 @@ cp_boot_result cp_bootstrap_tick(cp_bootstrap *session, uint64_t now_ms,
     return make_result(session, CP_BOOT_EV_NONE, CP_BOOT_OK, 0u);
 }
 
+
+cp_boot_result cp_bootstrap_hold_offer(cp_bootstrap *session,
+                                       uint64_t generation, uint64_t now_ms)
+{
+    if (session == NULL) {
+        return make_result(session, CP_BOOT_EV_ERROR, CP_BOOT_ERR_ARGUMENT,
+                           0u);
+    }
+    if (!accept_time(session, now_ms)) {
+        return error_result(session, CP_BOOT_ERR_ARGUMENT);
+    }
+    if (generation != session->generation || !session->offer_active ||
+        session->state != CP_BOOT_STATE_AWAITING_RECEIVER ||
+        session->auth_state != CP_BOOT_AUTH_SUCCEEDED ||
+        !session->identified) {
+        return make_result(session, CP_BOOT_EV_START_REFUSED,
+                           CP_BOOT_ERR_ORDER, 0u);
+    }
+    session->offer_held = true;
+    session->offer_hold_generation = session->generation;
+    return make_result(session, CP_BOOT_EV_NONE, CP_BOOT_OK, 0u);
+}
+
+cp_boot_result cp_bootstrap_release_offer_hold(cp_bootstrap *session,
+                                               uint64_t now_ms)
+{
+    if (session == NULL) {
+        return make_result(session, CP_BOOT_EV_ERROR, CP_BOOT_ERR_ARGUMENT,
+                           0u);
+    }
+    if (!accept_time(session, now_ms)) {
+        return error_result(session, CP_BOOT_ERR_ARGUMENT);
+    }
+    session->offer_held = false;
+    session->offer_hold_generation = 0u;
+    return make_result(session, CP_BOOT_EV_NONE, CP_BOOT_OK, 0u);
+}
+
+bool cp_bootstrap_offer_held(const cp_bootstrap *session)
+{
+    return session != NULL && session->offer_active &&
+           session->offer_held &&
+           session->offer_hold_generation == session->generation;
+}
+
 cp_boot_result cp_bootstrap_set_ap_readback(cp_bootstrap *session,
                                             const cp_boot_ap_readback *readback,
                                             uint64_t now_ms, uint8_t *out,
@@ -1262,6 +1611,11 @@ cp_boot_result cp_bootstrap_set_ap_readback(cp_bootstrap *session,
         return error_result(session, CP_BOOT_ERR_ARGUMENT);
     }
     if (!readback->on_air) {
+        /* AP-scope invalidation: the trusted offer hold cannot outlive the AP
+         * configuration it was granted for, but the bounded offer itself is
+         * left to its normal deadline/cancel path. */
+        session->offer_held = false;
+        session->offer_hold_generation = 0u;
         session->ap_state = CP_BOOT_AP_NOT_READY;
         session->readback_valid = false;
         session->readback_ssid[0] = '\0';
@@ -1289,6 +1643,23 @@ cp_boot_result cp_bootstrap_set_ap_readback(cp_bootstrap *session,
             return error_result(session, CP_BOOT_ERR_CONFIG);
         }
     }
+    {
+        /* A valid but different on-air readback is a new AP scope, exactly
+         * like an off-air readback.  The hold was granted for the old scope
+         * and must not survive the change; the bounded offer, its original
+         * deadline and the generation are deliberately left untouched. */
+        bool ap_scope_changed =
+            !session->readback_valid ||
+            session->readback_channel != readback->channel ||
+            session->readback_security != readback->security ||
+            strcmp(session->readback_ssid, ssid) != 0 ||
+            strcmp(session->readback_link_local, link_local) != 0;
+
+        if (ap_scope_changed) {
+            session->offer_held = false;
+            session->offer_hold_generation = 0u;
+        }
+    }
     memcpy(session->readback_ssid, ssid, sizeof(ssid));
     memcpy(session->readback_link_local, link_local, sizeof(link_local));
     session->readback_channel = readback->channel;
@@ -1311,6 +1682,8 @@ cp_boot_result cp_bootstrap_cancel(cp_bootstrap *session, uint64_t now_ms)
     if (!accept_time(session, now_ms)) {
         return error_result(session, CP_BOOT_ERR_ARGUMENT);
     }
+    memset(&session->auth_request, 0, sizeof(session->auth_request));
+    clear_pending_auth(session);
     clear_pending(session);
     clear_offer(session);
     session->generation++;
@@ -1330,6 +1703,8 @@ cp_boot_result cp_bootstrap_transport_reset(cp_bootstrap *session,
     if (!accept_time(session, now_ms)) {
         return error_result(session, CP_BOOT_ERR_ARGUMENT);
     }
+    memset(&session->auth_request, 0, sizeof(session->auth_request));
+    clear_pending_auth(session);
     clear_pending(session);
     clear_offer(session);
     session->generation++;

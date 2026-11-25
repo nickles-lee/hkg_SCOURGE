@@ -81,12 +81,35 @@ def assert_source_policy() -> None:
     assert "#include <stdio.h>" not in header
     assert "cp_link_config_live_bluetooth(&config->link)" in source
     assert "CP_SESSION_RX_BUFFER" in header
+    assert "(CP_LINK_MAX_REORDER + 1u) * CP_LINK_MAX_PAYLOAD" in header
     assert "CP_SESSION_POLICY_RECHECK_MS" in header
     assert "receiver_policy_deadline_ms" in header
     assert "if (tick_bootstrap && !session->receiver_active)" in source
     assert "receiver_policy_check" in source
     assert "cp_bootstrap_cancel" in source
     assert "session_link_config_acceptable" in source
+    assert "receiver_policy_armed" in header
+    assert "receiver_policy_armed" in source
+    assert source.count("csm_rx_overflows++") == 1
+    assert "All cp_boot_config fields, including the AirPlay port" in header
+    assert "caller attestation" in header
+    assert "This module never infers receiver activity internally" in header
+    assert "about 486 KiB" in header
+    assert "service_after_link(session, now_ms, false)" in source
+    assert "cp_link_feed(&session->link, bytes + i, 1u, now_ms)" in source
+    assert "Publishing AP readback is not a transport transition" in source
+
+    # The active observation is a generation-bound bootstrap hold, not ad-hoc
+    # wire gating: availability always reaches bootstrap and policy is checked
+    # before a duplicate is returned.
+    assert "active_availability_gated" not in source
+    assert "csm_gated_availability" not in source
+    assert "csm_gated_availability" not in header
+    assert "cp_bootstrap_hold_offer" in source
+    assert "cp_bootstrap_release_offer_hold" in source
+    assert "cp_bootstrap_offer_held(&session->boot)" in source
+    assert "cp_bootstrap_hold_offer" in header
+    assert "cp_bootstrap_offer_held(&session->boot)" in source
 
     # The event record must stay scalar/sanitised: no payload pointer, SSID,
     # passphrase, key material or transport identifiers.

@@ -412,16 +412,23 @@ cp_oem_receiver_status cp_oem_receiver_sha256_file(
     uint8_t buffer[CP_OEM_RECEIVER_HASH_CHUNK];
     cp_sha256_ctx ctx;
     struct stat st;
+    uint64_t total = 0u;
     int fd;
 
     if (path == NULL || out == NULL) {
         return CP_OEM_RECEIVER_ERR_ARGUMENT;
     }
-    fd = open(path, O_RDONLY | O_CLOEXEC);
+    do {
+        fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    } while (fd < 0 && errno == EINTR);
     if (fd < 0) {
         return CP_OEM_RECEIVER_ERR_IO;
     }
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+    if (fstat(fd, &st) != 0) {
+        (void)close(fd);
+        return CP_OEM_RECEIVER_ERR_IO;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_size < 0 ||
         (uint64_t)st.st_size > (uint64_t)CP_OEM_RECEIVER_MAX_FILE_BYTES) {
         (void)close(fd);
         return CP_OEM_RECEIVER_ERR_BOUNDS;
@@ -441,6 +448,11 @@ cp_oem_receiver_status cp_oem_receiver_sha256_file(
         if (got == 0) {
             break;
         }
+        if ((uint64_t)got > (uint64_t)CP_OEM_RECEIVER_MAX_FILE_BYTES - total) {
+            (void)close(fd);
+            return CP_OEM_RECEIVER_ERR_BOUNDS;
+        }
+        total += (uint64_t)got;
         sha256_update(&ctx, buffer, (size_t)got);
     }
     if (close(fd) != 0) {

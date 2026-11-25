@@ -6,9 +6,9 @@
  * This module is intentionally NOT a cp_boot_auth_provider.  A successful
  * completion means only "bounded certificate bytes" or "bounded signature
  * bytes" arrived from the helper.  It never means phone authentication
- * succeeded, and it never fabricates a certificate.  The future cp_bootstrap/
- * cp_session async-completion integration is a separate change after those
- * files leave their current review freeze.
+ * succeeded, and it never fabricates a certificate. cp_auth_broker connects
+ * this client to the opt-in deferred cp_bootstrap/cp_session interface without
+ * blocking the serialized link loop. Product activation remains separate.
  *
  * Usage:
  *   - init once with experimental=true (production uses the fixed helper

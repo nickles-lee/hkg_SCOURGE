@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+os.environ["WIFI1B_TEST_NET_STUB"] = "1"
 with tempfile.TemporaryDirectory(prefix="wifi1b-daemon-", dir="/tmp/opencode") as d:
     tmp = Path(d)
     app = tmp / "app"
@@ -48,8 +49,17 @@ with tempfile.TemporaryDirectory(prefix="wifi1b-daemon-", dir="/tmp/opencode") a
     assert status["client_route_policy"] == "modem_safe"
     assert status["client_wifi_default"] is False
     assert status["client_modem_ipv4"] is False
+    assert status["client_modem_unknown"] is False
     assert status["client_legacy_route_removed"] == 0
     assert status["ssh_fw_open"] is False
+    assert status["carplay_session_observed"] is False
+    assert status["carplay_ready"] is False
+    assert status["carplay_gate"] == "inactive"
+    assert status["carplay_ie_observation"] == "ie_unverified"
+    assert status["carplay_ie_observed"] is False
+    assert status["carplay_vendor_ie_requested"] is False
+    assert status["carplay_firewall_ok"] is False
+    assert status["carplay_last_apply_ok"] is False
     assert isinstance(status["disk_free_kb"], int) and status["disk_free_kb"] >= 0
     assert status["disk_low"] is False
     assert "carplay_control=wifi1b" in cfg
@@ -98,10 +108,9 @@ with tempfile.TemporaryDirectory(prefix="wifi1b-daemon-", dir="/tmp/opencode") a
                                     check=True, timeout=20).stdout)
     assert out["ok"] is True and out["port"] == 2222
     helper_text = helper.read_text()
-    assert "10.55.0.2" in helper_text and "255.255.255.0" in helper_text
-    assert "route del default" in helper_text
-    assert "iptables" in helper_text and "WIFI1B_USB0_SSH" in helper_text
-    assert "route add default" not in helper_text
+    assert "--usb0-apply" in helper_text
+    assert "ifconfig" not in helper_text and "route del" not in helper_text
+    assert "iptables" not in helper_text
     rule_text = rule.read_text()
     assert 'KERNEL=="usb0"' in rule_text
     assert "opi-usb0-up.sh usb0 2222" in rule_text
@@ -111,8 +120,23 @@ with tempfile.TemporaryDirectory(prefix="wifi1b-daemon-", dir="/tmp/opencode") a
     assert out["ok"] is True and out["port"] == 0
     assert "opi-usb0-up.sh usb0 0" in rule.read_text()
 
+    # The explicit one-shot cleanup is idempotent for the exact owned files
+    # and does not require config load or SSH activation.
+    cleaned = subprocess.run([str(binary), "--usb0-cleanup"],
+                             capture_output=True, text=True, timeout=20,
+                             check=True)
+    assert "status=OK" in cleaned.stdout
+    assert not helper.exists() and not rule.exists()
+    assert not (app / "usb0.owner").exists()
+    again = subprocess.run([str(binary), "--usb0-cleanup"],
+                           capture_output=True, text=True, timeout=20,
+                           check=True)
+    assert "status=OK" in again.stdout
+
 src = (ROOT / "src/wifi1b_daemon.c").read_text() + (ROOT / "src/wifi1b_backend.inc").read_text()
-for needle in ("ap_scan=2", "iw reg set GB", "carplay_id=%s", "app_info=1",
+for needle in ("ap_scan=2", "iw reg set GB", "carplay_id=%s", "carplay_vendor_ie",
+               "ap_vendor_elements", "ie_unverified", "WIFI1B_APP_CP",
+               "app_info=1",
                "-p %d", "DHCP", "10.42.0.1",
                "carplay_control", "apply_carplay_control", "Stock USB",
                # The CarPlay chain must be hooked into OUTPUT as well as INPUT:

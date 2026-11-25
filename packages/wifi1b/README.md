@@ -39,8 +39,9 @@ explicit navigation search, and post-repair reboot persistence remain pending.
   service file/enabled/active state from the install transaction
 - V22+ BlueLink-safe client routing: while `rmnet_usb0`/`rmnet_usb1` has an
   IPv4 address, no WiFi default route is installed. WiFi remains an SSH-only
-  link; the V21 stale `route replace default via wlan0` is removed on client
-  start. A 30 s audit restores/removes the bounded proto-66 fallback as the
+  link. Unverified legacy wlan0 defaults and ownership records are preserved;
+  route changes fail closed rather than assuming ownership. A 30 s audit
+  restores/removes the bounded proto-66 fallback as the
   modem data state changes; routes on other interfaces are never touched.
 - V22+ Orange Pi USB-SSH: the ECM link is `usb0` at `10.55.0.2/24` with no
   default route. The generated udev rule and helper follow the configured
@@ -52,6 +53,14 @@ explicit navigation search, and post-repair reboot persistence remain pending.
   so it cannot overwrite the static link.
 - `client_route_policy=modem_safe` is the default; `fallback` is available in
   `config.conf` for owners who need a WiFi default while the modem is up.
+- CarPlay AP identity: `carplay_id` comes from an explicit config value or the
+  stock `USBSerial.txt`/`VBTConfig.json` identity, never the Bluetooth MAC;
+  values with unsupported characters or one equal to the Bluetooth MAC are
+  omitted, and AP start is refused if no valid distinct identity remains.
+  The opt-in `carplay_vendor_ie=1` (default `0`)
+  requests the candidate Apple
+  Device IE via `ap_vendor_elements`; status remains `ie_unverified` until a
+  readback or on-air capture proves it.
 - The ConnMan drop-in accepts the exact known V21 file for an over-the-top
   upgrade; unknown owner overrides are still refused.
 

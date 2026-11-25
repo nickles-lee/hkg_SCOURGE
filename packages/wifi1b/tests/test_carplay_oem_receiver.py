@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src/carplay"
@@ -37,8 +38,15 @@ COMMON = [
 ]
 
 
+def invoke(argv: list[str], *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(argv, text=True, capture_output=True, env=env, timeout=60)
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit(f"command timed out after 60s: {' '.join(argv)}") from exc
+
+
 def run(argv: list[str], *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(argv, text=True, capture_output=True, env=env)
+    result = invoke(argv, env=env)
     if result.returncode != 0:
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
@@ -47,7 +55,7 @@ def run(argv: list[str], *, env: dict[str, str] | None = None) -> subprocess.Com
 
 
 def expect_failure(argv: list[str], code: int, needle: str) -> None:
-    result = subprocess.run(argv, text=True, capture_output=True)
+    result = invoke(argv)
     if result.returncode != code:
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
@@ -60,6 +68,17 @@ def expect_failure(argv: list[str], code: int, needle: str) -> None:
 
 
 def main() -> int:
+    # A FIFO-opening regression must fail the suite, not leave CI hung.
+    for action in (lambda: run(["fixture-hang"]),
+                   lambda: expect_failure(["fixture-hang"], 1, "unused")):
+        with patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired("fixture-hang", 60)) as call:
+            try:
+                action()
+            except SystemExit as exc:
+                assert "timed out" in str(exc)
+            else:
+                raise AssertionError("timeout must fail the test gate")
+            assert call.call_args.kwargs["timeout"] == 60
     base = Path("/tmp/opencode")
     base.mkdir(mode=0o700, parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="cp-oem-receiver-", dir=base) as tmp:

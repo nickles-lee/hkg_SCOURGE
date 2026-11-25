@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# EXPERIMENTAL, default-off. This unit is not installed or enabled by the
+# Wifi1b payload builder. It is shipped as an artifact for an owner-driven,
+# on-car experiment only. Do not enable it until the broker's AP-readback,
+# live USB/wired gate and the patched vbtd transport have passed their
+# checkpoints. See docs/wireless-carplay/DEFERRED-CAR-PROBES.md.
+
+[Unit]
+Description=SCOURGE experimental CarPlay broker (WIP, not car-validated)
+# Do not pull in wifi1b-daemon: starting the broker must not change AP/network
+# state. The owner starts the daemon/AP first; the broker only reads its status.
+After=Dbuslaunch.service wifi1b-daemon.service scourge-carplay-auth.service
+Wants=scourge-carplay-auth.service
+StartLimitInterval=300
+StartLimitBurst=5
+ConditionPathExists=/rw_data/wifi1b/carplay-broker
+ConditionPathExists=/rw_data/wifi1b/carplay-broker.conf
+
+[Service]
+Type=simple
+UMask=0077
+# Recreate the RX directory per start; systemd removes it on stop so a
+# SIGKILL/OOM cannot leave a stale rx.sock that blocks the next start.
+RuntimeDirectory=wifi1b/carplay
+RuntimeDirectoryMode=0700
+Environment=PATH=/bin:/sbin:/usr/bin:/usr/sbin
+# Dbuslaunch writes the session-bus address after the app manager is up. Wait
+# a bounded time so a boot-time start does not fail on a missing env file.
+ExecStartPre=/bin/sh -c 'i=0; while [ ! -s /tmp/session_appmgr.env ] && [ "$i" -lt 60 ]; do sleep 1; i=$((i+1)); done; [ -s /tmp/session_appmgr.env ]'
+ExecStart=/rw_data/wifi1b/carplay-broker --config /rw_data/wifi1b/carplay-broker.conf --broker-status /run/wifi1b/broker-status.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

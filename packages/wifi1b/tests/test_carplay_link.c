@@ -174,12 +174,72 @@ static void expect_wire(cp_link_t *link, const char *hex, const char *what)
     }
 }
 
+static void expect_wire_bytes(cp_link_t *link, const uint8_t *expected,
+                              size_t expected_len, const char *what)
+{
+    uint8_t got[CP_LINK_MAX_FRAME * 4u];
+    size_t got_len = drain_all(link, got, sizeof(got));
+
+    if (expected_len != got_len ||
+        memcmp(expected, got, expected_len) != 0) {
+        fprintf(stderr, "wire mismatch: %s\n", what);
+        print_hex("expected", expected, expected_len);
+        print_hex("got", got, got_len);
+        CHECK(0);
+    }
+}
+
+/* Compare the oldest queued frame without consuming it. */
+static void expect_peek_bytes(cp_link_t *link, const uint8_t *expected,
+                              size_t expected_len, const char *what)
+{
+    const uint8_t *got = NULL;
+    size_t got_len = cp_link_output_peek(link, &got);
+
+    if (expected_len != got_len || got == NULL ||
+        memcmp(expected, got, expected_len) != 0) {
+        fprintf(stderr, "queued wire mismatch: %s\n", what);
+        print_hex("expected", expected, expected_len);
+        if (got != NULL)
+            print_hex("got", got, got_len);
+        else
+            fprintf(stderr, "got (0):\n");
+        CHECK(0);
+    }
+}
+
 static void expect_no_output(cp_link_t *link)
 {
     const uint8_t *data = NULL;
 
     CHECK(cp_link_output_peek(link, &data) == 0);
     CHECK(cp_link_output_pending(link) == 0);
+}
+
+/* Scan a concatenated drained stream for a frame with `control`; the stream
+ * must consist only of complete frames. */
+static bool drained_has_control(const uint8_t *data, size_t len,
+                                uint8_t control, size_t *frame_len)
+{
+    size_t offset = 0;
+
+    if (frame_len != NULL)
+        *frame_len = 0;
+    while (offset < len) {
+        size_t length;
+
+        CHECK(len - offset >= CP_LINK_HEADER_LEN);
+        length = ((size_t)data[offset + 2u] << 8) | data[offset + 3u];
+        CHECK(length >= CP_LINK_HEADER_LEN);
+        CHECK(length <= len - offset);
+        if (data[offset + 4u] == control) {
+            if (frame_len != NULL)
+                *frame_len = length;
+            return true;
+        }
+        offset += length;
+    }
+    return false;
 }
 
 static size_t make_frame(uint8_t *out, size_t cap, uint8_t control,
@@ -224,6 +284,14 @@ static void resign_header(uint8_t *frame)
     for (i = 0; i < 8u; i++)
         sum = (uint8_t)(sum + frame[i]);
     frame[8] = (uint8_t)((256u - (unsigned)sum) & 0xFFu);
+}
+
+static void fill_sequence(uint8_t *out, size_t count, uint8_t first)
+{
+    size_t i;
+
+    for (i = 0; i < count; i++)
+        out[i] = (uint8_t)(first + i);
 }
 
 static void feed_bytes(cp_link_t *link, const uint8_t *data, size_t len,
@@ -1317,6 +1385,8 @@ static void test_retransmit_identical_and_ack(void)
 
     CHECK(cp_link_tick(&g_link, 999u) == CP_LINK_OK);
     expect_no_output(&g_link);
+    /* No peer data has advanced the received sequence, so the refreshed
+     * retransmission must remain byte-identical, including ACK/checksum. */
     CHECK(cp_link_tick(&g_link, 1000u) == CP_LINK_OK);
     first_len = drain_all(&g_link, first, sizeof(first));
     CHECK(first_len == sent_len);
@@ -1353,6 +1423,155 @@ static void test_retransmit_identical_and_ack(void)
     CHECK(cp_link_state(&g_link) == CP_LINK_STATE_NORMAL);
     expect_no_output(&g_link);
     puts("PASS: identical retransmission bytes, lost ACK retry and finite exhaustion");
+}
+
+static void test_retransmit_refreshes_ack(void)
+{
+    cp_link_config_t cfg;
+    uint8_t sent[CP_LINK_MAX_FRAME];
+    uint8_t first[CP_LINK_MAX_FRAME];
+    uint8_t second[CP_LINK_MAX_FRAME];
+    uint8_t frame[CP_LINK_MAX_FRAME];
+    uint8_t eak[CP_LINK_MAX_FRAME];
+    uint8_t payload1 = 0xAA;
+    uint8_t payload2 = 0xBB;
+    uint8_t peer_payload = 0x55;
+    const uint8_t requested = 0x64u;
+    size_t sent_len;
+    size_t first_len;
+    size_t second_len;
+    size_t frame_len;
+    size_t eak_len;
+    size_t i;
+    uint8_t sum;
+
+    base_config(&cfg);
+    handshake_default(&g_link);
+    clear_events();
+    {
+        uint8_t discard[256];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+    CHECK(cp_link_send(&g_link, CP_LINK_SESSION_CONTROL, &payload1, 1u, 0) ==
+          CP_LINK_OK);
+    sent_len = drain_all(&g_link, sent, sizeof(sent));
+    CHECK(sent_len == 11u);
+    CHECK(sent[5] == 0x64u);
+    CHECK(sent[6] == 0x2au);
+    CHECK(sent[7] == 3u);
+
+    /* Advance the received sequence without acknowledging the data frame. */
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x2b, 0x63, 3,
+                           &peer_payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    CHECK(cp_link_tick(&g_link, 100u) == CP_LINK_OK);
+    {
+        uint8_t discard[128];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+
+    CHECK(cp_link_tick(&g_link, 1000u) == CP_LINK_OK);
+    first_len = drain_all(&g_link, first, sizeof(first));
+    CHECK(first_len == sent_len);
+    CHECK(memcmp(first, sent, 6u) == 0);
+    CHECK(first[6] == 0x2bu);
+    CHECK(first[7] == sent[7]);
+    CHECK(memcmp(first + 9u, sent + 9u, sent_len - 9u) == 0);
+    CHECK(first[8] != sent[8]);
+    sum = 0;
+    for (i = 0; i < CP_LINK_HEADER_LEN; i++)
+        sum = (uint8_t)(sum + first[i]);
+    CHECK(sum == 0u);
+
+    /* With no new peer data the refreshed copy is byte-identical. */
+    CHECK(cp_link_tick(&g_link, 2000u) == CP_LINK_OK);
+    second_len = drain_all(&g_link, second, sizeof(second));
+    CHECK(second_len == first_len);
+    CHECK(memcmp(second, first, first_len) == 0);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_NORMAL);
+
+    /* EAK-driven retransmission uses the same refreshed ACK path. */
+    handshake_default(&g_link);
+    clear_events();
+    {
+        uint8_t discard[256];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+    CHECK(cp_link_send(&g_link, CP_LINK_SESSION_CONTROL, &payload2, 1u, 0) ==
+          CP_LINK_OK);
+    sent_len = drain_all(&g_link, sent, sizeof(sent));
+    CHECK(sent_len == 11u);
+    CHECK(sent[5] == 0x64u);
+
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x2b, 0x63, 3,
+                           &peer_payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    {
+        uint8_t discard[128];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+    eak_len = make_frame(eak, sizeof(eak), 0x20, 0x63, 0x2b, 0,
+                         &requested, 1u, true);
+    feed_frame(&g_link, eak, eak_len, 0);
+    first_len = drain_all(&g_link, first, sizeof(first));
+    CHECK(first_len == sent_len);
+    CHECK(memcmp(first, sent, 6u) == 0);
+    CHECK(first[6] == 0x2bu);
+    CHECK(first[7] == sent[7]);
+    CHECK(memcmp(first + 9u, sent + 9u, sent_len - 9u) == 0);
+    sum = 0;
+    for (i = 0; i < CP_LINK_HEADER_LEN; i++)
+        sum = (uint8_t)(sum + first[i]);
+    CHECK(sum == 0u);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_NORMAL);
+    puts("PASS: DATA retransmission keeps seq/session/payload and refreshes ACK");
+}
+
+static void test_retransmit_partial_queue_is_immutable(void)
+{
+    cp_link_config_t cfg;
+    uint8_t first[CP_LINK_MAX_FRAME];
+    uint8_t remaining[CP_LINK_MAX_FRAME];
+    uint8_t payload = 0xCC;
+    const uint8_t *part = NULL;
+    size_t len;
+    size_t first_len;
+
+    base_config(&cfg);
+    handshake_default(&g_link);
+    clear_events();
+    {
+        uint8_t discard[256];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+    CHECK(cp_link_send(&g_link, CP_LINK_SESSION_CONTROL, &payload, 1u, 0) ==
+          CP_LINK_OK);
+    {
+        uint8_t discard[64];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+
+    CHECK(cp_link_tick(&g_link, 1000u) == CP_LINK_OK);
+    len = cp_link_output_peek(&g_link, &part);
+    CHECK(len == 11u && part != NULL);
+    memcpy(first, part, len);
+    first_len = len;
+    CHECK(cp_link_output_consume(&g_link, 3u) == CP_LINK_OK);
+    len = cp_link_output_peek(&g_link, &part);
+    CHECK(len == 8u);
+    memcpy(remaining, part, len);
+
+    CHECK(cp_link_tick(&g_link, 2000u) == CP_LINK_OK);
+    CHECK(cp_link_output_pending(&g_link) == 8u + 11u);
+    len = cp_link_output_peek(&g_link, &part);
+    CHECK(len == 8u && memcmp(part, remaining, len) == 0);
+    CHECK(cp_link_output_consume(&g_link, 8u) == CP_LINK_OK);
+    len = cp_link_output_peek(&g_link, &part);
+    CHECK(len == first_len && memcmp(part, first, len) == 0);
+    CHECK(cp_link_output_consume(&g_link, len) == CP_LINK_OK);
+    expect_no_output(&g_link);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_NORMAL);
+    puts("PASS: partially emitted retransmission is immutable; retry appends");
 }
 
 static void test_eak_and_out_of_window(void)
@@ -1482,6 +1701,826 @@ static void test_eak_and_out_of_window(void)
     CHECK(count_events(CP_LINK_EVENT_SESSION_DATA) == sizeof(missing) + 1u);
     CHECK(g_events[sizeof(missing)].data[0] == payload2);
     puts("PASS: out-of-window ACK, gap EAK and EAK retransmission exhaustion");
+}
+
+static void test_eak_recomputes_missing_list(void)
+{
+    cp_link_config_t cfg;
+    uint8_t peer_lsp[64];
+    uint8_t peer_syn[128];
+    uint8_t frame[CP_LINK_MAX_FRAME];
+    uint8_t expected[CP_LINK_MAX_FRAME];
+    uint8_t missing[7];
+    const uint8_t sessions[] = {3, 0, 1};
+    const uint8_t payload = 0x33;
+    size_t lsp_len;
+    size_t peer_len;
+    size_t frame_len;
+    size_t expected_len;
+
+    base_config(&cfg);
+    lsp_len = build_peer_lsp(peer_lsp, sizeof(peer_lsp), 4, 1024, 1000, 100,
+                             3, 8, sessions, sizeof(sessions));
+    peer_len = make_frame(peer_syn, sizeof(peer_syn), 0x80, 0x2a, 0, 0,
+                          peer_lsp, lsp_len, true);
+    handshake_with_peer_lsp(&g_link, &cfg, peer_syn, peer_len);
+    clear_events();
+    {
+        uint8_t discard[128];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+
+    /* A below-threshold reordered packet is buffered without an EAK. */
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x2d, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    expect_no_output(&g_link);
+
+    /* A later far frame opens the gap; the buffered packet is not requested. */
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x32, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    missing[0] = 0x2bu;
+    missing[1] = 0x2cu;
+    missing[2] = 0x2eu;
+    missing[3] = 0x2fu;
+    missing[4] = 0x30u;
+    missing[5] = 0x31u;
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0x2a,
+                              0, missing, 6u, true);
+    expect_peek_bytes(&g_link, expected, expected_len,
+                      "initial EAK excludes an already buffered packet");
+    CHECK(cp_link_stats(&g_link)->eak_sent == 1u);
+
+    /* A new frontier keeps the earlier buffered packet excluded. */
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x34, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    missing[6] = 0x33u;
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0x2a,
+                              0, missing, 7u, true);
+    expect_peek_bytes(&g_link, expected, expected_len,
+                      "EAK advances the frontier without re-requesting data");
+
+    /* Receiving the frontier-adjacent packet removes it from the request. */
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x33, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0x2a,
+                              0, missing, 6u, true);
+    expect_wire_bytes(&g_link, expected, expected_len,
+                      "EAK coalesces into one updated frame");
+    CHECK(cp_link_stats(&g_link)->eak_sent == 1u);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_NORMAL);
+    CHECK(cp_link_stats(&g_link)->reset_count == 0u);
+    puts("PASS: EAK recomputes gaps from reorder slots and coalesces updates");
+}
+
+static void test_eak_stale_gap_fill_retracts_frame(void)
+{
+    cp_link_config_t cfg;
+    uint8_t peer_lsp[64];
+    uint8_t peer_syn[128];
+    uint8_t frame[CP_LINK_MAX_FRAME];
+    uint8_t stream[512];
+    uint8_t out[CP_LINK_MAX_FRAME * 2u];
+    const uint8_t sessions[] = {3, 0, 1};
+    const uint8_t payload = 0x44;
+    size_t lsp_len;
+    size_t peer_len;
+    size_t frame_len;
+    size_t stream_len = 0;
+    size_t total;
+    size_t i;
+    capture_event_t *event;
+
+    base_config(&cfg);
+    lsp_len = build_peer_lsp(peer_lsp, sizeof(peer_lsp), 4, 1024, 1000, 100,
+                             3, 8, sessions, sizeof(sessions));
+    peer_len = make_frame(peer_syn, sizeof(peer_syn), 0x80, 0x2a, 0, 0,
+                          peer_lsp, lsp_len, true);
+    handshake_with_peer_lsp(&g_link, &cfg, peer_syn, peer_len);
+    clear_events();
+    {
+        uint8_t discard[128];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+
+    /* Queue an EAK but do not let the caller drain it. Append an ACK behind it
+     * so the EAK is not the tail when the gap closes. */
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x32, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    CHECK(cp_link_output_pending(&g_link) == 17u);
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x2a, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    CHECK(cp_link_output_pending(&g_link) == 17u + CP_LINK_HEADER_LEN);
+
+    /* Close every hole before the EAK is emitted. The queued EAK must be
+     * retracted and the buffered 0x32 delivered exactly once. */
+    for (i = 0; i < 7u; i++) {
+        uint8_t value = (uint8_t)i;
+
+        stream_len += make_frame(stream + stream_len,
+                                 sizeof(stream) - stream_len, 0x40,
+                                 (uint8_t)(0x2bu + i), 0x63, 3, &value, 1u,
+                                 true);
+    }
+    feed_bytes(&g_link, stream, stream_len, 0);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_NORMAL);
+    CHECK(cp_link_stats(&g_link)->reset_count == 0u);
+    CHECK(count_events(CP_LINK_EVENT_SESSION_DATA) == 8u);
+    event = last_event(CP_LINK_EVENT_SESSION_DATA);
+    CHECK(event != NULL && event->len == 1u && event->data[0] == payload);
+
+    total = drain_all(&g_link, out, sizeof(out));
+    CHECK(!drained_has_control(out, total, 0x20, NULL));
+    puts("PASS: EAK is retracted when the gap closes before output drain");
+}
+
+static void test_eak_full_output_is_deferred(void)
+{
+    cp_link_config_t cfg;
+    uint8_t peer_lsp[64];
+    uint8_t peer_syn[128];
+    uint8_t frame[CP_LINK_MAX_FRAME];
+    uint8_t inbound_eak[CP_LINK_MAX_FRAME];
+    uint8_t out[512];
+    const uint8_t sessions[] = {3, 0, 1};
+    const uint8_t payload = 0x55;
+    const uint8_t far_payload = 0x11;
+    const uint8_t requested[] = {0x64, 0x65};
+    const uint8_t *part = NULL;
+    size_t lsp_len;
+    size_t peer_len;
+    size_t frame_len;
+    size_t eak_len;
+    size_t len;
+    size_t total;
+    size_t i;
+    uint8_t sum = 0;
+
+    base_config(&cfg);
+    cfg.max_outgoing = 30;
+    lsp_len = build_peer_lsp(peer_lsp, sizeof(peer_lsp), 30, 1024, 1000, 100,
+                             3, 8, sessions, sizeof(sessions));
+    peer_len = make_frame(peer_syn, sizeof(peer_syn), 0x80, 0x2a, 0, 0,
+                          peer_lsp, lsp_len, true);
+    handshake_with_peer_lsp(&g_link, &cfg, peer_syn, peer_len);
+    clear_events();
+    {
+        uint8_t discard[128];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+
+    /* Fill the output with ten application frames plus two retransmissions. */
+    for (i = 0; i < 10u; i++) {
+        CHECK(cp_link_send(&g_link, CP_LINK_SESSION_CONTROL, &payload, 1u, 0) ==
+              CP_LINK_OK);
+    }
+    eak_len = make_frame(inbound_eak, sizeof(inbound_eak), 0x20, 0x63, 0x2a,
+                         0, requested, sizeof(requested), true);
+    feed_frame(&g_link, inbound_eak, eak_len, 0);
+    CHECK(cp_link_output_pending(&g_link) ==
+          (size_t)CP_LINK_OUTPUT_FRAMES * 11u);
+
+    /* A valid out-of-order burst crosses the EAK threshold while output is
+     * full. The EAK stays pending; the link stays healthy and no data is
+     * dropped. */
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x49, 0x63, 3,
+                           &far_payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x4b, 0x63, 3,
+                           &far_payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_NORMAL);
+    CHECK(cp_link_generation(&g_link) == 1u);
+    CHECK(cp_link_stats(&g_link)->reset_count == 0u);
+    CHECK(cp_link_stats(&g_link)->out_of_window == 0u);
+    CHECK(cp_link_stats(&g_link)->reorder_full == 0u);
+    CHECK(cp_link_stats(&g_link)->eak_sent == 0u);
+    CHECK(cp_link_output_pending(&g_link) ==
+          (size_t)CP_LINK_OUTPUT_FRAMES * 11u);
+    CHECK(cp_link_tick(&g_link, 0u) == CP_LINK_OK);
+    CHECK(g_link.eak_due);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_NORMAL);
+    CHECK(cp_link_output_pending(&g_link) ==
+          (size_t)CP_LINK_OUTPUT_FRAMES * 11u);
+
+    /* Draining one frame flushes the deferred EAK. */
+    len = cp_link_output_peek(&g_link, &part);
+    CHECK(len == 11u);
+    CHECK(cp_link_output_consume(&g_link, len) == CP_LINK_OK);
+    CHECK(cp_link_stats(&g_link)->eak_sent == 1u);
+    CHECK(cp_link_output_pending(&g_link) ==
+          (size_t)(CP_LINK_OUTPUT_FRAMES - 1u) * 11u + 41u);
+
+    /* A new buffered packet rewrites the one unconsumed EAK in place. */
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x4a, 0x63, 3,
+                           &far_payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    CHECK(cp_link_stats(&g_link)->eak_sent == 1u);
+    CHECK(cp_link_output_pending(&g_link) ==
+          (size_t)(CP_LINK_OUTPUT_FRAMES - 1u) * 11u + 40u);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_NORMAL);
+
+    total = drain_all(&g_link, out, sizeof(out));
+    CHECK(total == (size_t)(CP_LINK_OUTPUT_FRAMES - 1u) * 11u + 40u);
+    for (i = 0; i < (size_t)(CP_LINK_OUTPUT_FRAMES - 1u); i++) {
+        size_t offset = i * 11u;
+
+        CHECK(((size_t)out[offset + 2u] << 8 | out[offset + 3u]) == 11u);
+        CHECK(out[offset + 4u] == 0x40u);
+    }
+    CHECK(out[total - 40u + 4u] == 0x20u);
+    CHECK(out[total - 40u + 6u] == 0x2au);
+    for (i = 0; i < 30u; i++)
+        CHECK(out[total - 40u + 9u + i] == (uint8_t)(0x2bu + i));
+    for (i = 0; i < CP_LINK_HEADER_LEN; i++)
+        sum = (uint8_t)(sum + out[total - 40u + i]);
+    CHECK(sum == 0u);
+    puts("PASS: full output defers EAK, then flushes and coalesces safely");
+}
+
+static void test_eak_partial_output_is_immutable(void)
+{
+    cp_link_config_t cfg;
+    uint8_t peer_lsp[64];
+    uint8_t peer_syn[128];
+    uint8_t frame[CP_LINK_MAX_FRAME];
+    uint8_t expected[CP_LINK_MAX_FRAME];
+    uint8_t remaining[CP_LINK_MAX_FRAME];
+    uint8_t missing[8];
+    const uint8_t sessions[] = {3, 0, 1};
+    const uint8_t payload = 0x66;
+    const uint8_t *part = NULL;
+    size_t lsp_len;
+    size_t peer_len;
+    size_t frame_len;
+    size_t expected_len;
+    size_t len;
+
+    base_config(&cfg);
+    lsp_len = build_peer_lsp(peer_lsp, sizeof(peer_lsp), 4, 1024, 1000, 100,
+                             3, 8, sessions, sizeof(sessions));
+    peer_len = make_frame(peer_syn, sizeof(peer_syn), 0x80, 0x2a, 0, 0,
+                          peer_lsp, lsp_len, true);
+    handshake_with_peer_lsp(&g_link, &cfg, peer_syn, peer_len);
+    clear_events();
+    {
+        uint8_t discard[128];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x32, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    CHECK(cp_link_output_consume(&g_link, 4u) == CP_LINK_OK);
+    len = cp_link_output_peek(&g_link, &part);
+    CHECK(len == 13u && part != NULL);
+    memcpy(remaining, part, len);
+
+    /* A new threshold crossing may append a fresh EAK, but the emitted prefix
+     * and remaining bytes of the first EAK are never rewritten. */
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x34, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    CHECK(cp_link_output_pending(&g_link) == 13u + 18u);
+    len = cp_link_output_peek(&g_link, &part);
+    CHECK(len == 13u && memcmp(part, remaining, len) == 0);
+    CHECK(cp_link_output_consume(&g_link, 13u) == CP_LINK_OK);
+
+    fill_sequence(missing, 8u, 0x2bu);
+    missing[7] = 0x33u;
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0x2a,
+                              0, missing, 8u, true);
+    len = cp_link_output_peek(&g_link, &part);
+    CHECK(len == expected_len);
+    CHECK(memcmp(part, expected, expected_len) == 0);
+    CHECK(cp_link_output_consume(&g_link, len) == CP_LINK_OK);
+    expect_no_output(&g_link);
+    CHECK(cp_link_stats(&g_link)->eak_sent == 2u);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_NORMAL);
+    puts("PASS: partially emitted EAK is immutable; a fresh EAK follows it");
+}
+
+static void test_eak_partial_truncated_followup(void)
+{
+    cp_link_config_t cfg;
+    uint8_t peer_lsp[64];
+    uint8_t peer_syn[128];
+    uint8_t frame[CP_LINK_MAX_FRAME];
+    uint8_t expected[CP_LINK_MAX_FRAME];
+    uint8_t remaining[CP_LINK_MAX_FRAME];
+    uint8_t missing[2];
+    const uint8_t sessions[] = {3, 0, 1};
+    const uint8_t payload = 0x71;
+    const uint8_t *part = NULL;
+    size_t lsp_len;
+    size_t peer_len;
+    size_t frame_len;
+    size_t expected_len;
+    size_t len;
+
+    base_config(&cfg);
+    lsp_len = build_peer_lsp(peer_lsp, sizeof(peer_lsp), 4, 12, 1000, 100, 3,
+                             8, sessions, sizeof(sessions));
+    peer_len = make_frame(peer_syn, sizeof(peer_syn), 0x80, 0x2a, 0, 0,
+                          peer_lsp, lsp_len, true);
+    handshake_with_peer_lsp(&g_link, &cfg, peer_syn, peer_len);
+    clear_events();
+    {
+        uint8_t discard[128];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x32, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    missing[0] = 0x2bu;
+    missing[1] = 0x2cu;
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0x2a,
+                              0, missing, 2u, true);
+    CHECK(expected_len == 12u);
+    CHECK(g_link.eak_more);
+    CHECK(cp_link_output_consume(&g_link, 4u) == CP_LINK_OK);
+    len = cp_link_output_peek(&g_link, &part);
+    CHECK(len == 8u && part != NULL);
+    memcpy(remaining, part, len);
+
+    /* The partial EAK is immutable, but filling the first requested hole
+     * appends a fresh truncated EAK for the remaining holes. */
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x2b, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    CHECK(cp_link_output_pending(&g_link) == 8u + 12u);
+    len = cp_link_output_peek(&g_link, &part);
+    CHECK(len == 8u && memcmp(part, remaining, len) == 0);
+    CHECK(cp_link_output_consume(&g_link, 8u) == CP_LINK_OK);
+
+    missing[0] = 0x2cu;
+    missing[1] = 0x2du;
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0x2b,
+                              0, missing, 2u, true);
+    CHECK(expected_len == 12u);
+    len = cp_link_output_peek(&g_link, &part);
+    CHECK(len == expected_len);
+    CHECK(memcmp(part, expected, expected_len) == 0);
+    CHECK(cp_link_output_consume(&g_link, len) == CP_LINK_OK);
+    CHECK(g_link.eak_more);
+    CHECK(cp_link_stats(&g_link)->eak_sent == 2u);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_NORMAL);
+    CHECK(cp_link_stats(&g_link)->reset_count == 0u);
+    puts("PASS: partial truncated EAK stays immutable; remaining holes follow up");
+}
+
+static void test_eak_modulo_and_pending_clear(void)
+{
+    cp_link_config_t cfg;
+    uint8_t peer_lsp[64];
+    uint8_t peer_syn[128];
+    uint8_t frame[CP_LINK_MAX_FRAME];
+    uint8_t expected[CP_LINK_MAX_FRAME];
+    uint8_t inbound_eak[CP_LINK_MAX_FRAME];
+    uint8_t out[CP_LINK_MAX_FRAME * 2u];
+    uint8_t missing[3];
+    const uint8_t sessions[] = {3, 0, 1};
+    const uint8_t payload = 0x77;
+    const uint8_t requested[] = {0x64, 0x65};
+    size_t lsp_len;
+    size_t peer_len;
+    size_t frame_len;
+    size_t expected_len;
+    size_t eak_len;
+    size_t total;
+    size_t i;
+
+    base_config(&cfg);
+    lsp_len = build_peer_lsp(peer_lsp, sizeof(peer_lsp), 4, 1024, 1000, 100,
+                             3, 8, sessions, sizeof(sessions));
+    peer_len = make_frame(peer_syn, sizeof(peer_syn), 0x80, 0xFE, 0, 0,
+                          peer_lsp, lsp_len, true);
+    handshake_with_peer_lsp(&g_link, &cfg, peer_syn, peer_len);
+    clear_events();
+    {
+        uint8_t discard[128];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x02, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    missing[0] = 0xFFu;
+    missing[1] = 0x00u;
+    missing[2] = 0x01u;
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0xFE,
+                              0, missing, sizeof(missing), true);
+    expect_peek_bytes(&g_link, expected, expected_len,
+                      "EAK wraps across the sequence boundary");
+
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x00, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    missing[0] = 0xFFu;
+    missing[1] = 0x01u;
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0xFE,
+                              0, missing, 2u, true);
+    expect_peek_bytes(&g_link, expected, expected_len,
+                      "EAK removes a wrapped packet already buffered");
+
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0xFF, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    missing[0] = 0x01u;
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0x00,
+                              0, missing, 1u, true);
+    expect_peek_bytes(&g_link, expected, expected_len,
+                      "EAK advances ACK and frontier across the wrap");
+
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x01, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    total = drain_all(&g_link, out, sizeof(out));
+    CHECK(!drained_has_control(out, total, 0x20, NULL));
+
+    /* Re-negotiate a wider window, fill the output, defer an EAK, then cancel:
+     * pending state must clear. */
+    cfg.max_outgoing = 30;
+    lsp_len = build_peer_lsp(peer_lsp, sizeof(peer_lsp), 30, 1024, 1000, 100,
+                             3, 8, sessions, sizeof(sessions));
+    peer_len = make_frame(peer_syn, sizeof(peer_syn), 0x80, 0x2a, 0, 0,
+                          peer_lsp, lsp_len, true);
+    handshake_with_peer_lsp(&g_link, &cfg, peer_syn, peer_len);
+    clear_events();
+    {
+        uint8_t discard[128];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+    for (i = 0; i < 10u; i++) {
+        CHECK(cp_link_send(&g_link, CP_LINK_SESSION_CONTROL, &payload, 1u, 0) ==
+              CP_LINK_OK);
+    }
+    eak_len = make_frame(inbound_eak, sizeof(inbound_eak), 0x20, 0x63, 0x2a,
+                         0, requested, sizeof(requested), true);
+    feed_frame(&g_link, inbound_eak, eak_len, 0);
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x49, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    CHECK(g_link.eak_due);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_NORMAL);
+
+    CHECK(cp_link_cancel(&g_link, CP_LINK_RESET_CANCELLED) == CP_LINK_OK);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_DEAD);
+    CHECK(!g_link.eak_due);
+    expect_no_output(&g_link);
+    CHECK(cp_link_start(&g_link, CP_LINK_ROLE_PASSIVE, 100u) == CP_LINK_OK);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_DETECT);
+    CHECK(!g_link.eak_due);
+    expect_wire(&g_link, "ff550200ee10", "restart marker after cancelled EAK");
+    puts("PASS: modulo-256 EAK gaps close cleanly and cancellation clears pending EAK");
+}
+
+static void test_eak_peer_max_len_capacity(void)
+{
+    cp_link_config_t cfg;
+    uint8_t peer_lsp[64];
+    uint8_t peer_syn[128];
+    uint8_t frame[CP_LINK_MAX_FRAME];
+    uint8_t expected[CP_LINK_MAX_FRAME];
+    uint8_t stream[256];
+    uint8_t out[CP_LINK_MAX_FRAME * 2u];
+    uint8_t missing[13];
+    const uint8_t sessions[] = {3, 0, 1};
+    const uint8_t payload = 0x21;
+    const uint16_t tiny_len[] = {9u, 10u};
+    size_t lsp_len;
+    size_t peer_len;
+    size_t frame_len;
+    size_t expected_len;
+    size_t total;
+    size_t i;
+    unsigned j;
+
+    base_config(&cfg);
+
+    /* A peer that cannot carry even a one-byte EAK payload gets an ordinary
+     * cumulative ACK (nine-byte header only), not an oversized EAK. */
+    for (j = 0; j < 2u; j++) {
+        lsp_len = build_peer_lsp(peer_lsp, sizeof(peer_lsp), 4, tiny_len[j],
+                                 1000, 100, 3, 8, sessions,
+                                 sizeof(sessions));
+        peer_len = make_frame(peer_syn, sizeof(peer_syn), 0x80, 0x2a, 0, 0,
+                              peer_lsp, lsp_len, true);
+        CHECK(peer_len > tiny_len[j]);
+        handshake_with_peer_lsp(&g_link, &cfg, peer_syn, peer_len);
+        clear_events();
+        {
+            uint8_t discard[128];
+            (void)drain_all(&g_link, discard, sizeof(discard));
+        }
+
+        frame_len = make_frame(frame, sizeof(frame), 0x40, 0x32, 0x63, 3,
+                               &payload, 1u, true);
+        feed_frame(&g_link, frame, frame_len, 0);
+        expected_len = make_frame(expected, sizeof(expected), 0x40, 0x63,
+                                  0x2a, 0, NULL, 0, false);
+        CHECK(expected_len == 9u);
+        CHECK(expected_len <= tiny_len[j]);
+        CHECK(cp_link_output_pending(&g_link) == expected_len);
+        expect_wire_bytes(&g_link, expected, expected_len,
+                          "EAK fallback is a cumulative ACK");
+        CHECK(cp_link_stats(&g_link)->eak_sent == 0u);
+        CHECK(cp_link_stats(&g_link)->reset_count == 0u);
+        CHECK(cp_link_state(&g_link) == CP_LINK_STATE_NORMAL);
+        CHECK(cp_link_tick(&g_link, 1000u) == CP_LINK_OK);
+        expect_no_output(&g_link);
+    }
+
+    /* One-byte EAK payload capacity (max_len 11). Consume the truncated EAK,
+     * then close requested holes; each progress step must request the next
+     * remaining hole without a new gap threshold. */
+    lsp_len = build_peer_lsp(peer_lsp, sizeof(peer_lsp), 4, 11, 1000, 100, 3,
+                             8, sessions, sizeof(sessions));
+    peer_len = make_frame(peer_syn, sizeof(peer_syn), 0x80, 0x2a, 0, 0,
+                          peer_lsp, lsp_len, true);
+    handshake_with_peer_lsp(&g_link, &cfg, peer_syn, peer_len);
+    clear_events();
+    {
+        uint8_t discard[128];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x32, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    missing[0] = 0x2bu;
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0x2a,
+                              0, missing, 1u, true);
+    CHECK(expected_len == 11u);
+    CHECK(cp_link_output_pending(&g_link) == expected_len);
+    expect_wire_bytes(&g_link, expected, expected_len,
+                      "one-byte EAK fits max_len 11");
+    CHECK(g_link.eak_more);
+    CHECK(cp_link_stats(&g_link)->eak_sent == 1u);
+    CHECK(cp_link_output_pending(&g_link) == 0u);
+    CHECK(cp_link_tick(&g_link, 0u) == CP_LINK_OK);
+    CHECK(cp_link_tick(&g_link, 1000u) == CP_LINK_OK);
+    expect_no_output(&g_link);
+
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x2b, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    missing[0] = 0x2cu;
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0x2b,
+                              0, missing, 1u, true);
+    CHECK(expected_len == 11u);
+    CHECK(cp_link_output_pending(&g_link) == expected_len);
+    expect_wire_bytes(&g_link, expected, expected_len,
+                      "consumed EAK follows up after first hole fills");
+    CHECK(g_link.eak_more);
+    CHECK(cp_link_stats(&g_link)->eak_sent == 2u);
+
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x2c, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    missing[0] = 0x2du;
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0x2c,
+                              0, missing, 1u, true);
+    CHECK(expected_len == 11u);
+    expect_wire_bytes(&g_link, expected, expected_len,
+                      "next consumed EAK follows up again");
+    CHECK(g_link.eak_more);
+    CHECK(cp_link_stats(&g_link)->eak_sent == 3u);
+
+    /* Closing every remaining hole clears the truncated-followup state. */
+    frame_len = 0;
+    for (i = 0; i < 5u; i++) {
+        uint8_t value = (uint8_t)i;
+
+        frame_len += make_frame(stream + frame_len,
+                                sizeof(stream) - frame_len, 0x40,
+                                (uint8_t)(0x2du + i), 0x63, 3, &value, 1u,
+                                true);
+    }
+    feed_bytes(&g_link, stream, frame_len, 0);
+    CHECK(!g_link.eak_more);
+    total = drain_all(&g_link, out, sizeof(out));
+    CHECK(!drained_has_control(out, total, 0x20, NULL));
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_NORMAL);
+    CHECK(cp_link_stats(&g_link)->reset_count == 0u);
+
+    /* Two-byte EAK payload capacity (max_len 12). */
+    lsp_len = build_peer_lsp(peer_lsp, sizeof(peer_lsp), 4, 12, 1000, 100, 3,
+                             8, sessions, sizeof(sessions));
+    peer_len = make_frame(peer_syn, sizeof(peer_syn), 0x80, 0x2a, 0, 0,
+                          peer_lsp, lsp_len, true);
+    handshake_with_peer_lsp(&g_link, &cfg, peer_syn, peer_len);
+    clear_events();
+    {
+        uint8_t discard[128];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x32, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    missing[0] = 0x2bu;
+    missing[1] = 0x2cu;
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0x2a,
+                              0, missing, 2u, true);
+    CHECK(expected_len == 12u);
+    CHECK(cp_link_output_pending(&g_link) == expected_len);
+    expect_peek_bytes(&g_link, expected, expected_len,
+                      "two-byte EAK fits max_len 12");
+
+    /* The queued EAK is rewritten in place at the same ceiling as the first
+     * requested hole closes. */
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x2b, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    missing[0] = 0x2cu;
+    missing[1] = 0x2du;
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0x2b,
+                              0, missing, 2u, true);
+    CHECK(expected_len == 12u);
+    expect_wire_bytes(&g_link, expected, expected_len,
+                      "clamped EAK rewrite keeps max_len 12");
+    CHECK(g_link.eak_more);
+    CHECK(cp_link_stats(&g_link)->eak_sent == 1u);
+    CHECK(cp_link_tick(&g_link, 0u) == CP_LINK_OK);
+    expect_no_output(&g_link);
+
+    /* After consumption, the next requested hole advances the followup. */
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x2c, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    missing[0] = 0x2du;
+    missing[1] = 0x2eu;
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0x2c,
+                              0, missing, 2u, true);
+    CHECK(expected_len == 12u);
+    expect_wire_bytes(&g_link, expected, expected_len,
+                      "consumed max_len 12 EAK follows up");
+    CHECK(g_link.eak_more);
+    CHECK(cp_link_stats(&g_link)->eak_sent == 2u);
+
+    /* A larger bounded list is truncated to max_len - header - checksum. */
+    lsp_len = build_peer_lsp(peer_lsp, sizeof(peer_lsp), 4, 20, 1000, 100, 3,
+                             8, sessions, sizeof(sessions));
+    peer_len = make_frame(peer_syn, sizeof(peer_syn), 0x80, 0x2a, 0, 0,
+                          peer_lsp, lsp_len, true);
+    handshake_with_peer_lsp(&g_link, &cfg, peer_syn, peer_len);
+    clear_events();
+    {
+        uint8_t discard[128];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x38, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    fill_sequence(missing, 10u, 0x2bu);
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0x2a,
+                              0, missing, 10u, true);
+    CHECK(expected_len == 20u);
+    CHECK(cp_link_output_pending(&g_link) == expected_len);
+    expect_wire_bytes(&g_link, expected, expected_len,
+                      "larger EAK list is clamped to peer max_len");
+    CHECK(g_link.eak_more);
+    CHECK(cp_link_stats(&g_link)->eak_sent == 1u);
+    CHECK(cp_link_output_pending(&g_link) == 0u);
+    CHECK(cp_link_tick(&g_link, 0u) == CP_LINK_OK);
+    expect_no_output(&g_link);
+
+    /* After the truncated EAK is consumed, the first requested hole advances
+     * the list beyond the previously requested prefix. */
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x2b, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    fill_sequence(missing, 10u, 0x2cu);
+    expected_len = make_frame(expected, sizeof(expected), 0x20, 0x63, 0x2b,
+                              0, missing, 10u, true);
+    CHECK(expected_len == 20u);
+    expect_wire_bytes(&g_link, expected, expected_len,
+                      "consumed max_len 20 EAK follows up after a hole fills");
+    CHECK(g_link.eak_more);
+    CHECK(cp_link_stats(&g_link)->eak_sent == 2u);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_NORMAL);
+    CHECK(cp_link_stats(&g_link)->reset_count == 0u);
+
+    /* Cancellation clears truncated-followup state; a new generation starts
+     * clean. */
+    CHECK(cp_link_cancel(&g_link, CP_LINK_RESET_CANCELLED) == CP_LINK_OK);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_DEAD);
+    CHECK(!g_link.eak_more);
+    CHECK(!g_link.eak_due);
+    CHECK(g_link.eak_last_count == 0u);
+    expect_no_output(&g_link);
+    CHECK(cp_link_start(&g_link, CP_LINK_ROLE_PASSIVE, 100u) == CP_LINK_OK);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_DETECT);
+    CHECK(!g_link.eak_more);
+    expect_wire(&g_link, "ff550200ee10", "clean restart after truncated EAK");
+    puts("PASS: EAK respects peer max_len, clamps lists and falls back to ACK");
+}
+
+static void test_eak_ring_wrap_nonhead_compaction(void)
+{
+    cp_link_config_t cfg;
+    uint8_t peer_lsp[64];
+    uint8_t peer_syn[128];
+    uint8_t frame[CP_LINK_MAX_FRAME];
+    uint8_t stream[512];
+    uint8_t out[CP_LINK_MAX_FRAME * 2u];
+    const uint8_t sessions[] = {3, 0, 1};
+    const uint8_t payload = 0x23;
+    const uint8_t far_payload = 0x24;
+    size_t lsp_len;
+    size_t peer_len;
+    size_t frame_len;
+    size_t stream_len;
+    size_t total;
+    size_t offset;
+    size_t i;
+    unsigned acks = 0;
+
+    base_config(&cfg);
+    cfg.max_outgoing = 30;
+    lsp_len = build_peer_lsp(peer_lsp, sizeof(peer_lsp), 30, 12, 1000, 100,
+                             3, 8, sessions, sizeof(sessions));
+    peer_len = make_frame(peer_syn, sizeof(peer_syn), 0x80, 0x2a, 0, 0,
+                          peer_lsp, lsp_len, true);
+    handshake_with_peer_lsp(&g_link, &cfg, peer_syn, peer_len);
+    clear_events();
+    {
+        uint8_t discard[128];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+
+    /* Move the ring head to index 10 by draining 19 one-byte data frames. */
+    for (i = 0; i < 19u; i++) {
+        CHECK(cp_link_send(&g_link, CP_LINK_SESSION_CONTROL, &payload, 1u, 0) ==
+              CP_LINK_OK);
+        if ((i + 1u) % 10u == 0u) {
+            uint8_t discard[256];
+            (void)drain_all(&g_link, discard, sizeof(discard));
+        }
+    }
+    {
+        uint8_t discard[256];
+        (void)drain_all(&g_link, discard, sizeof(discard));
+    }
+    CHECK(cp_link_output_pending(&g_link) == 0u);
+    CHECK(g_link.out_head == 10u);
+    CHECK(g_link.out_count == 0u);
+
+    /* Queue ACK(index 10), EAK(index 11), ACK(index 0): a wrapped ring with
+     * the EAK in the middle. */
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x2a, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x49, 0x63, 3,
+                           &far_payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    frame_len = make_frame(frame, sizeof(frame), 0x40, 0x2a, 0x63, 3,
+                           &payload, 1u, true);
+    feed_frame(&g_link, frame, frame_len, 0);
+    CHECK(g_link.eak_more);
+    CHECK(cp_link_output_pending(&g_link) ==
+          CP_LINK_HEADER_LEN + 12u + CP_LINK_HEADER_LEN);
+
+    /* Closing every hole retracts the middle EAK and compacts the wrapped
+     * trailing ACK into its place. */
+    stream_len = 0;
+    for (i = 0; i < 30u; i++) {
+        uint8_t value = (uint8_t)i;
+
+        stream_len += make_frame(stream + stream_len,
+                                 sizeof(stream) - stream_len, 0x40,
+                                 (uint8_t)(0x2bu + i), 0x63, 3, &value, 1u,
+                                 true);
+    }
+    feed_bytes(&g_link, stream, stream_len, 0);
+    CHECK(!g_link.eak_more);
+    CHECK(cp_link_state(&g_link) == CP_LINK_STATE_NORMAL);
+    CHECK(cp_link_stats(&g_link)->reset_count == 0u);
+
+    total = drain_all(&g_link, out, sizeof(out));
+    offset = 0;
+    while (offset < total) {
+        size_t length;
+        uint8_t sum = 0;
+
+        CHECK(total - offset >= CP_LINK_HEADER_LEN);
+        length = ((size_t)out[offset + 2u] << 8) | out[offset + 3u];
+        CHECK(length == CP_LINK_HEADER_LEN);
+        CHECK(out[offset + 4u] == 0x40u);
+        for (i = 0; i < CP_LINK_HEADER_LEN; i++)
+            sum = (uint8_t)(sum + out[offset + i]);
+        CHECK(sum == 0u);
+        offset += length;
+        acks++;
+    }
+    CHECK(offset == total);
+    CHECK(acks >= 2u);
+    puts("PASS: wrapped ring compacts a non-head EAK without corrupting output");
 }
 
 static void test_eak_output_burst_is_deferred(void)
@@ -2163,7 +3202,17 @@ int main(void)
     test_window_full_backpressure();
     test_sequence_wrap_and_duplicates();
     test_retransmit_identical_and_ack();
+    test_retransmit_refreshes_ack();
+    test_retransmit_partial_queue_is_immutable();
     test_eak_and_out_of_window();
+    test_eak_recomputes_missing_list();
+    test_eak_stale_gap_fill_retracts_frame();
+    test_eak_full_output_is_deferred();
+    test_eak_partial_output_is_immutable();
+    test_eak_partial_truncated_followup();
+    test_eak_modulo_and_pending_clear();
+    test_eak_peer_max_len_capacity();
+    test_eak_ring_wrap_nonhead_compaction();
     test_eak_output_burst_is_deferred();
     test_reset_cancel_and_generation();
     test_handshake_bounds_and_marker();
