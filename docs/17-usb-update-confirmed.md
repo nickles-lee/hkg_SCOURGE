@@ -5,7 +5,72 @@ through the ordinary head-unit updater (`Settings > General > Software
 Update > Update via USB`) from an exFAT flash drive. No TOCTOU rig, no race,
 no partition write from userspace.
 
-TARGET: Ioniq 5 Gen5W_L (Linux), firmware `NE_E.EUR.S5W_L.001.001.260128` (EU).
+The **TOCTOU path** — the same update delivered by the dynamic gadget instead of
+a pre-written drive — was car-validated on 2026-11-21; the evidence is in *The
+TOCTOU path* below.
+
+TARGET: Ioniq 5 Gen5W_L (Linux), firmware `NE_E.EUR.S5W_L.001.001.260128` (EU) —
+the 2026-11-21 TOCTOU run below was a **2021 Ioniq 5 RWD** (`prm-gen-5`, kernel
+`4.1.27-abl`).
+
+## The TOCTOU path — car-validated 2026-11-21
+
+Same car, different mechanism: instead of the stub packages above, the patched
+rootfs went through the dynamic-media race. A Pi 4 in USB-C peripheral mode
+served the 28.9 GB image through `nbdkit` from an exFAT stick, with one
+`benign_then_evil` region over the rootfs container (`off` 5 505 024, `len`
+879 126 179, `switch_after_pass` 2). The head unit mounted that image (volume
+serial `7FFF-77F0` — that is bare exFAT `out/usb.img`) and the update ran from
+`Settings > General > Software Update > Update via USB`, accepted as a
+same-version 260128 reinstall.
+
+Rig side, `/var/log/toctou.log`, session `705e3006`:
+
+| pass | served | bytes | duration | rate |
+|---|---|---|---|---|
+| #1 — the engine's md5 sweep of the container | `GENUINE` | 879,108,096 | 186.71 s | 4.7 MB/s |
+| `*** SWITCH at pass #2 ***` | | | 12:39:07 UTC | |
+| #2 — the install read | `EVIL` | 861,851,648 | open until shutdown | (lower bound only) |
+
+The same session as the collector's rows record it
+(`out/rig-logs/20261121T131757Z/`), which is what `scripts/22_collect_rig_logs.sh`
+parses into `values.json` (docs/04):
+
+| step | evidence |
+|---|---|
+| check pass | `PASS #1 END reads=214626 bytes_genuine=879108096 bytes_evil=0 served=GENUINE dur=186.71s` |
+| switch | `*** SWITCH at pass #2 (mode=benign_then_evil) ***` at mono 702.563 |
+| install pass | 210 413 reads served from `stage1.te2`, `off` 5 505 024 → 884 625 408, mono 702.566 → 3013.237 |
+| root channel after boot | `uid=0`, `uname=Linux prm-gen-5 4.1.27-abl`, `smack_flag=present`, loader md5 `3a244ac1…` |
+
+There is no `PASS #2 END` line: the update ended without another sweep, so the
+per-read timeline (211 k evil reads covering the whole region) is the record, not
+a summary row, and pass #2's duration runs to shutdown — its rate is a lower
+bound, not a measurement.
+
+Head unit side, `/log_data/AppUpgrade/upgrade_log`: `mkfs.ext4` on
+`/dev/mmcblk0p5` at 12:39:03, rootfs install 12:39:06 → 12:40:59 (**113 s for
+879.1 MB = 7.8 MB/s**), `[UPDATE_DONE]` 13:08:34, `System Update Complete!!, 100`
+13:08:42 — **34 min 21 s** from the first read. A stock-stick run on 2026-07-26
+(volume `9C14-E5DD`) spent the same **113 s** on that step, so the rig does not
+slow the update: the head unit's decrypt → `zcat` → `tar` → ext4 pipeline is the
+limit, and its md5 sweep is the slowest single read at 4.7 MB/s.
+
+`smack_flag=present` is *not* a promotion of docs/08's gate 6: it records that
+the flag file and the patched setup script are on the unit, which is that gate's
+precondition. Gate 6 asks whether `chsmack`/`setfattr` actually work from the `_`
+label after boot, and no such attempt was run — that stays pending, one step
+closer.
+
+That the *installed* tree was the swapped one is visible without trusting the
+log: the engine reformatted the rootfs partition first, and the next boot's
+preflight shows `/etc/initial_root/{run_stuff_loader.sh,updater_guard.sh}` dated
+into the install window (2026-11-21 12:40) — stock has no `/etc/initial_root`.
+
+The updater stubs survived the flash: `31c0c3` at five offsets in `AppUpgrade`
+(2 086 500, 2 086 852, 2 086 916, 2 087 076, 7 346 024) and two in `AppScomoDM`
+(930 864, 930 928). The installed `AppUpgrade` md5 is `55e522e37e85b9a7c599f9f17fc1a580`,
+`AppScomoDM` is `45f881b3b08f40e6e07c03988e441341`.
 
 ## What the image contains
 

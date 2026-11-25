@@ -87,6 +87,37 @@ sudo ./03_deploy_gadget.sh ~/$PI_DIR/build/usb.img ~/$PI_DIR/build/regions.json
 sudo ./99_teardown.sh              # unwind the gadget
 ```
 
+## Collecting the flash logs (22)
+
+A run is judged on the numbers its logs carry, so they are pulled and parsed
+rather than read over ssh:
+
+```sh
+scripts/22_collect_rig_logs.sh              # -> out/rig-logs/<stamp>/
+scripts/22_collect_rig_logs.sh --watch 300  # re-pull whenever the log changes
+```
+
+It rsyncs `/var/log/toctou.log` (the plugin's log), `/var/log/toctou-reads.log`
+(the per-read timeline) and the archived `toctou-reads.log.bench`, and writes the
+board's own state (`uname`, `uptime`, the UDC, `regions.json`, the `serve.img`
+pointer) and the `toctou-gadget` journal next to them, so a session can be read
+without the board. `--host`/`--user` override `config/paths.local.env` for a rig
+that answers on another address.
+
+`values.json` in the bundle is the log parsed into the pass table: session id,
+what was served, image size, the region, and per pass the served side, bytes,
+duration and MB/s. A last pass closed by shutdown rather than by the next sweep is
+flagged `mbps_lower_bound_only` — its duration includes idle time, so its rate is
+not a measurement.
+
+What those numbers looked like on the car run (`docs/17`): 4.7 MB/s on the
+engine's md5 sweep, ~0.37 MB/s on the install pass, and 113 s on the head unit for
+the 879.1 MB rootfs (7.8 MB/s) — the same 113 s a stock stick takes, so the rig did
+not slow the update: the head unit's `tar` throttles the read, not the link. Two
+traps when measuring the medium: a `sha256sum` sweep of the same stick in the
+background halves every number, and a second read of an offset measures the page
+cache instead of the medium.
+
 ## regions.json
 
 Emitted by `scripts/08_build_usb_image.sh`:
