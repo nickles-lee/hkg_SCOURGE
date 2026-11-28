@@ -91,5 +91,17 @@ packages/wifi1b/src/wifi1b_daemon
 packages/wifi1b/src/wifi1b_qmlpatch
 packages/wifi1b/artifacts/assets/wifi1b/
 packages/tweaks/src/tweaks_daemon
+packages/projection/src/projection_daemon
 packages/tweaks/src/tweaks_persist
 packages/tweaks/src/wrandr_wrapper
+
+# --- HUD Nav backend (WIP) ----------------------------------------------------
+# Host-only build/runtime outputs. Generated from the owner's own firmware;
+# never commit a shim, daemon binary, generated header, kit or car capture.
+packages/hudnav/build/
+packages/hudnav/out/
+packages/hudnav/src/hudnavd
+packages/hudnav/src/*.so
+packages/hudnav/tests/fixtures/
+packages/hudnav/captures/
+packages/projection/design/shots/

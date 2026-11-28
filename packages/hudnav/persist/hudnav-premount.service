@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=HUD Nav: bind-mount patched AA/CarPlay binaries before the vendor UI services
+# /rw_data is mounted from /etc/fstab_emmc (symlinked to /etc/fstab by /lib/systemd/esinit
+# before systemd starts). fstab-generated mounts are part of local-fs.target, so this
+# ordering is what guarantees the kit and the two .so files are readable here.
+After=local-fs.target
+# carplay_iAP2.service is the unit that execs /app/bin/iAP2Service-2.0. It is itself
+# Before=ApplicationLauncher.service, which spawns AppProjection. Ordering before both
+# (and before our own late boot script) means both services exec the patched copies
+# on their FIRST start; nothing needs a restart. The boot guard already uses the same
+# Before= pair for its early check.
+Before=carplay_iAP2.service ApplicationLauncher.service hudnav-aa.service
+
+[Service]
+# Fail-closed script: it exits 0 even on REFUSE, so a bad kit leaves a stock boot
+# instead of failing a dependency of the vendor units. RemainAfterExit keeps the
+# oneshot "active" for status/debugging; it has no daemon and no restart logic.
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=30
+ExecStart=/bin/sh /rw_data/hudnav/bin/hudnav-premount.sh
+
+[Install]
+WantedBy=multi-user.target

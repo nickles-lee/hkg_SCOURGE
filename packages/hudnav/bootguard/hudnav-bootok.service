@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=HUD Nav boot guard (late: confirm home screen)
+After=ApplicationLauncher.service
+
+[Service]
+Type=simple
+ExecStart=/bin/sh /rw_data/hudnav-bootguard/hudnav-bootguard.sh ok
+
+[Install]
+WantedBy=multi-user.target

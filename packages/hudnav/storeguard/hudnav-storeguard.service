@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=HUD Nav settings-store guard (restore shared-public index before PAS)
+# OPEN QUESTION: /Data/mnt-wt MUST be mounted before this oneshot runs.
+# Read-only check done in the vendor rootfs: three fstab templates mount
+# /dev/mmcblk0p12 at /Data/mnt-wt, /etc/fstab is a symlink to /tmp/fstab
+# (generated at boot), and NO /lib/systemd/system/*.mount unit mentions mnt-wt.
+# So mounting depends on fstab -> local-fs.target, which must be verified on
+# the car (read-only) before this unit is ever installed: does this check see
+# the real /Data/mnt-wt/shared/public, or the empty mountpoint?
+DefaultDependencies=no
+After=local-fs.target
+Before=pas-daemon.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /rw_data/hudnav-storeguard/hudnav-storeguard.sh check
+
+[Install]
+WantedBy=multi-user.target

@@ -58,6 +58,7 @@ This is likely readily adaptable to other cars & environments, but I am noting t
 | Battery / WiFi+SSH / Tweaks (incl. Reboot) app packages | Work-in-progress; the WiFi package is VM-validated on the vendor kernel/Qt (on-car retest pending). Reboot's clean path and daemon endpoint are host/QML-tested; the micom hard-reset fallback is host-tested with a fake D-Bus helper and derived from the vendor script (car pending) |
 | Rust apps/daemons (host-built static musl) | WIP — host build/package path offline-validated; sample `scourge-statusd` VM-validated on the vendor kernel; car pending. No Rust toolchain or runtime is installed on the unit; see `docs/19-rust-apps.md` |
 | Java 25 runtime (headless, JAR apps/daemons) | WIP — Temurin 25.0.5.1+2 jlink runtime VM-validated on the vendor and compat kernels; car pending. Installs under `/rw_data/java`, app JARs in `/rw_data/java-apps`; no GUI/X11 and no `javac` in the default build; see `docs/21-java-runtime.md` |
+| HUD Nav backend (`packages/hudnav`, WIP) | Car-proven only on the owner's AU Ioniq 5 `NE_E.AUS.S5W_L.001.001.260319` with factory HUD; every other firmware, region, trim and platform is untested. Host tests and VM loader/replay proofs pass; see `packages/hudnav/docs/STATUS.md` |
 | Tweaks: safety-disclaimer auto-accept | Working reliably |
 | Kia EV6 MY22–24 (EU, Gen5W_L), `CV_E.EUR.S5W_L.001.001.260128` | Fixture captured; payload byte-identical to the Ioniq 5 260128 package. Target wiring/build is WIP — not car-validated (docs/20) |
 | Any other firmware, region or vehicle | Untested — see the porting runbook before trying |
@@ -150,7 +151,7 @@ If a markdown file in this repo is handwritten, I will highlight that. The READM
 | `docs/ui/` | The Gen5W UI/UX research: styleguide, deployment modes (A–L), UX behavior patterns, design tokens, component library, glossary, and 15 evidence reports |
 | `scripts/` | The build pipeline (fetch → stage → decrypt → patch → repack → verify → package → image → preflight → Pi deploy), plus the VM build and car-asset capture dispatchers |
 | `payload/` | What gets baked into the rootfs: the failsafe, the eleven-stub patch tables, the sample run_stuff.sh |
-| `packages/` | Battery, WiFi (+CarPlay+SSH), Tweaks (incl. the Reboot overlay) — sources, patchers, installers — plus `compose.sh` (the combo-stick builder) |
+| `packages/` | Battery, WiFi (+CarPlay+SSH), Tweaks (incl. the Reboot overlay), HUD Nav (WIP backend for Projection+), Projection+ — sources, patchers, installers — plus `compose.sh` (the combo-stick builder) |
 | `tools/` | First-party firmware-format tools, the update-debug (dmclient_gate/button_gate) tooling, the optional Ghidra/carve porting aids, `tools/micom/` (command/signal-table and MCU-image readers), the VM build/fidelity scripts, and `tools/car-assets/` (car runtime asset capture/extraction) |
 | `verify/` | Offline package verification |
 | `config/` | `firmware_locks.env` (the compatibility pins), `third_party.lock` (fetch pins), paths/key examples |

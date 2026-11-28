@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=HUD Nav: Android Auto -> HUD (hudnavd after the session bus; overlay made by hudnav-premount.service)
+After=ApplicationLauncher.service hudnav-bootguard.service hudnav-premount.service
+
+[Service]
+# oneshot + RemainAfterExit keeps the unit "active" so systemd does not kill hudnavd (started from
+# this cgroup by hudnav-run.sh) when the script exits. The script waits up to ~8 min in total.
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=900
+ExecStart=/bin/sh /rw_data/hudnav/bin/hudnav-aa-boot.sh start
+
+[Install]
+WantedBy=multi-user.target

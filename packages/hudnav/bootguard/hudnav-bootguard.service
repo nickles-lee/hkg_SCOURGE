@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=HUD Nav boot guard (early: count unconfirmed boots, roll back on two)
+After=local-fs.target
+Before=ApplicationLauncher.service carplay_iAP2.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /rw_data/hudnav-bootguard/hudnav-bootguard.sh early
+
+[Install]
+WantedBy=multi-user.target
